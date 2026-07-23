@@ -22,7 +22,7 @@ pub struct AppState {
 
 /// 构造默认状态（256 容量的 EventBus + 内置示例宏）。
 pub fn create_state() -> AppState {
-    let event_bus = Arc::new(EventBus::new(256));
+    let event_bus = Arc::new(EventBus::new(1024));
     let manager = Arc::new(SerialManager::new(event_bus.clone()));
     let macros = Arc::new(default_macros());
     AppState { manager, event_bus, macros }

@@ -96,49 +96,64 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
         .write_all(format!("\r\n已连接 {}。直接输入即发送，关闭窗口退出。\r\n", port).as_bytes())
         .await;
 
-    // 订阅 EventBus（过滤本端口数据）
+    // 拆分读写为两个独立 future 并发跑，避免「写入串口」的 await 期间
+    // 串口回显数据堆积在 EventBus 被 lagged 丢弃（快速输入时表现为回显吞字符）
     let mut event_rx = state.event_bus.subscribe();
-    let mut read_buf = vec![0u8; 1024];
+    let (mut rd, mut wr) = stream.into_split();
+    let port_for_read = port.clone();
+    let port_for_log = port.clone();
+    let mgr = state.manager.clone();
 
-    loop {
-        tokio::select! {
-            // 串口 → 客户端
-            event = event_rx.recv() => {
-                match event {
-                    Ok(SerialEvent::DataReceived { port: p, data }) if p == port => {
-                        if stream.write_all(&data).await.is_err() { break; }
-                    }
-                    Ok(SerialEvent::PortClosed { port: p }) if p == port => {
-                        let _ = stream.write_all("\r\n[串口已关闭]\r\n".as_bytes()).await;
-                        break;
-                    }
-                    Ok(SerialEvent::Error { port: p, message }) if p == port => {
-                        let _ = stream.write_all(format!("\r\n[错误: {}]\r\n", message).as_bytes()).await;
-                    }
-                    Err(_) => break,
-                    _ => {}
-                }
-            }
-            // 客户端 → 串口
-            n = stream.read(&mut read_buf) => {
-                match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let (payload, _resp) = filter_telnet(&read_buf[..n]);
-                        // 剥离 NUL：telnet 回车发送 \r\0，不剥离会残留 \0
-                        let filtered: Vec<u8> = payload.into_iter().filter(|&b| b != 0).collect();
-                        if !filtered.is_empty() {
-                            let _ = state
-                                .manager
-                                .write(port.clone(), bytes::Bytes::from(filtered))
-                                .await;
-                        }
+    // 客户端 → 串口
+    let read_fut = async move {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let (payload, _) = filter_telnet(&buf[..n]);
+                    // 剥离 NUL：telnet 回车发送 \r\0
+                    let filtered: Vec<u8> = payload.into_iter().filter(|&b| b != 0).collect();
+                    if !filtered.is_empty() {
+                        let _ = mgr
+                            .write(port_for_read.clone(), bytes::Bytes::from(filtered))
+                            .await;
                     }
                 }
             }
         }
+    };
+
+    // 串口 → 客户端
+    let event_fut = async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(SerialEvent::DataReceived { port: p, data }) if p == port => {
+                    if wr.write_all(&data).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(SerialEvent::PortClosed { port: p }) if p == port => {
+                    let _ = wr.write_all("\r\n[串口已关闭]\r\n".as_bytes()).await;
+                    return;
+                }
+                Ok(SerialEvent::Error { port: p, message }) if p == port => {
+                    let _ = wr
+                        .write_all(format!("\r\n[错误: {}]\r\n", message).as_bytes())
+                        .await;
+                }
+                Err(_) => return,
+                _ => {}
+            }
+        }
+    };
+
+    // 任一 future 结束（客户端断开 / 串口关闭）则退出
+    tokio::select! {
+        _ = read_fut => {},
+        _ = event_fut => {},
     }
-    tracing::info!("telnet 客户端断开: {}", port);
+    tracing::info!("telnet 客户端断开: {}", port_for_log);
     Ok(())
 }
 

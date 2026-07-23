@@ -1,3 +1,7 @@
+// release 模式 Windows 用 GUI 子系统：双击不弹 cmd 黑窗。
+// debug 保留 console，方便看 tracing/panic。
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 //! Serial Studio Tauri 桌面应用。
 //!
 //! 双模式：
@@ -31,6 +35,11 @@ struct Args {
 }
 
 fn main() {
+    // windows_subsystem="windows" 下 stdout 默认无效。从终端启动时 attach 父 console
+    // 恢复 stdout（--no-gui 或终端跑能看日志）；双击无父 console，静默跳过。
+    #[cfg(target_os = "windows")]
+    let _ = attach_parent_console();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -146,4 +155,47 @@ async fn shutdown_signal() {
 #[cfg(not(unix))]
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.unwrap();
+}
+
+/// 在 windows_subsystem="windows" 下把 stdout/stderr 接回父进程的 console。
+/// 双击启动时无父 console（AttachConsole 失败）→ 返回 false，程序继续无日志输出。
+/// 从 cmd/PowerShell 启动 → attach 成功，日志正常显示。
+#[cfg(target_os = "windows")]
+fn attach_parent_console() -> bool {
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileA, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        // 已有 stdout（debug 模式 console 子系统）→ 不需要 attach
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !existing.is_null() && existing != INVALID_HANDLE_VALUE {
+            return true;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return false; // 双击启动，无父 console
+        }
+        let name = b"CONOUT$\0";
+        let out = CreateFileA(
+            name.as_ptr(),
+            (GENERIC_READ | GENERIC_WRITE) as u32,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        );
+        if out.is_null() || out == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        SetStdHandle(STD_OUTPUT_HANDLE, out);
+        SetStdHandle(STD_ERROR_HANDLE, out);
+        true
+    }
 }

@@ -119,7 +119,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_msg(&text, &state, &out_tx).await;
+                        // spawn 命令处理：避免 manager.write/open 等 await 阻塞 out_rx 消费，
+                        // 否则 out channel 积压 → event_task 阻塞 → EventBus lagged 丢回显（快速输入吞字）
+                        let state = state.clone();
+                        let out_tx = out_tx.clone();
+                        tokio::spawn(async move {
+                            handle_client_msg(&text, &state, &out_tx).await;
+                        });
                     }
                     Some(Ok(Message::Binary(_))) => {
                         let _ = out_tx
