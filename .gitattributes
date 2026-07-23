@@ -1,0 +1,2 @@
+# 统一行尾：git 仓库内统一 LF，checkout 时按平台转换（消除 LF/CRLF 警告）
+* text=auto

@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/server", "crates/tauri-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# 内部 crate
+ss-core = { path = "crates/core" }
+ss-server = { path = "crates/server" }
+
+# 异步运行时
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 错误处理
+anyhow = "1.0"
+thiserror = "1.0"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Web 框架（统一 HTTP + WS + MCP）
+axum = { version = "0.7", features = ["ws"] }
+
+# 串口
+serialport = "4.7"
+
+# 字节
+bytes = "1.7"
+
+# 编码
+hex = "0.4"
+
+# 命令行
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

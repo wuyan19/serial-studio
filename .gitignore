@@ -1,0 +1,16 @@
+# Rust 构建产物
+/target
+
+# 前端依赖与构建产物
+/ui/node_modules
+/ui/dist
+
+# Tauri 生成物（build 时由 tauri-build 重新生成）
+/crates/tauri-app/gen
+
+# 移动端图标（桌面项目不需要，tauri icon 生成）
+/crates/tauri-app/icons/android
+/crates/tauri-app/icons/ios
+
+# 临时图标源（生成各平台图标用，不入库）
+/crates/tauri-app/app-icon.png

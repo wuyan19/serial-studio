@@ -1,0 +1,23 @@
+[package]
+name = "ss-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serial Studio Tauri 桌面壳"
+
+[[bin]]
+name = "ss-tauri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ss-server = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tauri = { version = "2", features = ["devtools"] }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
