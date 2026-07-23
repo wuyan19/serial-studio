@@ -110,6 +110,7 @@ pub async fn run(
     });
 
     // command 循环（主 task）：串口写入串行化，天然单写者
+    let mut close_response: Option<oneshot::Sender<()>> = None;
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
             PortCommand::Write(data, response_tx) => {
@@ -128,13 +129,17 @@ pub async fn run(
             }
             PortCommand::Close(response_tx) => {
                 tracing::info!("关闭端口: {}", port_name);
-                let _ = response_tx.send(());
+                // 不立即回 response：先让读线程退出、port 释放，否则 close 后立刻重开
+                // 会因读线程仍持有 handle 而端口占用打不开
+                close_response = Some(response_tx);
                 break;
             }
         }
     }
 
-    // 通知读线程退出并等待（read timeout 100ms 后它会检查 quit 返回）
+    // 通知读线程退出并等待（read timeout 100ms 后它会检查 quit 返回）。
+    // 必须等读线程退出、port 真正释放，才能回 close response——否则 manager.close
+    // 返回后立刻重开同端口会因读线程仍持有 handle 而失败。
     quit.store(true, Ordering::Relaxed);
     let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
 
@@ -142,4 +147,9 @@ pub async fn run(
         port: port_name.clone(),
     });
     tracing::info!("端口任务结束: {}", port_name);
+
+    // 读线程已退出、port 已释放，现在才回 close response
+    if let Some(tx) = close_response {
+        let _ = tx.send(());
+    }
 }

@@ -39,15 +39,11 @@ enum ServerMsg {
     Closed { port: String },
     Error { message: String },
     Ok { message: String },
-    Macros { macros: Vec<MacroInfo> },
+    Macros {
+        macros: std::collections::BTreeMap<String, ss_core::Macro>,
+    },
     MacroResult { name: String, success: bool, message: String },
-}
-
-/// 宏摘要（list_macros 返回）。
-#[derive(Serialize)]
-struct MacroInfo {
-    name: String,
-    description: Option<String>,
+    Settings { settings: crate::settings::Settings },
 }
 
 /// 客户端 → 服务器 消息。
@@ -69,6 +65,15 @@ enum ClientMsg {
     },
     ListMacros,
     RunMacro { name: String, port: String },
+    GetSettings,
+    SaveSettings {
+        settings: crate::settings::Settings,
+    },
+    SaveMacro {
+        name: String,
+        r#macro: ss_core::Macro,
+    },
+    DeleteMacro { name: String },
 }
 
 fn default_encoding() -> String {
@@ -244,19 +249,14 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
             }
         }
         ClientMsg::ListMacros => {
-            let macros: Vec<MacroInfo> = state
-                .macros
-                .iter()
-                .map(|(n, m)| MacroInfo {
-                    name: n.clone(),
-                    description: m.description.clone(),
-                })
-                .collect();
+            let macros = state.macros.read().unwrap().clone();
             let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
         }
         ClientMsg::RunMacro { name, port } => {
-            let mac = match state.macros.get(&name) {
-                Some(m) => m.clone(),
+            // guard 限单语句，cloned 后立即 drop，避免跨 await
+            let cloned = state.macros.read().unwrap().get(&name).cloned();
+            let mac = match cloned {
+                Some(m) => m,
                 None => {
                     let _ = out_tx
                         .send(to_json(ServerMsg::Error { message: format!("宏 {} 不存在", name) }))
@@ -285,6 +285,54 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
             });
+        }
+        ClientMsg::GetSettings => {
+            let s = state.settings.read().unwrap().clone();
+            let _ = out_tx.send(to_json(ServerMsg::Settings { settings: s })).await;
+        }
+        ClientMsg::SaveSettings { settings } => {
+            match crate::settings::save(&settings) {
+                Ok(()) => {
+                    *state.settings.write().unwrap() = settings.clone();
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Settings { settings }))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
+                }
+            }
+        }
+        ClientMsg::SaveMacro { name, r#macro } => {
+            // RwLock guard 不跨 await：块内完成写+落盘+clone，块外再 send
+            let result = {
+                let mut map = state.macros.write().unwrap();
+                map.insert(name.clone(), r#macro);
+                crate::macros_store::save(&map).map(|_| map.clone())
+            };
+            match result {
+                Ok(macros) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
+                }
+                Err(e) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
+                }
+            }
+        }
+        ClientMsg::DeleteMacro { name } => {
+            let result = {
+                let mut map = state.macros.write().unwrap();
+                map.remove(&name);
+                crate::macros_store::save(&map).map(|_| map.clone())
+            };
+            match result {
+                Ok(macros) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
+                }
+                Err(e) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
+                }
+            }
         }
     }
 }

@@ -3,13 +3,15 @@
 //! 抽成 lib 是为了让 Tauri app（GUI 模式）和独立 ss-server bin（headless 模式）
 //! 共用同一套路由——方案 B 的核心：一份后端，两种宿主。
 
+mod macros_store;
 mod mcp;
+pub mod settings;
 pub mod telnet;
 mod ws;
 
 use axum::{extract::State, routing::{get, post}, Json, Router};
-use ss_core::{EventBus, Macro, MacroStep, SerialManager};
-use std::collections::HashMap;
+use ss_core::{EventBus, Macro, SerialManager};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// 应用共享状态：GUI 模式和 headless 模式共用。
@@ -17,39 +19,24 @@ use std::sync::Arc;
 pub struct AppState {
     pub manager: Arc<SerialManager>,
     pub event_bus: Arc<EventBus>,
-    pub macros: Arc<HashMap<String, Macro>>,
+    pub macros: Arc<std::sync::RwLock<BTreeMap<String, Macro>>>,
+    pub settings: Arc<std::sync::RwLock<settings::Settings>>,
 }
 
 /// 构造默认状态（256 容量的 EventBus + 内置示例宏）。
 pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let manager = Arc::new(SerialManager::new(event_bus.clone()));
-    let macros = Arc::new(default_macros());
-    AppState { manager, event_bus, macros }
+    let macros = Arc::new(std::sync::RwLock::new(macros_store::load()));
+    let settings = Arc::new(std::sync::RwLock::new(settings::load()));
+    AppState {
+        manager,
+        event_bus,
+        macros,
+        settings,
+    }
 }
 
-/// 内置示例宏（后续可改为从配置文件加载）。
-fn default_macros() -> HashMap<String, Macro> {
-    let mut m = HashMap::new();
-    m.insert(
-        "at_test".into(),
-        Macro {
-            description: Some("AT 测试：发送 AT，等待 OK".into()),
-            steps: vec![
-                MacroStep::Send { data: "AT".into(), format: "text".into(), auto_newline: true },
-                MacroStep::Expect { pattern: "OK".into(), timeout_ms: 3000 },
-            ],
-        },
-    );
-    m.insert(
-        "clear_buf".into(),
-        Macro {
-            description: Some("清空接收缓冲区".into()),
-            steps: vec![MacroStep::Clear],
-        },
-    );
-    m
-}
 
 /// 构造 axum 路由。GUI/headless 共用。
 pub fn create_router(state: AppState) -> Router {

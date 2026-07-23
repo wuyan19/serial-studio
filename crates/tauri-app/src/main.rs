@@ -20,18 +20,6 @@ struct Args {
     /// 禁用 GUI，以 headless 模式运行（仅后台服务）
     #[arg(long)]
     no_gui: bool,
-
-    /// HTTP/WS/MCP 服务器监听地址。GUI 模式默认仅本机。
-    #[arg(long, default_value = "127.0.0.1")]
-    ws_host: String,
-
-    /// HTTP/WS/MCP 服务器端口
-    #[arg(long, default_value_t = 8080)]
-    ws_port: u16,
-
-    /// Telnet 服务器端口
-    #[arg(long, default_value_t = 8766)]
-    telnet_port: u16,
 }
 
 fn main() {
@@ -50,22 +38,23 @@ fn main() {
     let args = Args::parse();
 
     if args.no_gui {
-        run_headless(args).expect("headless 运行失败");
+        run_headless().expect("headless 运行失败");
     } else {
-        run_gui(args);
+        run_gui();
     }
 }
 
 /// Headless：WS/MCP + Telnet（共享 state）。
-fn run_headless(args: Args) -> anyhow::Result<()> {
+fn run_headless() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let state = create_state();
+        let s = state.settings.read().unwrap().clone();
 
         // Telnet（共享 state：与 WS/MCP 操作同一组串口）
-        let telnet_addr = format!("{}:{}", args.ws_host, args.telnet_port);
+        let telnet_addr = format!("{}:{}", s.ws_host, s.telnet_port);
         let telnet_state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = ss_server::telnet::run_telnet(telnet_addr, telnet_state).await {
@@ -75,7 +64,7 @@ fn run_headless(args: Args) -> anyhow::Result<()> {
 
         // HTTP/WS/MCP
         let app = create_router(state);
-        let addr = format!("{}:{}", args.ws_host, args.ws_port);
+        let addr = format!("{}:{}", s.ws_host, s.ws_port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!(
             "服务: ws://{}/ws · /mcp · http://{}/api/ports",
@@ -91,9 +80,10 @@ fn run_headless(args: Args) -> anyhow::Result<()> {
 }
 
 /// GUI：Tauri 窗口 + 后台 WS/MCP/Telnet 服务器（全部共享同一 state）。
-fn run_gui(args: Args) {
-    let ws_addr = format!("{}:{}", args.ws_host, args.ws_port);
-    let telnet_addr = format!("{}:{}", args.ws_host, args.telnet_port);
+fn run_gui() {
+    let s = ss_server::settings::load();
+    let ws_addr = format!("{}:{}", s.ws_host, s.ws_port);
+    let telnet_addr = format!("{}:{}", s.ws_host, s.telnet_port);
 
     tauri::Builder::default()
         .setup(move |_app| {
