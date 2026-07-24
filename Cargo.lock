@@ -3204,7 +3204,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "clap",
+ "hex",
+ "serde_json",
  "ss-core",
  "ss-server",
  "tauri",

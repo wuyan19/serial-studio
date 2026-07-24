@@ -12,7 +12,8 @@
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
 use clap::Parser;
-use tauri::Manager;
+use ss_server::AppState;
+use tauri::{Emitter, Manager};
 use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
 use ss_server::create_state;
@@ -111,6 +112,94 @@ async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> R
     Ok(())
 }
 
+// ===== 数据面：Tauri command（本地模式 IPC，与 axum WS 是同一核心域的两个 adapter）=====
+
+#[tauri::command]
+async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::PortInfo>, String> {
+    Ok(state.manager.list_ports().await)
+}
+
+#[tauri::command]
+async fn open_port(
+    state: tauri::State<'_, AppState>,
+    port: String,
+    config: ss_core::SerialConfig,
+) -> Result<(), String> {
+    state.manager.open(port, config).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn close_port(state: tauri::State<'_, AppState>, port: String) -> Result<(), String> {
+    state.manager.close(port).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn write_port(
+    state: tauri::State<'_, AppState>,
+    port: String,
+    data: String,
+) -> Result<usize, String> {
+    state
+        .manager
+        .write(port, bytes::Bytes::from(data.into_bytes()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn run_macro(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    port: String,
+    r#macro: ss_core::Macro,
+) -> Result<(), String> {
+    let manager = state.manager.clone();
+    let app = app.clone();
+    tokio::spawn(async move {
+        let result = ss_core::run_macro(&port, &r#macro, &manager).await;
+        let (success, message) = match result {
+            Ok(()) => (true, "完成".to_string()),
+            Err(e) => (false, e.to_string()),
+        };
+        let _ = app.emit(
+            "macro-result",
+            serde_json::json!({ "name": name, "success": success, "message": message }),
+        );
+    });
+    Ok(())
+}
+
+/// 本地模式数据流：订阅 EventBus，把 SerialEvent 转成 Tauri event 推给前端。
+/// 与 axum ws.rs 的事件转发是同一 EventBus 的两个出口（一个走 WS，一个走 IPC）。
+fn spawn_event_emitter(app: tauri::AppHandle, event_bus: std::sync::Arc<ss_core::EventBus>) {
+    let mut rx = event_bus.subscribe();
+    tauri::async_runtime::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                ss_core::SerialEvent::DataReceived { port, data } => {
+                    let _ = app.emit(
+                        "serial-data",
+                        serde_json::json!({ "port": port, "data": hex::encode(&data) }),
+                    );
+                }
+                ss_core::SerialEvent::PortOpened { port } => {
+                    let _ = app.emit("serial-opened", &port);
+                }
+                ss_core::SerialEvent::PortClosed { port } => {
+                    let _ = app.emit("serial-closed", &port);
+                }
+                ss_core::SerialEvent::Error { port, message } => {
+                    let _ = app.emit(
+                        "serial-error",
+                        serde_json::json!({ "message": format!("{}: {}", port, message) }),
+                    );
+                }
+            }
+        }
+    });
+}
+
 /// Headless：Supervisor 启动 + 等 ctrl_c + 停止。
 fn run_headless() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -134,8 +223,11 @@ fn run_gui() {
     tauri::Builder::default()
         .setup(|app| {
             let state = create_state();
-            let supervisor = Arc::new(ServiceSupervisor::new(state));
+            let supervisor = Arc::new(ServiceSupervisor::new(state.clone()));
             let settings = ss_server::settings::load();
+
+            // 本地模式数据流：EventBus → Tauri event（推给前端 LocalTransport）
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone());
 
             // 启动初始服务（异步，不阻塞 setup）
             let sup = supervisor.clone();
@@ -145,6 +237,7 @@ fn run_gui() {
                 }
             });
 
+            app.manage(state);
             app.manage(supervisor);
             Ok(())
         })
@@ -156,6 +249,11 @@ fn run_gui() {
             load_macros,
             save_macros,
             open_remote_window,
+            list_ports,
+            open_port,
+            close_port,
+            write_port,
+            run_macro,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

@@ -69,61 +69,51 @@ export default function App() {
   const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
   const [editorError, setEditorError] = useState("");
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const transportRef = useRef<Transport | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const activeRef = useRef("");
   activeRef.current = activePort;
 
-  // WS 连接（connConfig 变化时重连：首次连接或改了连接配置）
+  // 是否本地模式（Tauri + 无远程地址）——本地模式用 IPC，不走 connConfig
+  const isLocal = isTauri() && !isRemote;
+
+  // 数据面连接。本地模式用 IPC（常驻不重连）；远程/Web 用 WS（connConfig 变化重建）
   useEffect(() => {
-    const { host, port } = connConfig;
-    const ws = new WebSocket(`ws://${host}:${port}/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnected(true);
-      ws.send(JSON.stringify({ action: "list" }));
+    const t = isLocal ? new LocalTransport() : new RemoteTransport(connConfig.host, connConfig.port);
+    transportRef.current = t;
+    const unsubs = [
+      t.onConnectedChange((conn) => {
+        setConnected(conn);
+        if (conn) t.list().then(setPorts);
+      }),
+      t.onData((port, data) => {
+        // 按 port 路由到对应 terminal（不管是否 active，都写入保留历史）
+        const inst = terminalsRef.current.get(port);
+        if (inst) inst.term.write(data);
+      }),
+      t.onPortOpened((port) => {
+        setOpenPorts((prev) =>
+          prev.includes(port) ? prev : [...prev, port]
+        );
+        setActivePort(port);
+        t.list().then(setPorts);
+      }),
+      t.onPortClosed(() => {
+        t.list().then(setPorts);
+      }),
+      t.onError((msg) => {
+        setErrorMsg(msg);
+        setTimeout(() => setErrorMsg(""), 5000);
+      }),
+      t.onMacroResult((name, success, message) =>
+        setMacroResult({ name, success, message })
+      ),
+    ];
+    return () => {
+      unsubs.forEach((fn) => fn());
+      t.dispose();
     };
-    ws.onclose = () => setConnected(false);
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      switch (msg.type) {
-        case "ports":
-          setPorts(msg.ports);
-          break;
-        case "data": {
-          // 按 port 路由到对应 terminal（不管是否 active，都写入保留历史）
-          const inst = terminalsRef.current.get(msg.port);
-          if (inst) inst.term.write(hexToBytes(msg.data));
-          break;
-        }
-        case "opened": {
-          setOpenPorts((prev) =>
-            prev.includes(msg.port) ? prev : [...prev, msg.port]
-          );
-          setActivePort(msg.port);
-          ws.send(JSON.stringify({ action: "list" }));
-          break;
-        }
-        case "closed":
-          ws.send(JSON.stringify({ action: "list" }));
-          break;
-        case "error":
-          setErrorMsg(msg.message);
-          setTimeout(() => setErrorMsg(""), 5000);
-          break;
-        case "macro_result":
-          setMacroResult({
-            name: msg.name,
-            success: msg.success,
-            message: msg.message,
-          });
-          break;
-      }
-    };
-
-    return () => ws.close();
-  }, [connConfig]);
+  }, [isLocal, connConfig]);
 
   // ③服务器配置：Tauri 控制面 invoke 读本地 settings.json（不依赖 WS 运行）
   useEffect(() => {
@@ -131,10 +121,12 @@ export default function App() {
     tauriInvoke<SrvSettings>("get_settings")
       .then((s) => {
         setSrvSettings(s);
-        // 本地模式：前端连接端口对齐本地服务实际监听端口
-        // （initConn 用默认 18700 先连上，这里读到真实端口后修正）
+        // 本地模式：端口对齐本地服务实际监听口
+        // 仅当不一致才改（返回原对象 → 引用不变 → 不触发 WS useEffect 重连）
         if (!isRemote) {
-          setConnConfig({ host: "127.0.0.1", port: s.ws_port });
+          setConnConfig((c) =>
+            c.port === s.ws_port ? c : { host: "127.0.0.1", port: s.ws_port }
+          );
         }
       })
       .catch(() => {});
@@ -156,14 +148,12 @@ export default function App() {
   const confirmOpen = (config: SerialConfig) => {
     if (!pendingPort) return;
     saveConfig(config);
-    wsRef.current?.send(
-      JSON.stringify({ action: "open", port: pendingPort, config })
-    );
+    transportRef.current?.open(pendingPort, config);
     setPendingPort(null);
   };
 
   const closePort = (port: string) => {
-    wsRef.current?.send(JSON.stringify({ action: "close", port }));
+    transportRef.current?.close(port);
     terminalsRef.current.delete(port); // 立即停掉 data 路由
     setOpenPorts((prev) => {
       const rest = prev.filter((p) => p !== port);
@@ -182,9 +172,7 @@ export default function App() {
       return;
     }
     setMacroResult({ name, success: true, message: "运行中..." });
-    wsRef.current?.send(
-      JSON.stringify({ action: "run_macro", name, port: activePort, macro: macros[name] })
-    );
+    transportRef.current?.runMacro(name, activePort, macros[name]);
   };
 
   // ④宏管理
@@ -528,8 +516,8 @@ export default function App() {
             <TermView
               key={port}
               port={port}
-              wsRef={wsRef}
               active={port === activePort}
+              onWrite={(p, data) => transportRef.current?.write(p, data)}
               onReady={(inst) => {
                 if (inst) terminalsRef.current.set(port, inst);
                 else terminalsRef.current.delete(port);
@@ -614,13 +602,13 @@ export default function App() {
  */
 function TermView({
   port,
-  wsRef,
   active,
+  onWrite,
   onReady,
 }: {
   port: string;
-  wsRef: React.RefObject<WebSocket | null>;
   active: boolean;
+  onWrite: (port: string, data: string) => void;
   onReady: (inst: TermInstance | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -639,9 +627,7 @@ function TermView({
     onReady({ term, fit });
 
     const disposable = term.onData((data) => {
-      wsRef.current?.send(
-        JSON.stringify({ action: "write", port, data, encoding: "text" })
-      );
+      onWrite(port, data);
     });
 
     // 初次 fit（可能延迟到可见后才能算对尺寸）
@@ -1574,4 +1560,225 @@ function hexToBytes(hex: string): Uint8Array {
     arr[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
   }
   return arr;
+}
+
+/** 数据面传输抽象：屏蔽 IPC/WS 协议差异。组件只懂领域（port/bytes/macro）。 */
+interface Transport {
+  list(): Promise<PortInfo[]>;
+  open(port: string, config: SerialConfig): Promise<void>;
+  close(port: string): Promise<void>;
+  write(port: string, data: string): Promise<void>;
+  runMacro(name: string, port: string, macro: Macro): Promise<void>;
+  onData(cb: (port: string, data: Uint8Array) => void): () => void;
+  onPortOpened(cb: (port: string) => void): () => void;
+  onPortClosed(cb: (port: string) => void): () => void;
+  onError(cb: (msg: string) => void): () => void;
+  onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
+  onConnectedChange(cb: (connected: boolean) => void): () => void;
+  dispose(): void;
+}
+
+/** WS 实现（远程/Web 模式）。封装 WS 协议细节（action/type/hex 编解码）。 */
+class RemoteTransport implements Transport {
+  private ws: WebSocket;
+  private listResolver: ((p: PortInfo[]) => void) | null = null;
+  private handlers = {
+    data: new Set<(port: string, data: Uint8Array) => void>(),
+    opened: new Set<(port: string) => void>(),
+    closed: new Set<(port: string) => void>(),
+    error: new Set<(msg: string) => void>(),
+    macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    connected: new Set<(c: boolean) => void>(),
+  };
+
+  constructor(host: string, port: number) {
+    this.ws = new WebSocket(`ws://${host}:${port}/ws`);
+    this.ws.onopen = () => this.handlers.connected.forEach((cb) => cb(true));
+    this.ws.onclose = () => this.handlers.connected.forEach((cb) => cb(false));
+    this.ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      switch (msg.type) {
+        case "ports":
+          if (this.listResolver) {
+            this.listResolver(msg.ports as PortInfo[]);
+            this.listResolver = null;
+          }
+          break;
+        case "data":
+          this.handlers.data.forEach((cb) => cb(msg.port, hexToBytes(msg.data)));
+          break;
+        case "opened":
+          this.handlers.opened.forEach((cb) => cb(msg.port));
+          break;
+        case "closed":
+          this.handlers.closed.forEach((cb) => cb(msg.port));
+          break;
+        case "error":
+          this.handlers.error.forEach((cb) => cb(msg.message));
+          break;
+        case "macro_result":
+          this.handlers.macroResult.forEach((cb) =>
+            cb(msg.name, msg.success, msg.message)
+          );
+          break;
+      }
+    };
+  }
+
+  async list() {
+    this.ws.send(JSON.stringify({ action: "list" }));
+    return new Promise<PortInfo[]>((resolve) => {
+      this.listResolver = resolve;
+    });
+  }
+  async open(port: string, config: SerialConfig) {
+    this.ws.send(JSON.stringify({ action: "open", port, config }));
+  }
+  async close(port: string) {
+    this.ws.send(JSON.stringify({ action: "close", port }));
+  }
+  async write(port: string, data: string) {
+    this.ws.send(JSON.stringify({ action: "write", port, data, encoding: "text" }));
+  }
+  async runMacro(name: string, port: string, macro: Macro) {
+    this.ws.send(JSON.stringify({ action: "run_macro", name, port, macro }));
+  }
+
+  onData(cb: (port: string, data: Uint8Array) => void) {
+    this.handlers.data.add(cb);
+    return () => { this.handlers.data.delete(cb); };
+  }
+  onPortOpened(cb: (port: string) => void) {
+    this.handlers.opened.add(cb);
+    return () => { this.handlers.opened.delete(cb); };
+  }
+  onPortClosed(cb: (port: string) => void) {
+    this.handlers.closed.add(cb);
+    return () => { this.handlers.closed.delete(cb); };
+  }
+  onError(cb: (msg: string) => void) {
+    this.handlers.error.add(cb);
+    return () => { this.handlers.error.delete(cb); };
+  }
+  onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
+    this.handlers.macroResult.add(cb);
+    return () => { this.handlers.macroResult.delete(cb); };
+  }
+  onConnectedChange(cb: (connected: boolean) => void) {
+    this.handlers.connected.add(cb);
+    // 已连上则立即通知（注册晚于 onopen 的情况）
+    if (this.ws.readyState === WebSocket.OPEN) cb(true);
+    return () => { this.handlers.connected.delete(cb); };
+  }
+
+  dispose() {
+    this.ws.close();
+  }
+}
+
+/** IPC 实现（本地模式）：Tauri invoke 命令 + event 监听。绕过 WS，进程内直连。 */
+class LocalTransport implements Transport {
+  private unlisten: Array<() => void> = [];
+  private handlers = {
+    data: new Set<(port: string, data: Uint8Array) => void>(),
+    opened: new Set<(port: string) => void>(),
+    closed: new Set<(port: string) => void>(),
+    error: new Set<(msg: string) => void>(),
+    macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    connected: new Set<(c: boolean) => void>(),
+  };
+
+  constructor() {
+    // 本地 IPC 不会断，视为永远已连接
+    this.handlers.connected.forEach((cb) => cb(true));
+    // 订阅后端 emit 的 serial 事件
+    this.setupEvents();
+  }
+
+  private setupEvents() {
+    const setup = async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      this.unlisten.push(
+        await listen<{ port: string; data: string }>("serial-data", (e) => {
+          this.handlers.data.forEach((cb) => cb(e.payload.port, hexToBytes(e.payload.data)));
+        })
+      );
+      this.unlisten.push(
+        await listen<string>("serial-opened", (e) =>
+          this.handlers.opened.forEach((cb) => cb(e.payload)))
+      );
+      this.unlisten.push(
+        await listen<string>("serial-closed", (e) =>
+          this.handlers.closed.forEach((cb) => cb(e.payload)))
+      );
+      this.unlisten.push(
+        await listen<{ message: string }>("serial-error", (e) =>
+          this.handlers.error.forEach((cb) => cb(e.payload.message)))
+      );
+      this.unlisten.push(
+        await listen<{ name: string; success: boolean; message: string }>(
+          "macro-result",
+          (e) =>
+            this.handlers.macroResult.forEach((cb) =>
+              cb(e.payload.name, e.payload.success, e.payload.message)
+            )
+        )
+      );
+    };
+    setup().catch((e) => console.error("本地事件订阅失败", e));
+  }
+
+  async list() {
+    return tauriInvoke<PortInfo[]>("list_ports");
+  }
+  async open(port: string, config: SerialConfig) {
+    await tauriInvoke("open_port", { port, config });
+  }
+  async close(port: string) {
+    await tauriInvoke("close_port", { port });
+  }
+  async write(port: string, data: string) {
+    await tauriInvoke("write_port", { port, data });
+  }
+  async runMacro(name: string, port: string, macro: Macro) {
+    await tauriInvoke("run_macro", { name, port, macro });
+  }
+
+  onData(cb: (port: string, data: Uint8Array) => void) {
+    this.handlers.data.add(cb);
+    return () => { this.handlers.data.delete(cb); };
+  }
+  onPortOpened(cb: (port: string) => void) {
+    this.handlers.opened.add(cb);
+    return () => { this.handlers.opened.delete(cb); };
+  }
+  onPortClosed(cb: (port: string) => void) {
+    this.handlers.closed.add(cb);
+    return () => { this.handlers.closed.delete(cb); };
+  }
+  onError(cb: (msg: string) => void) {
+    this.handlers.error.add(cb);
+    return () => { this.handlers.error.delete(cb); };
+  }
+  onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
+    this.handlers.macroResult.add(cb);
+    return () => { this.handlers.macroResult.delete(cb); };
+  }
+  onConnectedChange(cb: (connected: boolean) => void) {
+    this.handlers.connected.add(cb);
+    cb(true); // IPC 永远已连接
+    return () => { this.handlers.connected.delete(cb); };
+  }
+
+  dispose() {
+    this.unlisten.forEach((fn) => fn());
+  }
+}
+
+/** 按模式创建 Transport：本地 → IPC；远程/Web → WS */
+function createTransport(): Transport {
+  const remote = getRemoteFromUrl();
+  if (isTauri() && !remote) return new LocalTransport();
+  const { host, port } = remote ? remote : loadConn();
+  return new RemoteTransport(host, port);
 }
