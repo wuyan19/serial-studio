@@ -8,7 +8,6 @@
 use crate::AppState;
 use axum::extract::State;
 use axum::Json;
-use bytes::Bytes;
 use serde_json::{json, Value};
 use ss_core::SerialManager;
 
@@ -78,14 +77,14 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "serial_send",
-                "description": "发送数据到串口并可选等待设备响应。text 模式默认自动追加 \\r\\n。设置 timeout_ms > 0 时会等待并返回响应，无需再调 serial_read。",
+                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，按端口 line_ending 追加换行（open 时配 LF/CR/CRLF）。设置 timeout_ms > 0 时会等待并返回响应。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "port": { "type": "string", "description": "串口名（如 COM3）。缺省时使用唯一打开的串口" },
                         "data": { "type": "string", "description": "要发送的数据" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text" },
-                        "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否自动追加 \\r\\n" },
+                        "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行（换行符由端口 line_ending 决定）" },
                         "timeout_ms": { "type": "integer", "default": 0, "description": "发送后等待响应的超时（毫秒），0 不等待" }
                     },
                     "required": ["data"]
@@ -179,24 +178,14 @@ async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
         None => return error_text("Missing required parameter: data".into()),
     };
     let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("text");
-    let auto_newline = args.get("auto_newline").and_then(|a| a.as_bool()).unwrap_or(true);
+    let auto_newline = args
+        .get("auto_newline")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(true);
 
-    let mut bytes = match format {
-        "hex" => match hex_to_bytes(data_str) {
-            Ok(b) => b,
-            Err(e) => return error_text(format!("Invalid hex data: {}", e)),
-        },
-        _ => data_str.as_bytes().to_vec(),
-    };
-    if format != "hex" && auto_newline {
-        bytes.push(b'\r');
-        bytes.push(b'\n');
-    }
-    if bytes.is_empty() {
-        return error_text("No data to send".into());
-    }
-
-    match manager.write(port.clone(), Bytes::from(bytes)).await {
+    // 换行由端口 line_ending 决定（open 时配），这里只声明是否追加
+    match manager.send(&port, data_str, format, auto_newline).await {
+        Ok(0) => error_text("No data to send".into()),
         Ok(n) => {
             let timeout_ms = args.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(0);
             if timeout_ms > 0 {
@@ -240,8 +229,8 @@ async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
     };
     match manager.status(&port).await {
         Some(cfg) => ok_text(format!(
-            "Port: {}\nBaud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}",
-            port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control
+            "Port: {}\nBaud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}",
+            port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending
         )),
         None => error_text(format!("Port {} not open", port)),
     }

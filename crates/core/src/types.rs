@@ -16,6 +16,10 @@ pub struct SerialConfig {
     pub parity: Parity,
     #[serde(default = "default_flow_control")]
     pub flow_control: FlowControl,
+    /// 行结束符：text 模式 auto_newline 追加的换行。连 Linux shell 选 LF，
+    /// Windows/AT 设备选 CRLF。仅作用于程序发送（宏/MCP），交互输入透传不受影响。
+    #[serde(default = "default_line_ending")]
+    pub line_ending: LineEnding,
     /// 读取超时（毫秒）。影响命令响应延迟——越小越快但 CPU 占用越高。
     /// 默认 100ms：port_task 的读循环靠它定期返回，让 select 能处理命令。
     #[serde(default = "default_timeout_ms")]
@@ -36,6 +40,9 @@ fn default_parity() -> Parity {
 fn default_flow_control() -> FlowControl {
     FlowControl::None
 }
+fn default_line_ending() -> LineEnding {
+    LineEnding::CRLF
+}
 fn default_timeout_ms() -> u64 {
     100
 }
@@ -48,6 +55,7 @@ impl Default for SerialConfig {
             stop_bits: StopBits::One,
             parity: Parity::None,
             flow_control: FlowControl::None,
+            line_ending: LineEnding::CRLF,
             timeout_ms: 100,
         }
     }
@@ -83,6 +91,15 @@ pub enum FlowControl {
     None,
     Software,
     Hardware,
+}
+
+/// 行结束符。LF（Unix）/ CR / CRLF（Windows、多数串口设备）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LineEnding {
+    LF,
+    CR,
+    CRLF,
 }
 
 /// 端口信息（含是否已由本管理器打开）。

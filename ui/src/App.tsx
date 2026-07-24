@@ -650,6 +650,7 @@ interface SerialConfig {
   stop_bits: string;
   parity: string;
   flow_control: string;
+  line_ending: string;
 }
 
 const CONFIG_KEY = "serial-studio-config";
@@ -659,6 +660,7 @@ const DEFAULT_CONFIG: SerialConfig = {
   stop_bits: "one",
   parity: "none",
   flow_control: "none",
+  line_ending: "crlf",
 };
 
 function loadConfig(): SerialConfig {
@@ -808,6 +810,17 @@ function SerialConfigDialog({
             <option value="none">None</option>
             <option value="software">Software (XON/XOFF)</option>
             <option value="hardware">Hardware (RTS/CTS)</option>
+          </select>
+        </ConfigRow>
+        <ConfigRow label="换行符">
+          <select
+            value={config.line_ending}
+            onChange={(e) => onChange({ ...config, line_ending: e.target.value })}
+            style={selectStyle}
+          >
+            <option value="crlf">CRLF (\r\n) — Windows/AT</option>
+            <option value="lf">LF (\n) — Linux/Unix</option>
+            <option value="cr">CR (\r)</option>
           </select>
         </ConfigRow>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>

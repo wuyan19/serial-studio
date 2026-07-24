@@ -10,7 +10,6 @@
 
 use crate::error::SerialError;
 use crate::manager::SerialManager;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -59,9 +58,6 @@ pub enum MacroError {
 
     #[error("expect 超时：{timeout_ms}ms 内未匹配到 {pattern:?}")]
     ExpectTimeout { pattern: String, timeout_ms: u64 },
-
-    #[error("hex 解码失败: {0}")]
-    HexDecode(String),
 }
 
 /// 在指定端口上顺序执行宏的所有步骤。
@@ -73,11 +69,7 @@ pub async fn run_macro(port: &str, mac: &Macro, manager: &SerialManager) -> Resu
                 format,
                 auto_newline,
             } => {
-                let bytes = encode_data(data, format, *auto_newline)
-                    .map_err(MacroError::HexDecode)?;
-                if !bytes.is_empty() {
-                    manager.write(port.to_string(), Bytes::from(bytes)).await?;
-                }
+                manager.send(port, data, format, *auto_newline).await?;
             }
             MacroStep::Delay { ms } => {
                 tokio::time::sleep(Duration::from_millis(*ms)).await;
@@ -102,8 +94,14 @@ pub async fn run_macro(port: &str, mac: &Macro, manager: &SerialManager) -> Resu
     Ok(())
 }
 
-/// 编码发送数据：text（可选追加 \r\n）/ hex（原始字节）。
-fn encode_data(data: &str, format: &str, auto_newline: bool) -> Result<Vec<u8>, String> {
+/// 编码发送数据：text（按 line_ending 可选追加换行）/ hex（原始字节）。
+/// 宏与 MCP 共用此函数——换行逻辑只此一处。
+pub fn encode_send(
+    data: &str,
+    format: &str,
+    auto_newline: bool,
+    line_ending: crate::types::LineEnding,
+) -> Result<Vec<u8>, String> {
     let mut bytes = match format {
         "hex" => {
             let cleaned: String = data.replace(" ", "").replace("0x", "").replace(",", "");
@@ -118,8 +116,14 @@ fn encode_data(data: &str, format: &str, auto_newline: bool) -> Result<Vec<u8>, 
         _ => data.as_bytes().to_vec(),
     };
     if format != "hex" && auto_newline {
-        bytes.push(b'\r');
-        bytes.push(b'\n');
+        match line_ending {
+            crate::types::LineEnding::LF => bytes.push(b'\n'),
+            crate::types::LineEnding::CR => bytes.push(b'\r'),
+            crate::types::LineEnding::CRLF => {
+                bytes.push(b'\r');
+                bytes.push(b'\n');
+            }
+        }
     }
     Ok(bytes)
 }
@@ -127,6 +131,7 @@ fn encode_data(data: &str, format: &str, auto_newline: bool) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::LineEnding;
 
     #[test]
     fn serde_macro_roundtrip() {
@@ -138,26 +143,38 @@ mod tests {
     }
 
     #[test]
-    fn encode_text_adds_newline() {
-        let b = encode_data("AT", "text", true).unwrap();
+    fn encode_text_crlf() {
+        let b = encode_send("AT", "text", true, LineEnding::CRLF).unwrap();
         assert_eq!(b, b"AT\r\n");
     }
 
     #[test]
+    fn encode_text_lf() {
+        let b = encode_send("AT", "text", true, LineEnding::LF).unwrap();
+        assert_eq!(b, b"AT\n");
+    }
+
+    #[test]
+    fn encode_text_cr() {
+        let b = encode_send("AT", "text", true, LineEnding::CR).unwrap();
+        assert_eq!(b, b"AT\r");
+    }
+
+    #[test]
     fn encode_text_no_newline() {
-        let b = encode_data("AT", "text", false).unwrap();
+        let b = encode_send("AT", "text", false, LineEnding::CRLF).unwrap();
         assert_eq!(b, b"AT");
     }
 
     #[test]
     fn encode_hex_raw() {
-        let b = encode_data("0D0A", "hex", true).unwrap();
+        let b = encode_send("0D0A", "hex", true, LineEnding::CRLF).unwrap();
         assert_eq!(b, b"\r\n"); // hex 不追加换行
     }
 
     #[test]
     fn encode_hex_odd_fails() {
-        assert!(encode_data("ABC", "hex", false).is_err());
+        assert!(encode_send("ABC", "hex", false, LineEnding::CRLF).is_err());
     }
 
     #[test]

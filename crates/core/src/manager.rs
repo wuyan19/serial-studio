@@ -156,6 +156,32 @@ impl SerialManager {
         self.ports.lock().await.get(port).map(|h| h.config.clone())
     }
 
+    /// 端口的换行设置（send 用）。
+    pub async fn port_line_ending(&self, port: &str) -> Option<crate::types::LineEnding> {
+        self.ports.lock().await.get(port).map(|h| h.config.line_ending)
+    }
+
+    /// 高层发送：text/hex 编码 + 按端口 line_ending 追加换行 + write。
+    /// 宏与 MCP 共用此入口，换行逻辑集中在此（透传的 WS/Telnet 不经过这里）。
+    pub async fn send(
+        &self,
+        port: &str,
+        data: &str,
+        format: &str,
+        auto_newline: bool,
+    ) -> Result<usize, SerialError> {
+        let line_ending = self
+            .port_line_ending(port)
+            .await
+            .ok_or_else(|| SerialError::NotOpen(port.to_string()))?;
+        let bytes = crate::macros::encode_send(data, format, auto_newline, line_ending)
+            .map_err(SerialError::WriteFailed)?;
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        self.write(port.to_string(), Bytes::from(bytes)).await
+    }
+
     /// 破坏性读取缓冲区（空时按 timeout 等待）。
     pub async fn drain_buffer(&self, port: &str, timeout_ms: u64) -> Result<Vec<u8>, SerialError> {
         let buf = self.get_rx_buffer(port).await?;
