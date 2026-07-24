@@ -68,6 +68,14 @@ export default function App() {
   const [editorName, setEditorName] = useState("");
   const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
   const [editorError, setEditorError] = useState("");
+  // ⑤VS Code 布局：活动栏 + 次侧栏
+  type ActivityView = "ports" | "macros" | null;  // null = 次侧栏收起
+  const [activity, setActivity] = useState<ActivityView>(null);
+  const [portDialogOpen, setPortDialogOpen] = useState(false);  // 串口管理弹窗
+  // 管理菜单（关于/设置）
+  const [manageMenu, setManageMenu] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [version, setVersion] = useState("");
 
   const transportRef = useRef<Transport | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
@@ -141,6 +149,16 @@ export default function App() {
         .catch((e) => console.error("加载宏失败", e));
     } else {
       setMacros(loadMacrosLocal());
+    }
+  }, []);
+
+  // 版本号（Tauri getAppVersion）
+  useEffect(() => {
+    if (isTauri()) {
+      import("@tauri-apps/api/app")
+        .then(({ getVersion }) => getVersion())
+        .then(setVersion)
+        .catch(() => {});
     }
   }, []);
 
@@ -233,6 +251,62 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
+      {/* 活动栏（VS Code 风）：48px 窄竖条 */}
+      <div
+        style={{
+          width: 48,
+          background: "#181818",
+          borderRight: "1px solid #2a2a2a",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          paddingTop: 8,
+          gap: 4,
+          flexShrink: 0,
+        }}
+      >
+        <ActivityIcon icon="🔌" title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
+        <ActivityIcon icon="⚡" title="宏" active={activity === "macros"} onClick={() => setActivity(activity === "macros" ? null : "macros")} />
+        <div style={{ flex: 1 }} />
+        {isTauri() && (
+          <ActivityIcon icon="🌐" title="打开远程窗口" active={false} onClick={() => setRemoteOpen(true)} />
+        )}
+        <div style={{ position: "relative" }}>
+          <ActivityIcon icon="⚙" title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
+          {manageMenu && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: 0,
+                left: 52,
+                background: "#2d2d2d",
+                border: "1px solid #444",
+                borderRadius: 4,
+                padding: 4,
+                minWidth: 100,
+                zIndex: 200,
+                boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+              }}
+            >
+              <button
+                onClick={() => { setSettingsOpen(true); setManageMenu(false); }}
+                style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", background: "transparent", color: "#ddd", border: "none", cursor: "pointer", fontSize: 13, borderRadius: 3 }}
+              >
+                ⚙ 设置
+              </button>
+              <button
+                onClick={() => { setAboutOpen(true); setManageMenu(false); }}
+                style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", background: "transparent", color: "#ddd", border: "none", cursor: "pointer", fontSize: 13, borderRadius: 3 }}
+              >
+                ℹ 关于
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 次侧栏：当前活动项内容，收起时不占位 */}
+      {activity && (
       <aside
         style={{
           width: 240,
@@ -246,44 +320,20 @@ export default function App() {
           flexDirection: "column",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ marginTop: 0 }}>🔌 Serial Studio</h3>
-          <button
-            onClick={() => setSettingsOpen(true)}
-            title="设置"
-            style={{ background: "none", border: "none", color: "#ddd", cursor: "pointer", fontSize: 18, padding: "0 4px" }}
-          >
-            ⚙
-          </button>
-        </div>
-        {/* 连接状态：仅远程/Web 显示（本地模式透明，无需关心连接细节） */}
+        {/* 连接状态：仅远程/Web 显示（本地模式透明） */}
         {(!isTauri() || isRemote) && (
-          <p style={{ fontSize: 13 }}>
-            {isRemote ? "🔗 远程" : "🌐 Web"} · {connected ? "🟢 已连接" : "🔴 未连接"}{" "}
-            ({connConfig.host}:{connConfig.port})
+          <p style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>
+            {isRemote ? "🔗 远程" : "🌐 Web"} ·{" "}
+            {connected ? "🟢 已连接" : "🔴 未连接"} ({connConfig.host}:{connConfig.port})
           </p>
         )}
-        {isTauri() && (
-          <button
-            onClick={() => setRemoteOpen(true)}
-            title="打开远程窗口（新窗口连接远程服务）"
-            style={{
-              width: "100%",
-              marginBottom: 8,
-              padding: "5px 8px",
-              background: "#2d2d2d",
-              color: "#ddd",
-              border: "1px solid #444",
-              borderRadius: 3,
-              cursor: "pointer",
-              fontSize: 12,
-            }}
-          >
-            🌐 打开远程窗口
-          </button>
-        )}
 
-        <h4 style={{ marginBottom: 8 }}>端口</h4>
+        {activity === "ports" && (
+        <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <h4 style={{ margin: 0 }}>串口</h4>
+          <button onClick={() => setPortDialogOpen(true)} title="刷新" style={addStepBtnStyle}>⟳</button>
+        </div>
         {ports.length === 0 && (
           <p style={{ color: "#888", fontSize: 13 }}>无可用端口</p>
         )}
@@ -309,19 +359,13 @@ export default function App() {
             </div>
           );
         })}
+        </>
+        )}
 
-        <h4
-          style={{
-            marginTop: 16,
-            marginBottom: 8,
-            borderTop: "1px solid #333",
-            paddingTop: 12,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>⚡ 宏 {activePort ? `→ ${activePort}` : ""}</span>
+        {activity === "macros" && (
+        <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <h4 style={{ margin: 0 }}>宏 {activePort ? `→ ${activePort}` : ""}</h4>
           <button
             onClick={() => openMacroEditor(null)}
             title="新增宏"
@@ -337,7 +381,7 @@ export default function App() {
           >
             ＋
           </button>
-        </h4>
+        </div>
         {Object.keys(macros).length === 0 && (
           <p style={{ color: "#888", fontSize: 13 }}>无宏（点 ＋ 新增）</p>
         )}
@@ -431,7 +475,10 @@ export default function App() {
             {macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}
           </div>
         )}
+        </>
+        )}
       </aside>
+      )}
 
       <main
         style={{
@@ -525,7 +572,9 @@ export default function App() {
             />
           ))}
           {openPorts.length === 0 && (
-            <div style={{ color: "#888", padding: 16 }}>← 选择左侧端口开始</div>
+            <div style={{ color: "#888", padding: 16 }}>
+              点左侧 🔌 打开串口
+            </div>
           )}
         </div>
       </main>
@@ -566,6 +615,11 @@ export default function App() {
           showServer={isTauri() && !isRemote}
           onClose={() => setSettingsOpen(false)}
         />
+      )}
+
+      {/* 关于对话框 */}
+      {aboutOpen && (
+        <AboutDialog version={version} onClose={() => setAboutOpen(false)} />
       )}
 
       {/* ⑤远程连接对话框 */}
@@ -759,7 +813,7 @@ const btnStyleConfirm: React.CSSProperties = {
 function ConfigRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-      <span style={{ width: 64, color: "#888" }}>{label}</span>
+      <span style={{ minWidth: 72, color: "#888", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>
       {children}
     </div>
   );
@@ -1483,6 +1537,85 @@ function StepEditor({
         {step.type === "clear" && (
           <div style={{ color: "#888", fontSize: 12 }}>清空接收缓冲区</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** 活动栏图标（VS Code 风） */
+function ActivityIcon({
+  icon,
+  title,
+  active,
+  onClick,
+}: {
+  icon: string;
+  title: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 40,
+        height: 40,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: 20,
+        background: "transparent",
+        color: active ? "#fff" : "#888",
+        border: "none",
+        borderLeft: active ? "2px solid #fff" : "2px solid transparent",
+        cursor: "pointer",
+        boxSizing: "border-box",
+      }}
+    >
+      {icon}
+    </button>
+  );
+}
+
+/** 关于对话框 */
+function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 100,
+      }}
+    >
+      <div
+        style={{
+          background: "#1e1e1e",
+          color: "#ddd",
+          border: "1px solid #444",
+          borderRadius: 6,
+          padding: 24,
+          width: 360,
+          maxWidth: "90vw",
+          textAlign: "center",
+        }}
+      >
+        <div style={{ fontSize: 40, marginBottom: 8 }}>🔌</div>
+        <h3 style={{ margin: "0 0 4px" }}>Serial Studio</h3>
+        <p style={{ color: "#888", margin: "0 0 16px", fontSize: 13 }}>
+          版本 {version || "..."}
+        </p>
+        <p style={{ color: "#aaa", fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
+          多形态串口通信工具<br />
+          本地/远程双模式 · Tauri + WebSocket
+        </p>
+        <button onClick={onClose} style={btnStyleConfirm}>
+          关闭
+        </button>
       </div>
     </div>
   );
