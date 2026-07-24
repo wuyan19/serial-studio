@@ -9,6 +9,7 @@ use crate::AppState;
 use ss_core::SerialEvent;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
 // telnet 协议常量
 const IAC: u8 = 255;
@@ -24,24 +25,58 @@ const OPT_SUPPRESS_GA: u8 = 3;
 // WILL ECHO（服务器负责回显）+ WILL SUPPRESS-GA（抑制 Go-Ahead）
 const HANDSHAKE: &[u8] = &[IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SUPPRESS_GA];
 
-/// 运行 Telnet 服务器（阻塞当前 task，应在独立 task 中 spawn）。
-pub async fn run_telnet(addr: String, state: AppState) -> anyhow::Result<()> {
+/// Telnet 服务句柄（可停）。由 ServiceSupervisor 持有以支持热重启。
+pub struct TelnetHandle {
+    shutdown_tx: oneshot::Sender<()>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl TelnetHandle {
+    /// 停止 accept 循环并等待退出（释放监听端口）。
+    /// 已连接的客户端 task 不受影响，自然结束。
+    pub async fn stop(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.join.await;
+    }
+}
+
+/// 启动 Telnet 服务器（非阻塞，返回可停句柄）。
+pub async fn start_telnet(addr: String, state: AppState) -> anyhow::Result<TelnetHandle> {
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!("Telnet server: telnet://{}", addr);
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                tracing::info!("telnet 客户端连接: {}", peer);
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state).await {
-                        tracing::warn!("telnet 客户端错误: {}", e);
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let join = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Telnet 服务器关闭");
+                    return;
+                }
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, peer)) => {
+                            tracing::info!("telnet 客户端连接: {}", peer);
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_client(stream, state).await {
+                                    tracing::warn!("telnet 客户端错误: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => tracing::warn!("telnet accept 错误: {}", e),
                     }
-                });
+                }
             }
-            Err(e) => tracing::warn!("telnet accept 错误: {}", e),
         }
-    }
+    });
+    Ok(TelnetHandle { shutdown_tx, join })
+}
+
+/// 运行 Telnet 服务器（阻塞，兼容 headless/ss-server bin）。
+pub async fn run_telnet(addr: String, state: AppState) -> anyhow::Result<()> {
+    let handle = start_telnet(addr, state).await?;
+    let _ = handle.join.await;
+    Ok(())
 }
 
 async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result<()> {

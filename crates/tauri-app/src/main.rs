@@ -2,17 +2,21 @@
 // debug 保留 console，方便看 tracing/panic。
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
-//! Serial Studio Tauri 桌面应用。
+//! Serial Studio Tauri 桌面应用（控制面）。
 //!
-//! 双模式：
-//! - 默认（GUI）：Tauri 窗口 + 后台 WS/MCP/Telnet 服务器（全部共享同一 state）
-//! - --no-gui：纯后台（与 ss-server bin 等价）
+//! 架构（控制面/数据面分离）：
+//! - 控制面（本文件）：Tauri 命令管理配置 + 服务生命周期（ServiceSupervisor）。
+//! - 数据面（ss-server）：WS/MCP/Telnet，由 Supervisor 启停，共享 AppState。
 //!
-//! 方案 B：Tauri 是薄壳。WS/MCP/Telnet 共用 ss-server 的 create_router/run_telnet，
-//! 前端（Web/Tauri 共用）通过 WS 接入。
+//! 热重启：改监听配置 → invoke apply_settings → Supervisor.stop()+start()，
+//! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
 use clap::Parser;
-use ss_server::{create_router, create_state};
+use tauri::Manager;
+use ss_server::settings::Settings;
+use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
+use ss_server::create_state;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "ss-tauri", version, about = "Serial Studio 桌面应用")]
@@ -36,7 +40,6 @@ fn main() {
         .init();
 
     let args = Args::parse();
-
     if args.no_gui {
         run_headless().expect("headless 运行失败");
     } else {
@@ -44,82 +47,79 @@ fn main() {
     }
 }
 
-/// Headless：WS/MCP + Telnet（共享 state）。
+// ===== 控制面：Tauri 命令（前端 invoke，不经 WS）=====
+
+#[tauri::command]
+async fn get_settings() -> Result<Settings, String> {
+    Ok(ss_server::settings::load())
+}
+
+#[tauri::command]
+async fn save_settings(settings: Settings) -> Result<(), String> {
+    ss_server::settings::save(&settings)
+}
+
+/// 应用配置：写 settings.json + 重启服务使新监听地址/端口生效。
+/// 串口连接和宏保留（AppState 跨重启共享）。
+#[tauri::command]
+async fn apply_settings(
+    settings: Settings,
+    supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
+) -> Result<(), String> {
+    ss_server::settings::save(&settings)?;
+    supervisor.restart(&settings).await
+}
+
+#[tauri::command]
+async fn service_status(
+    supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
+) -> Result<ServiceStatus, String> {
+    Ok(supervisor.status().await)
+}
+
+/// Headless：Supervisor 启动 + 等 ctrl_c + 停止。
 fn run_headless() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let state = create_state();
-        let s = state.settings.read().unwrap().clone();
-
-        // Telnet（共享 state：与 WS/MCP 操作同一组串口）
-        let telnet_addr = format!("{}:{}", s.ws_host, s.telnet_port);
-        let telnet_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ss_server::telnet::run_telnet(telnet_addr, telnet_state).await {
-                tracing::error!("Telnet 错误: {}", e);
-            }
-        });
-
-        // HTTP/WS/MCP
-        let app = create_router(state);
-        let addr = format!("{}:{}", s.ws_host, s.ws_port);
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-        tracing::info!(
-            "服务: ws://{}/ws · /mcp · http://{}/api/ports",
-            addr,
-            addr
-        );
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        let supervisor = ServiceSupervisor::new(state);
+        let settings = ss_server::settings::load();
+        supervisor.start(&settings).await.map_err(anyhow::Error::msg)?;
+        tracing::info!("headless 运行中，Ctrl+C 退出");
+        shutdown_signal().await;
+        supervisor.stop().await;
         tracing::info!("已关闭");
         Ok::<(), anyhow::Error>(())
     })
 }
 
-/// GUI：Tauri 窗口 + 后台 WS/MCP/Telnet 服务器（全部共享同一 state）。
+/// GUI：Tauri 窗口 + Supervisor 管理服务（支持热重启）。
 fn run_gui() {
-    let s = ss_server::settings::load();
-    let ws_addr = format!("{}:{}", s.ws_host, s.ws_port);
-    let telnet_addr = format!("{}:{}", s.ws_host, s.telnet_port);
-
     tauri::Builder::default()
-        .setup(move |_app| {
-            // 共享 state：WS/MCP/Telnet 操作同一组串口
+        .setup(|app| {
             let state = create_state();
+            let supervisor = Arc::new(ServiceSupervisor::new(state));
+            let settings = ss_server::settings::load();
 
-            // HTTP/WS/MCP 服务器
-            let ws_state = state.clone();
-            let ws_addr = ws_addr.clone();
+            // 启动初始服务（异步，不阻塞 setup）
+            let sup = supervisor.clone();
             tauri::async_runtime::spawn(async move {
-                let app = create_router(ws_state);
-                let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("WS 绑定 {} 失败: {}", ws_addr, e);
-                        return;
-                    }
-                };
-                tracing::info!("服务: ws://{}/ws · /mcp · /api/ports", ws_addr);
-                let _ = axum::serve(listener, app)
-                    .with_graceful_shutdown(async {
-                        let _ = tokio::signal::ctrl_c().await;
-                    })
-                    .await;
-            });
-
-            // Telnet 服务器
-            let telnet_state = state.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = ss_server::telnet::run_telnet(telnet_addr, telnet_state).await {
-                    tracing::error!("Telnet 错误: {}", e);
+                if let Err(e) = sup.start(&settings).await {
+                    tracing::error!("服务启动失败: {}", e);
                 }
             });
 
+            app.manage(supervisor);
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            save_settings,
+            apply_settings,
+            service_status,
+        ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
 }
@@ -163,13 +163,12 @@ fn attach_parent_console() -> bool {
     };
 
     unsafe {
-        // 已有 stdout（debug 模式 console 子系统）→ 不需要 attach
         let existing = GetStdHandle(STD_OUTPUT_HANDLE);
         if !existing.is_null() && existing != INVALID_HANDLE_VALUE {
             return true;
         }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
-            return false; // 双击启动，无父 console
+            return false;
         }
         let name = b"CONOUT$\0";
         let out = CreateFileA(

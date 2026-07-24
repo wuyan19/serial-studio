@@ -3,6 +3,16 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
+/** 是否在 Tauri 桌面环境（有控制面 IPC） */
+function isTauri(): boolean {
+  return !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+}
+/** 动态调用 Tauri 命令（Web 模式不加载 @tauri-apps/api） */
+async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(cmd, args);
+}
+
 interface PortInfo {
   name: string;
   opened: boolean;
@@ -72,7 +82,6 @@ export default function App() {
       setConnected(true);
       ws.send(JSON.stringify({ action: "list_macros" }));
       ws.send(JSON.stringify({ action: "list" }));
-      ws.send(JSON.stringify({ action: "get_settings" }));
     };
     ws.onclose = () => setConnected(false);
     ws.onmessage = (e) => {
@@ -112,14 +121,19 @@ export default function App() {
             message: msg.message,
           });
           break;
-        case "settings":
-          setSrvSettings(msg.settings);
-          break;
       }
     };
 
     return () => ws.close();
   }, [connConfig]);
+
+  // ③服务器配置：Tauri 控制面 invoke 读本地 settings.json（不依赖 WS 运行）
+  useEffect(() => {
+    if (!isTauri()) return;
+    tauriInvoke<SrvSettings>("get_settings")
+      .then(setSrvSettings)
+      .catch(() => {});
+  }, []);
 
   // 点端口 → 弹配置对话框（pendingPort）；确认后才真正 open
   const confirmOpen = (config: SerialConfig) => {
@@ -497,11 +511,20 @@ export default function App() {
             saveConn(c);
             setConnConfig(c);
           }}
-          onSaveSrv={(s) =>
-            wsRef.current?.send(
-              JSON.stringify({ action: "save_settings", settings: s })
-            )
-          }
+          onSaveSrv={async (s) => {
+            if (!isTauri()) return;
+            try {
+              await tauriInvoke("apply_settings", { settings: s });
+              setSrvSettings(s);
+              setErrorMsg("");
+              // WS 端口可能变了，用新地址重连
+              setConnConfig({ host: s.ws_host, port: s.ws_port });
+            } catch (e) {
+              setErrorMsg(String(e));
+              setTimeout(() => setErrorMsg(""), 5000);
+            }
+          }}
+          showServer={isTauri()}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -840,12 +863,14 @@ function SettingsPanel({
   srvSettings,
   onConnChange,
   onSaveSrv,
+  showServer,
   onClose,
 }: {
   connConfig: ConnConfig;
   srvSettings: SrvSettings | null;
   onConnChange: (c: ConnConfig) => void;
   onSaveSrv: (s: SrvSettings) => void;
+  showServer: boolean;
   onClose: () => void;
 }) {
   const [conn, setConn] = useState<ConnConfig>(connConfig);
@@ -922,10 +947,11 @@ function SettingsPanel({
           </div>
         </div>
 
-        {/* (b) 服务器监听配置：写 settings.json，重启生效 */}
+        {/* (b) 服务器监听配置（仅 Tauri 桌面）：invoke apply_settings 保存 + 热重启 */}
+        {showServer && (
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontWeight: "bold", marginBottom: 8 }}>
-            服务器监听（重启生效）
+            服务器监听（热重启生效）
           </div>
           {srv ? (
             <>
@@ -963,7 +989,7 @@ function SettingsPanel({
               >
                 {saved && (
                   <span style={{ color: "#7ee787", fontSize: 11 }}>
-                    已保存，重启生效
+                    已应用，服务已重启
                   </span>
                 )}
                 <button
@@ -974,17 +1000,18 @@ function SettingsPanel({
                   }}
                   style={btnStyleConfirm}
                 >
-                  保存
+                  应用
                 </button>
               </div>
               <div style={{ fontSize: 11, color: "#ff7b72", marginTop: 4 }}>
-                ⚠ 修改监听端口需重启程序才生效
+                ⚠ 应用后服务热重启，串口连接保留
               </div>
             </>
           ) : (
             <div style={{ color: "#888" }}>加载中…</div>
           )}
         </div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
           <button onClick={onClose} style={btnStyleCancel}>

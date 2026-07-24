@@ -6,6 +6,7 @@
 mod macros_store;
 mod mcp;
 pub mod settings;
+pub mod supervisor;
 pub mod telnet;
 mod ws;
 
@@ -20,7 +21,6 @@ pub struct AppState {
     pub manager: Arc<SerialManager>,
     pub event_bus: Arc<EventBus>,
     pub macros: Arc<std::sync::RwLock<BTreeMap<String, Macro>>>,
-    pub settings: Arc<std::sync::RwLock<settings::Settings>>,
 }
 
 /// 构造默认状态（256 容量的 EventBus + 内置示例宏）。
@@ -28,12 +28,10 @@ pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let manager = Arc::new(SerialManager::new(event_bus.clone()));
     let macros = Arc::new(std::sync::RwLock::new(macros_store::load()));
-    let settings = Arc::new(std::sync::RwLock::new(settings::load()));
     AppState {
         manager,
         event_bus,
         macros,
-        settings,
     }
 }
 

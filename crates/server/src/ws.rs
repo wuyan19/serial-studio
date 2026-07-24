@@ -43,7 +43,6 @@ enum ServerMsg {
         macros: std::collections::BTreeMap<String, ss_core::Macro>,
     },
     MacroResult { name: String, success: bool, message: String },
-    Settings { settings: crate::settings::Settings },
 }
 
 /// 客户端 → 服务器 消息。
@@ -65,10 +64,6 @@ enum ClientMsg {
     },
     ListMacros,
     RunMacro { name: String, port: String },
-    GetSettings,
-    SaveSettings {
-        settings: crate::settings::Settings,
-    },
     SaveMacro {
         name: String,
         r#macro: ss_core::Macro,
@@ -285,23 +280,6 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
             });
-        }
-        ClientMsg::GetSettings => {
-            let s = state.settings.read().unwrap().clone();
-            let _ = out_tx.send(to_json(ServerMsg::Settings { settings: s })).await;
-        }
-        ClientMsg::SaveSettings { settings } => {
-            match crate::settings::save(&settings) {
-                Ok(()) => {
-                    *state.settings.write().unwrap() = settings.clone();
-                    let _ = out_tx
-                        .send(to_json(ServerMsg::Settings { settings }))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
-                }
-            }
         }
         ClientMsg::SaveMacro { name, r#macro } => {
             // RwLock guard 不跨 await：块内完成写+落盘+clone，块外再 send
