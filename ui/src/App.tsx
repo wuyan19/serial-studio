@@ -17,15 +17,13 @@ interface PortInfo {
   name: string;
   opened: boolean;
 }
-interface MacroStep {
-  type: string;
-  data?: string;
-  format?: string;
-  auto_newline?: boolean;
-  ms?: number;
-  pattern?: string;
-  timeout_ms?: number;
-}
+/** 宏步骤（判别联合，与后端 MacroStep 对齐） */
+type MacroStep =
+  | { type: "send"; data: string; format: string; auto_newline: boolean }
+  | { type: "delay"; ms: number }
+  | { type: "expect"; pattern: string; timeout_ms: number }
+  | { type: "clear" };
+type StepType = MacroStep["type"];
 interface Macro {
   description?: string;
   steps: MacroStep[];
@@ -64,8 +62,8 @@ export default function App() {
   // ④宏管理
   const [editing, setEditing] = useState<{ name: string; isNew: boolean } | null>(null);
   const [editorName, setEditorName] = useState("");
-  const [editorJson, setEditorJson] = useState("");
-  const [jsonError, setJsonError] = useState("");
+  const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
+  const [editorError, setEditorError] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
@@ -80,7 +78,6 @@ export default function App() {
 
     ws.onopen = () => {
       setConnected(true);
-      ws.send(JSON.stringify({ action: "list_macros" }));
       ws.send(JSON.stringify({ action: "list" }));
     };
     ws.onclose = () => setConnected(false);
@@ -89,9 +86,6 @@ export default function App() {
       switch (msg.type) {
         case "ports":
           setPorts(msg.ports);
-          break;
-        case "macros":
-          setMacros(msg.macros);
           break;
         case "data": {
           // 按 port 路由到对应 terminal（不管是否 active，都写入保留历史）
@@ -135,6 +129,18 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // ④宏加载：Tauri → invoke load_macros（exe 同目录 macros.json）；
+  //   Web → localStorage 回退。跟着用户走，不存服务端。
+  useEffect(() => {
+    if (isTauri()) {
+      tauriInvoke<Record<string, Macro>>("load_macros")
+        .then(setMacros)
+        .catch((e) => console.error("加载宏失败", e));
+    } else {
+      setMacros(loadMacrosLocal());
+    }
+  }, []);
+
   // 点端口 → 弹配置对话框（pendingPort）；确认后才真正 open
   const confirmOpen = (config: SerialConfig) => {
     if (!pendingPort) return;
@@ -166,7 +172,7 @@ export default function App() {
     }
     setMacroResult({ name, success: true, message: "运行中..." });
     wsRef.current?.send(
-      JSON.stringify({ action: "run_macro", name, port: activePort })
+      JSON.stringify({ action: "run_macro", name, port: activePort, macro: macros[name] })
     );
   };
 
@@ -175,43 +181,41 @@ export default function App() {
     if (name && macros[name]) {
       setEditing({ name, isNew: false });
       setEditorName(name);
-      setEditorJson(JSON.stringify(macros[name], null, 2));
+      // 深拷贝，编辑不影响原对象
+      setEditorMacro(JSON.parse(JSON.stringify(macros[name])));
     } else {
       setEditing({ name: "", isNew: true });
       setEditorName("");
-      setEditorJson(
-        JSON.stringify(
-          { description: "", steps: [{ type: "send", data: "" }] },
-          null,
-          2
-        )
-      );
+      setEditorMacro({ description: "", steps: [newStep("send")] });
     }
-    setJsonError("");
+    setEditorError("");
   };
 
-  const saveMacroDef = () => {
+  const saveMacroDef = async () => {
     const trimmedName = editorName.trim();
     if (!trimmedName) {
-      setJsonError("宏名不能为空");
+      setEditorError("宏名不能为空");
       return;
     }
-    let parsed: Macro;
-    try {
-      parsed = JSON.parse(editorJson);
-    } catch (e) {
-      setJsonError("JSON 解析失败: " + (e as Error).message);
+    // 步骤级校验（send data 非空、delay/expect 数值合法等）
+    const err = validateMacro(editorMacro);
+    if (err) {
+      setEditorError(err);
       return;
     }
-    wsRef.current?.send(
-      JSON.stringify({ action: "save_macro", name: trimmedName, macro: parsed })
-    );
+    // 纯前端：宏存本地文件（跟着用户走），不存服务端
+    const next = { ...macros, [trimmedName]: editorMacro };
+    setMacros(next);
+    await persistMacros(next);
     setEditing(null);
   };
 
-  const deleteMacro = (name: string) => {
+  const deleteMacro = async (name: string) => {
     if (!confirm(`删除宏 "${name}"？`)) return;
-    wsRef.current?.send(JSON.stringify({ action: "delete_macro", name }));
+    const next = { ...macros };
+    delete next[name];
+    setMacros(next);
+    await persistMacros(next);
     setEditing(null);
   };
 
@@ -533,11 +537,11 @@ export default function App() {
       {editing && (
         <MacroEditor
           name={editorName}
-          json={editorJson}
-          error={jsonError}
+          macro={editorMacro}
+          error={editorError}
           isNew={editing.isNew}
           onName={setEditorName}
-          onJson={setEditorJson}
+          onMacroChange={setEditorMacro}
           onSave={saveMacroDef}
           onDelete={() => deleteMacro(editing.name)}
           onCancel={() => setEditing(null)}
@@ -733,7 +737,6 @@ function SerialConfigDialog({
 }) {
   return (
     <div
-      onClick={onCancel}
       style={{
         position: "fixed",
         inset: 0,
@@ -851,13 +854,49 @@ function loadConn(): ConnConfig {
   } catch {
     /* ignore */
   }
-  return { host: location.hostname || "localhost", port: 8080 };
+  return { host: location.hostname || "localhost", port: 18700 };
 }
 function saveConn(c: ConnConfig) {
   try {
     localStorage.setItem(CONN_KEY, JSON.stringify(c));
   } catch {
     /* ignore */
+  }
+}
+
+// 宏是用户配置：Tauri 模式存 exe 同目录 macros.json（控制面 invoke），
+// Web 模式回退 localStorage（浏览器无文件权限）。跟着用户走，不存服务端。
+const MACROS_KEY = "serial-studio-macros";
+
+/** Web 模式：从 localStorage 读（首次为空，无内置示例） */
+function loadMacrosLocal(): Record<string, Macro> {
+  try {
+    const raw = localStorage.getItem(MACROS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
+function persistMacrosLocal(macros: Record<string, Macro>) {
+  try {
+    localStorage.setItem(MACROS_KEY, JSON.stringify(macros));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 持久化宏：Tauri → invoke save_macros；Web → localStorage */
+async function persistMacros(macros: Record<string, Macro>) {
+  if (isTauri()) {
+    try {
+      await tauriInvoke("save_macros", { macros });
+    } catch (e) {
+      console.error("保存宏失败", e);
+    }
+  } else {
+    persistMacrosLocal(macros);
   }
 }
 
@@ -897,7 +936,6 @@ function SettingsPanel({
 
   return (
     <div
-      onClick={onClose}
       style={{
         position: "fixed",
         inset: 0,
@@ -1047,30 +1085,110 @@ const textareaStyle: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
+/** 生成带默认字段的步骤 */
+function newStep(type: StepType): MacroStep {
+  switch (type) {
+    case "send":
+      return { type: "send", data: "", format: "text", auto_newline: true };
+    case "delay":
+      return { type: "delay", ms: 500 };
+    case "expect":
+      return { type: "expect", pattern: "", timeout_ms: 3000 };
+    case "clear":
+      return { type: "clear" };
+  }
+}
+
+/** 步骤级校验，返回错误消息或 null */
+function validateMacro(m: Macro): string | null {
+  if (m.steps.length === 0) return "至少需要一个步骤";
+  for (let i = 0; i < m.steps.length; i++) {
+    const s = m.steps[i];
+    const tag = `步骤 ${i + 1}`;
+    switch (s.type) {
+      case "send":
+        if (!s.data.trim()) return `${tag}：send 数据不能为空`;
+        break;
+      case "delay":
+        if (!s.ms || s.ms <= 0) return `${tag}：delay 毫秒须 > 0`;
+        break;
+      case "expect":
+        if (!s.pattern.trim()) return `${tag}：expect 匹配模式不能为空`;
+        if (!s.timeout_ms || s.timeout_ms <= 0) return `${tag}：expect 超时须 > 0`;
+        break;
+    }
+  }
+  return null;
+}
+
+const addStepBtnStyle: React.CSSProperties = {
+  padding: "4px 10px",
+  background: "#2d2d2d",
+  color: "#7ee787",
+  border: "1px solid #444",
+  borderRadius: 3,
+  cursor: "pointer",
+  fontSize: 12,
+};
+
+const miniBtn: React.CSSProperties = {
+  background: "#2d2d2d",
+  color: "#ddd",
+  border: "1px solid #444",
+  borderRadius: 3,
+  cursor: "pointer",
+  padding: "0 6px",
+  fontSize: 12,
+};
+
+const stepIcon: Record<StepType, string> = {
+  send: "→",
+  delay: "⏱",
+  expect: "⏳",
+  clear: "✕",
+};
+
 function MacroEditor({
   name,
-  json,
+  macro,
   error,
   isNew,
   onName,
-  onJson,
+  onMacroChange,
   onSave,
   onDelete,
   onCancel,
 }: {
   name: string;
-  json: string;
+  macro: Macro;
   error: string;
   isNew: boolean;
   onName: (s: string) => void;
-  onJson: (s: string) => void;
+  onMacroChange: (m: Macro) => void;
   onSave: () => void;
   onDelete: () => void;
   onCancel: () => void;
 }) {
+  const setDesc = (description: string) => onMacroChange({ ...macro, description });
+  const setStep = (i: number, s: MacroStep) => {
+    const steps = macro.steps.slice();
+    steps[i] = s;
+    onMacroChange({ ...macro, steps });
+  };
+  const addStep = (type: StepType) =>
+    onMacroChange({ ...macro, steps: [...macro.steps, newStep(type)] });
+  const removeStep = (i: number) =>
+    onMacroChange({ ...macro, steps: macro.steps.filter((_, j) => j !== i) });
+  const moveStep = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= macro.steps.length) return;
+    const steps = macro.steps.slice();
+    [steps[i], steps[j]] = [steps[j], steps[i]];
+    onMacroChange({ ...macro, steps });
+  };
+
   return (
     <div
-      onClick={onCancel}
       style={{
         position: "fixed",
         inset: 0,
@@ -1089,7 +1207,7 @@ function MacroEditor({
           border: "1px solid #444",
           borderRadius: 6,
           padding: 16,
-          width: 480,
+          width: 560,
           maxWidth: "90vw",
           fontSize: 13,
           maxHeight: "85vh",
@@ -1107,42 +1225,209 @@ function MacroEditor({
             style={{ ...inputStyle, opacity: isNew ? 1 : 0.5 }}
           />
         </ConfigRow>
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ color: "#888", marginBottom: 4 }}>
-            JSON（description + steps）
-          </div>
-          <textarea
-            value={json}
-            onChange={(e) => onJson(e.target.value)}
-            style={{ ...textareaStyle, width: "100%", height: 240 }}
-            spellCheck={false}
+        <ConfigRow label="描述">
+          <input
+            value={macro.description ?? ""}
+            onChange={(e) => setDesc(e.target.value)}
+            placeholder="可选"
+            style={inputStyle}
           />
-        </div>
-        {error && (
-          <div style={{ color: "#ff7b72", fontSize: 12, marginBottom: 8 }}>
-            ⚠ {error}
-          </div>
+        </ConfigRow>
+
+        <div style={{ color: "#888", marginBottom: 6, marginTop: 4 }}>步骤</div>
+        {macro.steps.length === 0 && (
+          <p style={{ color: "#888", fontSize: 12 }}>无步骤（点下方添加）</p>
         )}
+        {macro.steps.map((s, i) => (
+          <StepEditor
+            key={i}
+            step={s}
+            index={i}
+            total={macro.steps.length}
+            onChange={(ns) => setStep(i, ns)}
+            onRemove={() => removeStep(i)}
+            onMoveUp={() => moveStep(i, -1)}
+            onMoveDown={() => moveStep(i, 1)}
+          />
+        ))}
+        <div style={{ display: "flex", gap: 6, margin: "8px 0 12px", flexWrap: "wrap" }}>
+          <button onClick={() => addStep("send")} style={addStepBtnStyle}>＋ 发送</button>
+          <button onClick={() => addStep("delay")} style={addStepBtnStyle}>＋ 延时</button>
+          <button onClick={() => addStep("expect")} style={addStepBtnStyle}>＋ 等待</button>
+          <button onClick={() => addStep("clear")} style={addStepBtnStyle}>＋ 清空</button>
+        </div>
+
+        {error && (
+          <div style={{ color: "#ff7b72", fontSize: 12, marginBottom: 8 }}>⚠ {error}</div>
+        )}
+
+        <details style={{ marginBottom: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#888" }}>JSON 预览（只读）</summary>
+          <pre
+            style={{
+              ...textareaStyle,
+              margin: "6px 0 0",
+              padding: 8,
+              maxHeight: 160,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {JSON.stringify(macro, null, 2)}
+          </pre>
+        </details>
+
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <div>
             {!isNew && (
-              <button onClick={onDelete} style={btnStyleCancel}>
-                🗑 删除
-              </button>
+              <button onClick={onDelete} style={btnStyleCancel}>🗑 删除</button>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onCancel} style={btnStyleCancel}>
-              取消
-            </button>
-            <button onClick={onSave} style={btnStyleConfirm}>
-              保存
-            </button>
+            <button onClick={onCancel} style={btnStyleCancel}>取消</button>
+            <button onClick={onSave} style={btnStyleConfirm}>保存</button>
           </div>
         </div>
-        <div style={{ fontSize: 11, color: "#888", marginTop: 8 }}>
-          steps 类型：send(data/format/auto_newline)、delay(ms)、expect(pattern/timeout_ms)、clear
-        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 单步编辑器：类型切换 + 动态字段 + 排序/删除 */
+function StepEditor({
+  step,
+  index,
+  total,
+  onChange,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+}: {
+  step: MacroStep;
+  index: number;
+  total: number;
+  onChange: (s: MacroStep) => void;
+  onRemove: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+}) {
+  const changeType = (type: StepType) => {
+    if (type === step.type) return;
+    onChange(newStep(type)); // 切换类型重置为默认字段
+  };
+
+  return (
+    <div
+      style={{
+        border: "1px solid #3a3a3a",
+        borderRadius: 4,
+        padding: 8,
+        marginBottom: 6,
+        background: "#252525",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <span style={{ color: "#888", width: 18, textAlign: "center" }}>{stepIcon[step.type]}</span>
+        <span style={{ color: "#888", fontSize: 11 }}>#{index + 1}</span>
+        <select
+          value={step.type}
+          onChange={(e) => changeType(e.target.value as StepType)}
+          style={{ ...selectStyle, flex: "0 0 auto", width: 80 }}
+        >
+          <option value="send">发送</option>
+          <option value="delay">延时</option>
+          <option value="expect">等待</option>
+          <option value="clear">清空</option>
+        </select>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={onMoveUp}
+          disabled={index === 0}
+          title="上移"
+          style={{ ...miniBtn, opacity: index === 0 ? 0.3 : 1 }}
+        >↑</button>
+        <button
+          onClick={onMoveDown}
+          disabled={index === total - 1}
+          title="下移"
+          style={{ ...miniBtn, opacity: index === total - 1 ? 0.3 : 1 }}
+        >↓</button>
+        <button onClick={onRemove} title="删除" style={{ ...miniBtn, color: "#ff7b72" }}>✕</button>
+      </div>
+      <div style={{ paddingLeft: 24 }}>
+        {step.type === "send" && (
+          <>
+            <textarea
+              value={step.data}
+              onChange={(e) => onChange({ ...step, data: e.target.value })}
+              placeholder="发送内容"
+              rows={1}
+              style={{ ...textareaStyle, width: "100%", minHeight: 28 }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 4, flexWrap: "wrap" }}>
+              <label style={{ color: "#888", fontSize: 12 }}>
+                格式
+                <select
+                  value={step.format}
+                  onChange={(e) => onChange({ ...step, format: e.target.value })}
+                  style={{ ...selectStyle, marginLeft: 6, flex: "0 0 auto", width: 72 }}
+                >
+                  <option value="text">text</option>
+                  <option value="hex">hex</option>
+                </select>
+              </label>
+              <label style={{ color: "#888", fontSize: 12, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={step.auto_newline}
+                  onChange={(e) => onChange({ ...step, auto_newline: e.target.checked })}
+                  style={{ marginRight: 4 }}
+                />
+                自动换行（按端口设置）
+              </label>
+            </div>
+          </>
+        )}
+        {step.type === "delay" && (
+          <label style={{ color: "#888", fontSize: 12 }}>
+            等待
+            <input
+              type="number"
+              value={step.ms}
+              onChange={(e) => onChange({ ...step, ms: Number(e.target.value) })}
+              min={1}
+              style={{ ...inputStyle, display: "inline-block", width: 80, margin: "0 6px" }}
+            />
+            毫秒
+          </label>
+        )}
+        {step.type === "expect" && (
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+            <label style={{ color: "#888", fontSize: 12, flex: 1, minWidth: 120 }}>
+              等待匹配
+              <input
+                value={step.pattern}
+                onChange={(e) => onChange({ ...step, pattern: e.target.value })}
+                placeholder="正则 / 子串"
+                style={{ ...inputStyle, display: "block", marginTop: 2 }}
+              />
+            </label>
+            <label style={{ color: "#888", fontSize: 12 }}>
+              超时
+              <input
+                type="number"
+                value={step.timeout_ms}
+                onChange={(e) => onChange({ ...step, timeout_ms: Number(e.target.value) })}
+                min={1}
+                style={{ ...inputStyle, display: "inline-block", width: 70, margin: "0 6px" }}
+              />
+              ms
+            </label>
+          </div>
+        )}
+        {step.type === "clear" && (
+          <div style={{ color: "#888", fontSize: 12 }}>清空接收缓冲区</div>
+        )}
       </div>
     </div>
   );

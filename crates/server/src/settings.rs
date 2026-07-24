@@ -17,13 +17,13 @@ pub struct Settings {
 }
 
 fn default_ws_host() -> String {
-    "127.0.0.1".into()
+    "0.0.0.0".into()
 }
 fn default_ws_port() -> u16 {
-    8080
+    18700
 }
 fn default_telnet_port() -> u16 {
-    8766
+    18701
 }
 
 impl Default for Settings {

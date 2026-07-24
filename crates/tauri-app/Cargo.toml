@@ -13,6 +13,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+ss-core = { workspace = true }
 ss-server = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }

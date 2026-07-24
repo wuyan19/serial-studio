@@ -10,11 +10,11 @@ use ss_server::{create_router, create_state};
 struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 18700)]
     port: u16,
 
     /// Telnet 服务器端口
-    #[arg(long, default_value_t = 8766)]
+    #[arg(long, default_value_t = 18701)]
     telnet_port: u16,
 }
 

@@ -39,9 +39,6 @@ enum ServerMsg {
     Closed { port: String },
     Error { message: String },
     Ok { message: String },
-    Macros {
-        macros: std::collections::BTreeMap<String, ss_core::Macro>,
-    },
     MacroResult { name: String, success: bool, message: String },
 }
 
@@ -62,13 +59,11 @@ enum ClientMsg {
         #[serde(default = "default_encoding")]
         encoding: String,
     },
-    ListMacros,
-    RunMacro { name: String, port: String },
-    SaveMacro {
+    RunMacro {
         name: String,
+        port: String,
         r#macro: ss_core::Macro,
     },
-    DeleteMacro { name: String },
 }
 
 fn default_encoding() -> String {
@@ -243,22 +238,8 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
                 }
             }
         }
-        ClientMsg::ListMacros => {
-            let macros = state.macros.read().unwrap().clone();
-            let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
-        }
-        ClientMsg::RunMacro { name, port } => {
-            // guard 限单语句，cloned 后立即 drop，避免跨 await
-            let cloned = state.macros.read().unwrap().get(&name).cloned();
-            let mac = match cloned {
-                Some(m) => m,
-                None => {
-                    let _ = out_tx
-                        .send(to_json(ServerMsg::Error { message: format!("宏 {} 不存在", name) }))
-                        .await;
-                    return;
-                }
-            };
+        ClientMsg::RunMacro { name, port, r#macro: mac } => {
+            // 宏定义由前端持有（本地存储），服务端无状态，只负责在指定端口执行
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
             let _ = out_tx
@@ -280,37 +261,6 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
             });
-        }
-        ClientMsg::SaveMacro { name, r#macro } => {
-            // RwLock guard 不跨 await：块内完成写+落盘+clone，块外再 send
-            let result = {
-                let mut map = state.macros.write().unwrap();
-                map.insert(name.clone(), r#macro);
-                crate::macros_store::save(&map).map(|_| map.clone())
-            };
-            match result {
-                Ok(macros) => {
-                    let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
-                }
-                Err(e) => {
-                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
-                }
-            }
-        }
-        ClientMsg::DeleteMacro { name } => {
-            let result = {
-                let mut map = state.macros.write().unwrap();
-                map.remove(&name);
-                crate::macros_store::save(&map).map(|_| map.clone())
-            };
-            match result {
-                Ok(macros) => {
-                    let _ = out_tx.send(to_json(ServerMsg::Macros { macros })).await;
-                }
-                Err(e) => {
-                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
-                }
-            }
         }
     }
 }

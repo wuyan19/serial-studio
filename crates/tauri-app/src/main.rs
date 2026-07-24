@@ -77,6 +77,20 @@ async fn service_status(
     Ok(supervisor.status().await)
 }
 
+/// 加载用户宏（exe 同目录 macros.json）。宏是用户配置，跟着用户走，不存服务端状态。
+#[tauri::command]
+async fn load_macros() -> Result<std::collections::BTreeMap<String, ss_core::Macro>, String> {
+    Ok(ss_server::macros_store::load())
+}
+
+/// 保存用户宏到 macros.json。
+#[tauri::command]
+async fn save_macros(
+    macros: std::collections::BTreeMap<String, ss_core::Macro>,
+) -> Result<(), String> {
+    ss_server::macros_store::save(&macros)
+}
+
 /// Headless：Supervisor 启动 + 等 ctrl_c + 停止。
 fn run_headless() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -119,6 +133,8 @@ fn run_gui() {
             save_settings,
             apply_settings,
             service_status,
+            load_macros,
+            save_macros,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
