@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "默认权限：仅核心能力，无文件系统/Shell 等敏感权限",
-  "windows": ["main"],
+  "windows": ["*"],
   "permissions": ["core:default"]
 }

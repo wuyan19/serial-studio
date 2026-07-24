@@ -91,6 +91,26 @@ async fn save_macros(
     ss_server::macros_store::save(&macros)
 }
 
+/// 打开远程窗口（VS Code 风）：新 WebviewWindow 连接指定远程服务。
+/// URL 带 ?remote=host:port，新窗口前端据此切远程模式。同地址已开则聚焦。
+#[tauri::command]
+async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> Result<(), String> {
+    // label 只允许字母数字 / - / : / _，host 的 "." 要替换掉
+    let label = format!("remote-{}-{}", host.replace('.', "_"), port);
+    if let Some(w) = app.get_webview_window(&label) {
+        w.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let url = format!("index.html?remote={}:{}", host, port);
+    let title = format!("Serial Studio · 远程 {}:{}", host, port);
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(900.0, 640.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Headless：Supervisor 启动 + 等 ctrl_c + 停止。
 fn run_headless() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -135,6 +155,7 @@ fn run_gui() {
             service_status,
             load_macros,
             save_macros,
+            open_remote_window,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

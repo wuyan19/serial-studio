@@ -56,7 +56,11 @@ export default function App() {
   const [pendingPort, setPendingPort] = useState<string | null>(null);
   const [serialConfig, setSerialConfig] = useState<SerialConfig>(loadConfig);
   // ③连接/服务器配置
-  const [connConfig, setConnConfig] = useState<ConnConfig>(loadConn);
+  const [connConfig, setConnConfig] = useState<ConnConfig>(initConn);
+  const isRemote = !!getRemoteFromUrl(); // 远程窗口（?remote=）模式
+  // 打开远程窗口对话框
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700 });
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // ④宏管理
@@ -125,7 +129,14 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     tauriInvoke<SrvSettings>("get_settings")
-      .then(setSrvSettings)
+      .then((s) => {
+        setSrvSettings(s);
+        // 本地模式：前端连接端口对齐本地服务实际监听端口
+        // （initConn 用默认 18700 先连上，这里读到真实端口后修正）
+        if (!isRemote) {
+          setConnConfig({ host: "127.0.0.1", port: s.ws_port });
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -219,6 +230,19 @@ export default function App() {
     setEditing(null);
   };
 
+  // VS Code 风：开新窗口连接远程服务（本地窗口保留）
+  const openRemoteWindow = async () => {
+    const host = remoteInput.host.trim();
+    if (!host) return;
+    try {
+      await tauriInvoke("open_remote_window", { host, port: remoteInput.port });
+      setRemoteOpen(false);
+    } catch (e) {
+      setErrorMsg("打开远程窗口失败: " + e);
+      setTimeout(() => setErrorMsg(""), 5000);
+    }
+  };
+
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
       <aside
@@ -244,9 +268,32 @@ export default function App() {
             ⚙
           </button>
         </div>
-        <p style={{ fontSize: 13 }}>
-          状态: {connected ? "🟢 已连接" : "🔴 未连接"} ({connConfig.host}:{connConfig.port})
-        </p>
+        {/* 连接状态：仅远程/Web 显示（本地模式透明，无需关心连接细节） */}
+        {(!isTauri() || isRemote) && (
+          <p style={{ fontSize: 13 }}>
+            {isRemote ? "🔗 远程" : "🌐 Web"} · {connected ? "🟢 已连接" : "🔴 未连接"}{" "}
+            ({connConfig.host}:{connConfig.port})
+          </p>
+        )}
+        {isTauri() && (
+          <button
+            onClick={() => setRemoteOpen(true)}
+            title="打开远程窗口（新窗口连接远程服务）"
+            style={{
+              width: "100%",
+              marginBottom: 8,
+              padding: "5px 8px",
+              background: "#2d2d2d",
+              color: "#ddd",
+              border: "1px solid #444",
+              borderRadius: 3,
+              cursor: "pointer",
+              fontSize: 12,
+            }}
+          >
+            🌐 打开远程窗口
+          </button>
+        )}
 
         <h4 style={{ marginBottom: 8 }}>端口</h4>
         {ports.length === 0 && (
@@ -528,8 +575,18 @@ export default function App() {
               setTimeout(() => setErrorMsg(""), 5000);
             }
           }}
-          showServer={isTauri()}
+          showServer={isTauri() && !isRemote}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {/* ⑤远程连接对话框 */}
+      {remoteOpen && (
+        <RemoteDialog
+          input={remoteInput}
+          onChange={setRemoteInput}
+          onConfirm={openRemoteWindow}
+          onCancel={() => setRemoteOpen(false)}
         />
       )}
 
@@ -856,6 +913,20 @@ function loadConn(): ConnConfig {
   }
   return { host: location.hostname || "localhost", port: 18700 };
 }
+
+/** 远程窗口：URL ?remote=host:port 携带远程地址 */
+function getRemoteFromUrl(): ConnConfig | null {
+  const remote = new URLSearchParams(location.search).get("remote");
+  if (!remote) return null;
+  const [host, portStr] = remote.split(":");
+  const port = parseInt(portStr, 10);
+  return host && port ? { host, port } : null;
+}
+
+/** 初始连接：远程窗口（?remote）> 本地模式（Tauri 连本机服务）> Web（loadConn） */
+function initConn(): ConnConfig {
+  return getRemoteFromUrl() ?? (isTauri() ? { host: "127.0.0.1", port: 18700 } : loadConn());
+}
 function saveConn(c: ConnConfig) {
   try {
     localStorage.setItem(CONN_KEY, JSON.stringify(c));
@@ -962,7 +1033,8 @@ function SettingsPanel({
       >
         <h3 style={{ marginTop: 0, marginBottom: 12 }}>⚙ 设置</h3>
 
-        {/* (a) 连接配置：前端 → 服务器，应用后立即重连 */}
+        {/* (a) 连接配置：远程/Web 模式改连的服务（本地模式连本地固定，隐藏） */}
+        {!showServer && (
         <div
           style={{
             marginBottom: 16,
@@ -988,17 +1060,21 @@ function SettingsPanel({
               style={inputStyle}
             />
           </ConfigRow>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8, gap: 8 }}>
+            <button onClick={onClose} style={btnStyleCancel}>
+              关闭
+            </button>
             <button onClick={() => onConnChange(conn)} style={btnStyleConfirm}>
               应用并重连
             </button>
           </div>
           <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
-            用于 Web 连远程服务器，或 Tauri 连非默认端口
+            改连别的远程 Serial Studio 服务
           </div>
         </div>
+        )}
 
-        {/* (b) 服务器监听配置（仅 Tauri 桌面）：invoke apply_settings 保存 + 热重启 */}
+        {/* (b) 服务器监听配置（仅本地模式）：invoke apply_settings 保存 + 热重启 */}
         {showServer && (
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontWeight: "bold", marginBottom: 8 }}>
@@ -1039,10 +1115,11 @@ function SettingsPanel({
                 }}
               >
                 {saved && (
-                  <span style={{ color: "#7ee787", fontSize: 11 }}>
-                    已应用，服务已重启
-                  </span>
+                  <span style={{ color: "#7ee787", fontSize: 11 }}>已应用</span>
                 )}
+                <button onClick={onClose} style={btnStyleCancel}>
+                  关闭
+                </button>
                 <button
                   onClick={() => {
                     onSaveSrv(srv);
@@ -1054,9 +1131,6 @@ function SettingsPanel({
                   应用
                 </button>
               </div>
-              <div style={{ fontSize: 11, color: "#ff7b72", marginTop: 4 }}>
-                ⚠ 应用后服务热重启，串口连接保留
-              </div>
             </>
           ) : (
             <div style={{ color: "#888" }}>加载中…</div>
@@ -1064,11 +1138,6 @@ function SettingsPanel({
         </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-          <button onClick={onClose} style={btnStyleCancel}>
-            关闭
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -1428,6 +1497,72 @@ function StepEditor({
         {step.type === "clear" && (
           <div style={{ color: "#888", fontSize: 12 }}>清空接收缓冲区</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** 远程连接对话框（VS Code 风：开新窗口连远程服务，本地保留） */
+function RemoteDialog({
+  input,
+  onChange,
+  onConfirm,
+  onCancel,
+}: {
+  input: { host: string; port: number };
+  onChange: (v: { host: string; port: number }) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 100,
+      }}
+    >
+      <div
+        style={{
+          background: "#1e1e1e",
+          color: "#ddd",
+          border: "1px solid #444",
+          borderRadius: 6,
+          padding: 16,
+          width: 380,
+          maxWidth: "90vw",
+          fontSize: 13,
+        }}
+      >
+        <h3 style={{ marginTop: 0, marginBottom: 12 }}>🌐 打开远程窗口</h3>
+        <ConfigRow label="地址">
+          <input
+            value={input.host}
+            onChange={(e) => onChange({ ...input, host: e.target.value })}
+            placeholder="192.168.1.50"
+            style={inputStyle}
+            autoFocus
+          />
+        </ConfigRow>
+        <ConfigRow label="端口">
+          <input
+            type="number"
+            value={input.port}
+            onChange={(e) => onChange({ ...input, port: Number(e.target.value) })}
+            style={inputStyle}
+          />
+        </ConfigRow>
+        <p style={{ fontSize: 11, color: "#888", margin: "8px 0" }}>
+          将在新窗口连接远程 Serial Studio 服务，本地窗口保留。
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={onCancel} style={btnStyleCancel}>取消</button>
+          <button onClick={onConfirm} style={btnStyleConfirm}>连接</button>
+        </div>
       </div>
     </div>
   );
