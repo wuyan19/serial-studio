@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import "@xterm/xterm/css/xterm.css";
 import type {
   ConnConfig,
   Macro,
@@ -19,7 +18,6 @@ import {
   saveConfig,
   saveConn,
   tauriInvoke,
-  addStepBtnStyle,
 } from "./lib";
 import { LocalTransport, RemoteTransport, type Transport } from "./transport";
 import {
@@ -33,11 +31,78 @@ import {
   TermView,
   validateMacro,
 } from "./components";
+import {
+  IconAlert,
+  IconBolt,
+  IconClose,
+  IconEdit,
+  IconGear,
+  IconGlobe,
+  IconInfo,
+  IconPlay,
+  IconPlug,
+  IconPlus,
+  IconRefresh,
+  IconSliders,
+  IconTrash,
+  IconMoon,
+  IconSun,
+} from "./icons";
+import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
+
+type Activity = { rx: number; tx: number };
+
+/** 把 SerialConfig 渲染成仪器读数字符串：115200 8N1 · LF */
+function formatConfig(c: SerialConfig): string {
+  const db = ({ eight: "8", seven: "7", six: "6", five: "5" } as Record<string, string>)[c.data_bits] ?? c.data_bits;
+  const sb = ({ one: "1", two: "2" } as Record<string, string>)[c.stop_bits] ?? c.stop_bits;
+  const pa = ({ none: "N", odd: "O", even: "E" } as Record<string, string>)[c.parity] ?? c.parity;
+  const le = ({ lf: "LF", crlf: "CRLF", cr: "CR" } as Record<string, string>)[c.line_ending] ?? c.line_ending.toUpperCase();
+  return `${c.baud_rate} ${db}${pa}${sb} · ${le}`;
+}
+
+/**
+ * 双通道 TX/RX 活动指示——签名元素。
+ * rAF 轮询读取活动时间戳（来自真实数据面：onData=RX，onWrite=TX），
+ * 命令式刷新 LED 的 data-active，避免每帧 React 重渲染。
+ * prefers-reduced-motion 下 CSS 关闭过渡，LED 仍如实反映流量（只是不脉动）。
+ */
+function Leds({ port, activityRef }: { port: string; activityRef: React.MutableRefObject<Map<string, Activity>> }) {
+  const rxRef = useRef<HTMLSpanElement>(null);
+  const txRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    let raf = 0;
+    const THRESHOLD = 280;
+    const loop = () => {
+      const e = activityRef.current.get(port);
+      const now = performance.now();
+      const rxOn = !!e && now - e.rx < THRESHOLD;
+      const txOn = !!e && now - e.tx < THRESHOLD;
+      if (rxRef.current) rxRef.current.setAttribute("data-active", String(rxOn));
+      if (txRef.current) txRef.current.setAttribute("data-active", String(txOn));
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [port, activityRef]);
+  return (
+    <div className="txrx">
+      <div className="txrx__group">
+        <span className="led" data-dir="rx" ref={rxRef} />
+        <span className="txrx__label rx">RX</span>
+      </div>
+      <div className="txrx__group">
+        <span className="led" data-dir="tx" ref={txRef} />
+        <span className="txrx__label tx">TX</span>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Serial Studio 前端主组件（Tauri 与浏览器共用）。
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
- * VS Code 风布局：活动栏 + 可收起次侧栏 + 主终端区。
+ * 仪器风布局：活动栏 + 可收起次侧栏 + 通道条 + 主终端区。
  */
 export default function App() {
   const [ports, setPorts] = useState<PortInfo[]>([]);
@@ -46,6 +111,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [openPorts, setOpenPorts] = useState<string[]>([]);
   const [activePort, setActivePort] = useState("");
+  const [portConfigs, setPortConfigs] = useState<Record<string, SerialConfig>>({});
   const [errorMsg, setErrorMsg] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingPort, setPendingPort] = useState<string | null>(null);
@@ -62,15 +128,22 @@ export default function App() {
   const [editorError, setEditorError] = useState("");
   type ActivityView = "ports" | "macros" | null;
   const [activity, setActivity] = useState<ActivityView>(null);
-  const [portDialogOpen, setPortDialogOpen] = useState(false);
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [version, setVersion] = useState("");
+  const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
   const transportRef = useRef<Transport | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const activeRef = useRef("");
   activeRef.current = activePort;
+  /** per-port 字节流活动时间戳——驱动 TX/RX LED。 */
+  const activityRef = useRef<Map<string, Activity>>(new Map());
+  const touch = (port: string, dir: "rx" | "tx") => {
+    const e = activityRef.current.get(port) ?? { rx: 0, tx: 0 };
+    e[dir] = performance.now();
+    activityRef.current.set(port, e);
+  };
 
   const isLocal = isTauri() && !isRemote;
 
@@ -84,10 +157,13 @@ export default function App() {
         if (conn) t.list().then(setPorts);
       }),
       t.onData((port, data) => {
+        touch(port, "rx"); // 签名：收到字节 → RX 亮
         const inst = terminalsRef.current.get(port);
         if (inst) inst.term.write(data);
       }),
-      t.onPortOpened(() => { t.list().then(setPorts); }),
+      t.onPortOpened(() => {
+        t.list().then(setPorts);
+      }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签和终端
         setOpenPorts((prev) => {
@@ -95,14 +171,30 @@ export default function App() {
           if (activeRef.current === port) setActivePort(rest[rest.length - 1] ?? "");
           return rest;
         });
+        setPortConfigs((prev) => {
+          if (!prev[port]) return prev;
+          const next = { ...prev };
+          delete next[port];
+          return next;
+        });
         terminalsRef.current.delete(port);
+        activityRef.current.delete(port);
         t.list().then(setPorts);
       }),
-      t.onHolders(() => { t.list().then(setPorts); }),
-      t.onError((msg) => { setErrorMsg(msg); setTimeout(() => setErrorMsg(""), 5000); }),
+      t.onHolders(() => {
+        t.list().then(setPorts);
+      }),
+      t.onError((msg) => {
+        setErrorMsg(msg);
+        setTimeout(() => setErrorMsg(""), 5000);
+      }),
       t.onMacroResult((name, success, message) => setMacroResult({ name, success, message })),
     ];
-    return () => { unsubs.forEach((fn) => fn()); t.dispose(); };
+    return () => {
+      unsubs.forEach((fn) => fn());
+      t.dispose();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLocal, connConfig]);
 
   // 服务器配置：Tauri 控制面 invoke 读本地 settings.json
@@ -130,9 +222,15 @@ export default function App() {
   // 版本号（Tauri getAppVersion）
   useEffect(() => {
     if (isTauri()) {
-      import("@tauri-apps/api/app").then(({ getVersion }) => getVersion()).then(setVersion).catch(() => {});
+      import("@tauri-apps/api/app")
+        .then(({ getVersion }) => getVersion())
+        .then(setVersion)
+        .catch(() => {});
     }
   }, []);
+
+  // 主题：订阅 theme 模块，切换时刷新按钮图标
+  useEffect(() => subscribe(setThemeState), []);
 
   const confirmOpen = async (config: SerialConfig) => {
     const port = pendingPort;
@@ -142,9 +240,10 @@ export default function App() {
     try {
       const res = await transportRef.current?.open(port, config);
       if (!res) return;
-      // 成功占有（首开或附加）：创建本会话的终端标签
+      // 成功占有（首开或附加）：创建本会话的终端标签，并记录端口实际配置供通道条展示
       setOpenPorts((prev) => (prev.includes(port) ? prev : [...prev, port]));
       setActivePort(port);
+      setPortConfigs((prev) => ({ ...prev, [port]: res.config }));
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知用户实际配置
         const c = res.config;
@@ -165,6 +264,13 @@ export default function App() {
       if (activeRef.current === port) setActivePort(rest[rest.length - 1] ?? "");
       return rest;
     });
+    setPortConfigs((prev) => {
+      if (!prev[port]) return prev;
+      const next = { ...prev };
+      delete next[port];
+      return next;
+    });
+    activityRef.current.delete(port);
   };
 
   const forceClosePort = (port: string) => {
@@ -198,9 +304,15 @@ export default function App() {
 
   const saveMacroDef = async () => {
     const trimmedName = editorName.trim();
-    if (!trimmedName) { setEditorError("宏名不能为空"); return; }
+    if (!trimmedName) {
+      setEditorError("宏名不能为空");
+      return;
+    }
     const err = validateMacro(editorMacro);
-    if (err) { setEditorError(err); return; }
+    if (err) {
+      setEditorError(err);
+      return;
+    }
     const next = { ...macros, [trimmedName]: editorMacro };
     setMacros(next);
     await persistMacros(next);
@@ -228,20 +340,37 @@ export default function App() {
     }
   };
 
+  const refreshPorts = () => {
+    transportRef.current?.list().then(setPorts);
+  };
+
+  const activeHolders = ports.find((p) => p.name === activePort)?.holders ?? 0;
+  const activeConfig = activePort ? portConfigs[activePort] : undefined;
+
   return (
-    <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
-      {/* 活动栏（VS Code 风）：48px 窄竖条 */}
-      <div style={{ width: 48, background: "#181818", borderRight: "1px solid #2a2a2a", display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 8, gap: 4, flexShrink: 0 }}>
-        <ActivityIcon icon="🔌" title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
-        <ActivityIcon icon="⚡" title="宏" active={activity === "macros"} onClick={() => setActivity(activity === "macros" ? null : "macros")} />
-        <div style={{ flex: 1 }} />
-        {isTauri() && (<ActivityIcon icon="🌐" title="打开远程窗口" active={false} onClick={() => setRemoteOpen(true)} />)}
-        <div style={{ position: "relative" }}>
-          <ActivityIcon icon="⚙" title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
+    <div className="app">
+      {/* 活动栏：44px 窄竖条 */}
+      <div className="activity-bar">
+        <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
+        <ActivityIcon icon={<IconBolt className="act-icon__svg" />} title="宏" active={activity === "macros"} onClick={() => setActivity(activity === "macros" ? null : "macros")} />
+        <div className="activity-bar__spacer" />
+        {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="打开远程窗口" active={false} onClick={() => setRemoteOpen(true)} />}
+        <ActivityIcon
+          icon={theme === "dark" ? <IconMoon className="act-icon__svg" /> : <IconSun className="act-icon__svg" />}
+          title={theme === "dark" ? "切换亮色模式" : "切换暗色模式"}
+          active={false}
+          onClick={toggleTheme}
+        />
+        <div className="manage">
+          <ActivityIcon icon={<IconSliders className="act-icon__svg" />} title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
           {manageMenu && (
-            <div style={{ position: "absolute", bottom: 0, left: 52, background: "#2d2d2d", border: "1px solid #444", borderRadius: 4, padding: 4, minWidth: 100, zIndex: 200, boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
-              <button onClick={() => { setSettingsOpen(true); setManageMenu(false); }} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", background: "transparent", color: "#ddd", border: "none", cursor: "pointer", fontSize: 13, borderRadius: 3 }}>⚙ 设置</button>
-              <button onClick={() => { setAboutOpen(true); setManageMenu(false); }} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", background: "transparent", color: "#ddd", border: "none", cursor: "pointer", fontSize: 13, borderRadius: 3 }}>ℹ 关于</button>
+            <div className="manage-menu">
+              <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
+                <IconGear /> 设置
+              </button>
+              <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
+                <IconInfo /> 关于
+              </button>
             </div>
           )}
         </div>
@@ -249,32 +378,36 @@ export default function App() {
 
       {/* 次侧栏：当前活动项内容，收起时不占位 */}
       {activity && (
-        <aside style={{ width: 240, borderRight: "1px solid #333", padding: 12, background: "#1e1e1e", color: "#ddd", boxSizing: "border-box", overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <aside className="sidebar">
           {(!isTauri() || isRemote) && (
-            <p style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>
-              {isRemote ? "🔗 远程" : "🌐 Web"} · {connected ? "🟢 已连接" : "🔴 未连接"} ({connConfig.host}:{connConfig.port})
-            </p>
+            <div className="sidebar__conn">
+              <span className={`dot ${connected ? "on" : "off"}`} />
+              {isRemote ? "远程" : "Web"} · {connConfig.host}:{connConfig.port}
+            </div>
           )}
 
           {activity === "ports" && (
             <>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <h4 style={{ margin: 0 }}>串口</h4>
-                <button onClick={() => setPortDialogOpen(true)} title="刷新" style={addStepBtnStyle}>⟳</button>
+              <div className="section-head">
+                <h4 className="section-head__title">PORTS</h4>
+                <button className="icon-btn" onClick={refreshPorts} title="刷新">
+                  <IconRefresh />
+                </button>
               </div>
-              {ports.length === 0 && (<p style={{ color: "#888", fontSize: 13 }}>无可用端口</p>)}
+              {ports.length === 0 && <p className="sidebar__empty">无可用端口</p>}
               {ports.map((p) => {
                 const isActive = p.name === activePort;
                 return (
-                  <div key={p.name} style={{ marginBottom: 6 }}>
-                    <button onClick={() => (openPorts.includes(p.name) ? switchPort(p.name) : setPendingPort(p.name))}
-                      style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: isActive ? "#0e639c" : "#2d2d2d", color: "#ddd", border: "1px solid #444", cursor: "pointer", borderRadius: 3 }}>
-                      {p.opened ? "📂" : "📁"} {p.name}
-                      {p.opened && p.holders > 0 && (
-                        <span style={{ marginLeft: 6, fontSize: 11, color: "#888" }}>· {p.holders} 人</span>
-                      )}
-                    </button>
-                  </div>
+                  <button
+                    key={p.name}
+                    className="port-item"
+                    data-active={isActive}
+                    onClick={() => (openPorts.includes(p.name) ? switchPort(p.name) : setPendingPort(p.name))}
+                  >
+                    <span className={`port-item__dot${p.opened ? " open" : ""}`} />
+                    <span className="port-item__name">{p.name}</span>
+                    {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
+                  </button>
                 );
               })}
             </>
@@ -282,26 +415,34 @@ export default function App() {
 
           {activity === "macros" && (
             <>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <h4 style={{ margin: 0 }}>宏 {activePort ? `→ ${activePort}` : ""}</h4>
-                <button onClick={() => openMacroEditor(null)} title="新增宏" style={{ background: "none", border: "1px solid #444", color: "#ddd", cursor: "pointer", borderRadius: 3, padding: "2px 8px", fontSize: 13 }}>＋</button>
+              <div className="section-head">
+                <h4 className="section-head__title">
+                  MACROS{activePort && <span className="accent">→ {activePort}</span>}
+                </h4>
+                <button className="icon-btn" onClick={() => openMacroEditor(null)} title="新增宏">
+                  <IconPlus />
+                </button>
               </div>
-              {Object.keys(macros).length === 0 && (<p style={{ color: "#888", fontSize: 13 }}>无宏（点 ＋ 新增）</p>)}
+              {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
               {Object.entries(macros).map(([name, m]) => (
-                <div key={name} style={{ marginBottom: 6 }}>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    <button onClick={() => runMacro(name)} disabled={!activePort}
-                      style={{ flex: 1, textAlign: "left", padding: "6px 8px", background: "#2d2d2d", color: activePort ? "#ddd" : "#666", border: "1px solid #444", cursor: activePort ? "pointer" : "not-allowed", borderRadius: 3, fontSize: 13 }}>
-                      ▶ {name}
-                      {m.description && (<span style={{ display: "block", fontSize: 11, color: "#888", marginTop: 2 }}>{m.description}</span>)}
-                    </button>
-                    <button onClick={() => openMacroEditor(name)} title="编辑" style={{ background: "#2d2d2d", color: "#ddd", border: "1px solid #444", cursor: "pointer", borderRadius: 3, padding: "0 6px", fontSize: 13 }}>✎</button>
-                    <button onClick={() => deleteMacro(name)} title="删除" style={{ background: "#2d2d2d", color: "#ff7b72", border: "1px solid #444", cursor: "pointer", borderRadius: 3, padding: "0 6px", fontSize: 13 }}>🗑</button>
-                  </div>
+                <div key={name} className="macro-row">
+                  <button className="macro-run" onClick={() => runMacro(name)} disabled={!activePort}>
+                    <IconPlay />
+                    <span className="macro-run__label">
+                      {name}
+                      {m.description && <span className="macro-run__desc">{m.description}</span>}
+                    </span>
+                  </button>
+                  <button className="icon-btn" onClick={() => openMacroEditor(name)} title="编辑">
+                    <IconEdit />
+                  </button>
+                  <button className="icon-btn icon-btn--danger" onClick={() => deleteMacro(name)} title="删除">
+                    <IconTrash />
+                  </button>
                 </div>
               ))}
               {macroResult && (
-                <div style={{ marginTop: 8, padding: 6, fontSize: 11, borderRadius: 3, background: macroResult.success && macroResult.message !== "运行中..." ? "#1a3a1a" : macroResult.message === "运行中..." ? "#2d2d2d" : "#3a1a1a", color: macroResult.success && macroResult.message !== "运行中..." ? "#7ee787" : macroResult.message === "运行中..." ? "#888" : "#ff7b72", wordBreak: "break-all" }}>
+                <div className={`macro-result ${macroResult.success && macroResult.message !== "运行中..." ? "ok" : macroResult.message === "运行中..." ? "run" : "err"}`}>
                   {macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}
                 </div>
               )}
@@ -310,37 +451,94 @@ export default function App() {
         </aside>
       )}
 
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", background: "#000", minWidth: 0 }}>
+      <main className="main">
         {/* Tab 栏 */}
-        <div style={{ display: "flex", borderBottom: "1px solid #333", background: "#1e1e1e", minHeight: 30, overflowX: "auto" }}>
-          {openPorts.length === 0 && (<span style={{ color: "#666", padding: "6px 12px", fontSize: 13 }}>未打开端口</span>)}
+        <div className="tab-bar">
+          {openPorts.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
           {openPorts.map((port) => {
             const isActive = port === activePort;
             return (
-              <div key={port} onClick={() => switchPort(port)}
-                style={{ padding: "6px 12px", cursor: "pointer", color: isActive ? "#fff" : "#888", background: isActive ? "#2d2d2d" : "transparent", borderRight: "1px solid #333", fontSize: 13, display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-                <span>📂 {port}</span>
+              <div key={port} className="tab" data-active={isActive} onClick={() => switchPort(port)}>
+                <span className="tab__dot" />
+                <span className="tab__name">{port}</span>
                 {isLocal && (
-                  <span onClick={(e) => { e.stopPropagation(); forceClosePort(port); }} style={{ color: "#f0883e", cursor: "pointer", padding: "0 4px" }} title={`强制关闭 ${port}（踢掉所有持有者）`}>⚡</span>
+                  <span
+                    className="tab__btn tab__btn--force"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      forceClosePort(port);
+                    }}
+                    title={`强制关闭 ${port}（踢掉所有持有者）`}
+                  >
+                    <IconBolt />
+                  </span>
                 )}
-                <span onClick={(e) => { e.stopPropagation(); closePort(port); }} style={{ color: "#ff7b72", cursor: "pointer", padding: "0 4px" }} title={`关闭 ${port}`}>✕</span>
+                <span
+                  className="tab__btn tab__btn--close"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closePort(port);
+                  }}
+                  title={`关闭 ${port}`}
+                >
+                  <IconClose />
+                </span>
               </div>
             );
           })}
         </div>
 
-        {errorMsg && (<div style={{ padding: "6px 12px", background: "#3a1a1a", color: "#ff7b72", fontSize: 12 }}>⚠ {errorMsg}</div>)}
-        {notice && (<div style={{ padding: "6px 12px", background: "#3a3a1a", color: "#d29922", fontSize: 12 }}>ℹ {notice}</div>)}
+        {errorMsg && (
+          <div className="banner banner--err">
+            <IconAlert /> {errorMsg}
+          </div>
+        )}
+        {notice && (
+          <div className="banner banner--notice">
+            <IconInfo /> {notice}
+          </div>
+        )}
+
+        {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名） */}
+        {activePort && activeConfig && (
+          <div className="channel-strip">
+            <span className="channel-strip__port">{activePort}</span>
+            <span className="channel-strip__sep">·</span>
+            <span className="channel-strip__config">{formatConfig(activeConfig)}</span>
+            {activeHolders > 0 && (
+              <>
+                <span className="channel-strip__sep">·</span>
+                <span className="channel-strip__holders">● {activeHolders} 人</span>
+              </>
+            )}
+            <span className="channel-strip__spacer" />
+            <Leds port={activePort} activityRef={activityRef} />
+          </div>
+        )}
 
         {/* 终端区：每个 openPort 一个 TermView，display 切换可见（不销毁） */}
-        <div style={{ flex: 1, position: "relative" }}>
+        <div className="term-area">
           {openPorts.map((port) => (
-            <TermView key={port} port={port} active={port === activePort}
-              onWrite={(p, data) => transportRef.current?.write(p, data)}
-              onReady={(inst) => { if (inst) terminalsRef.current.set(port, inst); else terminalsRef.current.delete(port); }}
+            <TermView
+              key={port}
+              port={port}
+              active={port === activePort}
+              onWrite={(p, data) => {
+                touch(p, "tx"); // 签名：发出字节 → TX 亮
+                transportRef.current?.write(p, data);
+              }}
+              onReady={(inst) => {
+                if (inst) terminalsRef.current.set(port, inst);
+                else terminalsRef.current.delete(port);
+              }}
             />
           ))}
-          {openPorts.length === 0 && (<div style={{ color: "#888", padding: 16 }}>点左侧 🔌 打开串口</div>)}
+          {openPorts.length === 0 && (
+            <div className="term-empty">
+              <IconPlug className="term-empty__icon" />
+              <div>从左侧 PORTS 打开一个串口开始收发</div>
+            </div>
+          )}
         </div>
       </main>
 
@@ -351,8 +549,14 @@ export default function App() {
 
       {/* 设置面板 */}
       {settingsOpen && (
-        <SettingsPanel connConfig={connConfig} srvSettings={srvSettings} showServer={isTauri() && !isRemote}
-          onConnChange={(c) => { saveConn(c); setConnConfig(c); }}
+        <SettingsPanel
+          connConfig={connConfig}
+          srvSettings={srvSettings}
+          showServer={isTauri() && !isRemote}
+          onConnChange={(c) => {
+            saveConn(c);
+            setConnConfig(c);
+          }}
           onSaveSrv={async (s) => {
             if (!isTauri()) return;
             try {
@@ -369,14 +573,22 @@ export default function App() {
         />
       )}
 
-      {aboutOpen && (<AboutDialog version={version} onClose={() => setAboutOpen(false)} />)}
-      {remoteOpen && (<RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={openRemoteWindow} onCancel={() => setRemoteOpen(false)} />)}
+      {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
+      {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={openRemoteWindow} onCancel={() => setRemoteOpen(false)} />}
 
       {/* 宏编辑器 */}
       {editing && (
-        <MacroEditor name={editorName} macro={editorMacro} error={editorError} isNew={editing.isNew}
-          onName={setEditorName} onMacroChange={setEditorMacro} onSave={saveMacroDef}
-          onDelete={() => deleteMacro(editing.name)} onCancel={() => setEditing(null)} />
+        <MacroEditor
+          name={editorName}
+          macro={editorMacro}
+          error={editorError}
+          isNew={editing.isNew}
+          onName={setEditorName}
+          onMacroChange={setEditorMacro}
+          onSave={saveMacroDef}
+          onDelete={() => deleteMacro(editing.name)}
+          onCancel={() => setEditing(null)}
+        />
       )}
     </div>
   );

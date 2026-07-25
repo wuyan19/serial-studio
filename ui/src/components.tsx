@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一引入
 import { FitAddon } from "@xterm/addon-fit";
 import type {
   ConnConfig,
@@ -10,29 +11,90 @@ import type {
   StepType,
   TermInstance,
 } from "./types";
+import { BAUD_RATES } from "./lib";
+import { getTheme, subscribe, type Theme } from "./theme";
 import {
-  addStepBtnStyle,
-  BAUD_RATES,
-  btnStyleCancel,
-  btnStyleConfirm,
-  inputStyle,
-  miniBtn,
-  selectStyle,
-  textareaStyle,
-} from "./lib";
+  IconAlert,
+  IconBolt,
+  IconChevronDown,
+  IconChevronUp,
+  IconClose,
+  IconGear,
+  IconGlobe,
+  IconPlug,
+  IconPlus,
+  IconTrash,
+} from "./icons";
 
 // ===== 通用 =====
 
 export function ConfigRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-      <span style={{ minWidth: 72, color: "#888", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>
+    <div className="row">
+      <span className="row__label">{label}</span>
       {children}
     </div>
   );
 }
 
 // ===== 终端视图 =====
+
+/** xterm 主题：仪器风——teal(RX) 光标、graphite 画布，ANSI 色映射到信号调色板。 */
+const TERM_THEME: ITheme = {
+  background: "#0e1014",
+  foreground: "#c9d2e0",
+  cursor: "#4fd6c2",
+  cursorAccent: "#0e1014",
+  selectionBackground: "rgba(79,214,194,0.22)",
+  black: "#0e1014",
+  brightBlack: "#5c6270",
+  red: "#e5534b",
+  brightRed: "#f2a65a",
+  green: "#7ee787",
+  brightGreen: "#9cf0a6",
+  yellow: "#e3b341",
+  brightYellow: "#f2cc60",
+  blue: "#5ba3d0",
+  brightBlue: "#7fbfdd",
+  magenta: "#c792ea",
+  brightMagenta: "#d6a8f0",
+  cyan: "#4fd6c2",
+  brightCyan: "#7be3d4",
+  white: "#e6e9ef",
+  brightWhite: "#ffffff",
+};
+
+const MONO_STACK =
+  "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', Consolas, ui-monospace, monospace";
+
+/** 亮色 xterm 配色：象牙底 + 深石墨字 + 深青光标。canvas 不吃 CSS 变量，故单独定义。 */
+const TERM_THEME_LIGHT: ITheme = {
+  background: "#fbfaf5",
+  foreground: "#3a3d44",
+  cursor: "#0c7f73",
+  cursorAccent: "#fbfaf5",
+  selectionBackground: "rgba(12,127,115,0.18)",
+  black: "#fbfaf5",
+  brightBlack: "#8b9099",
+  red: "#c8392f",
+  brightRed: "#b06a16",
+  green: "#187a43",
+  brightGreen: "#1f9352",
+  yellow: "#9a6b0c",
+  brightYellow: "#b07e0a",
+  blue: "#2563a0",
+  brightBlue: "#3b78b8",
+  magenta: "#9b4d96",
+  brightMagenta: "#a85aa6",
+  cyan: "#0c7f73",
+  brightCyan: "#0d9b8a",
+  white: "#3a3d44",
+  brightWhite: "#23262b",
+};
+
+function termThemeFor(t: Theme): ITheme {
+  return t === "light" ? TERM_THEME_LIGHT : TERM_THEME;
+}
 
 export function TermView({
   port,
@@ -47,34 +109,62 @@ export function TermView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const termRef = useRef<Terminal | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const term = new Terminal();
+    const term = new Terminal({
+      fontFamily: MONO_STACK,
+      fontSize: 13,
+      lineHeight: 1.3,
+      cursorBlink: true,
+      cursorStyle: "bar",
+      theme: termThemeFor(getTheme()),
+      allowProposedApi: true,
+      scrollback: 10000,
+    });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
     fitRef.current = fit;
+    termRef.current = term;
     onReady({ term, fit });
     const disposable = term.onData((data) => onWrite(port, data));
     const timer = setTimeout(() => {
-      try { fit.fit(); term.focus(); } catch { /* 容器未可见 */ }
+      try {
+        fit.fit();
+        term.focus();
+      } catch {
+        /* 容器未可见 */
+      }
     }, 50);
     return () => {
       clearTimeout(timer);
       disposable.dispose();
       term.dispose();
       fitRef.current = null;
+      termRef.current = null;
       onReady(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [port]);
 
+  // 主题切换 → 同步 xterm canvas 配色（canvas 不吃 CSS 变量）
+  useEffect(() => {
+    return subscribe((t) => {
+      if (termRef.current) termRef.current.options.theme = termThemeFor(t);
+    });
+  }, []);
+
   useEffect(() => {
     if (active && fitRef.current) {
       const timer = setTimeout(() => {
-        try { fitRef.current?.fit(); } catch { /* ignore */ }
+        try {
+          fitRef.current?.fit();
+        } catch {
+          /* ignore */
+        }
       }, 0);
       return () => clearTimeout(timer);
     }
@@ -83,18 +173,17 @@ export function TermView({
   useEffect(() => {
     if (!active) return;
     const onResize = () => {
-      try { fitRef.current?.fit(); } catch { /* ignore */ }
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* ignore */
+      }
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [active]);
 
-  return (
-    <div
-      ref={containerRef}
-      style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }}
-    />
-  );
+  return <div ref={containerRef} style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }} />;
 }
 
 // ===== 串口配置对话框 =====
@@ -113,42 +202,63 @@ export function SerialConfigDialog({
   onCancel: () => void;
 }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#1e1e1e", color: "#ddd", border: "1px solid #444", borderRadius: 6, padding: 16, minWidth: 320, fontSize: 13 }}>
-        <h3 style={{ marginTop: 0, marginBottom: 12 }}>打开 {port}</h3>
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconPlug /> OPEN PORT
+        </h3>
+        <div className="dialog__sub">{port}</div>
         <ConfigRow label="波特率">
-          <select value={config.baud_rate} onChange={(e) => onChange({ ...config, baud_rate: Number(e.target.value) })} style={selectStyle}>
-            {BAUD_RATES.map((b) => (<option key={b} value={b}>{b}</option>))}
+          <select value={config.baud_rate} onChange={(e) => onChange({ ...config, baud_rate: Number(e.target.value) })} className="field-select">
+            {BAUD_RATES.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
           </select>
         </ConfigRow>
         <ConfigRow label="数据位">
-          <select value={config.data_bits} onChange={(e) => onChange({ ...config, data_bits: e.target.value })} style={selectStyle}>
-            <option value="eight">8</option><option value="seven">7</option><option value="six">6</option><option value="five">5</option>
+          <select value={config.data_bits} onChange={(e) => onChange({ ...config, data_bits: e.target.value })} className="field-select">
+            <option value="eight">8</option>
+            <option value="seven">7</option>
+            <option value="six">6</option>
+            <option value="five">5</option>
           </select>
         </ConfigRow>
         <ConfigRow label="停止位">
-          <select value={config.stop_bits} onChange={(e) => onChange({ ...config, stop_bits: e.target.value })} style={selectStyle}>
-            <option value="one">1</option><option value="two">2</option>
+          <select value={config.stop_bits} onChange={(e) => onChange({ ...config, stop_bits: e.target.value })} className="field-select">
+            <option value="one">1</option>
+            <option value="two">2</option>
           </select>
         </ConfigRow>
         <ConfigRow label="校验">
-          <select value={config.parity} onChange={(e) => onChange({ ...config, parity: e.target.value })} style={selectStyle}>
-            <option value="none">None</option><option value="odd">Odd</option><option value="even">Even</option>
+          <select value={config.parity} onChange={(e) => onChange({ ...config, parity: e.target.value })} className="field-select">
+            <option value="none">None</option>
+            <option value="odd">Odd</option>
+            <option value="even">Even</option>
           </select>
         </ConfigRow>
         <ConfigRow label="流控">
-          <select value={config.flow_control} onChange={(e) => onChange({ ...config, flow_control: e.target.value })} style={selectStyle}>
-            <option value="none">None</option><option value="software">Software (XON/XOFF)</option><option value="hardware">Hardware (RTS/CTS)</option>
+          <select value={config.flow_control} onChange={(e) => onChange({ ...config, flow_control: e.target.value })} className="field-select">
+            <option value="none">None</option>
+            <option value="software">Software (XON/XOFF)</option>
+            <option value="hardware">Hardware (RTS/CTS)</option>
           </select>
         </ConfigRow>
         <ConfigRow label="换行符">
-          <select value={config.line_ending} onChange={(e) => onChange({ ...config, line_ending: e.target.value })} style={selectStyle}>
-            <option value="crlf">CRLF (\r\n) — Windows/AT</option><option value="lf">LF (\n) — Linux/Unix</option><option value="cr">CR (\r)</option>
+          <select value={config.line_ending} onChange={(e) => onChange({ ...config, line_ending: e.target.value })} className="field-select">
+            <option value="crlf">CRLF (\r\n) — Windows/AT</option>
+            <option value="lf">LF (\n) — Linux/Unix</option>
+            <option value="cr">CR (\r)</option>
           </select>
         </ConfigRow>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onCancel} style={btnStyleCancel}>取消</button>
-          <button onClick={() => onConfirm(config)} style={btnStyleConfirm}>打开</button>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button className="btn btn--primary" onClick={() => onConfirm(config)}>
+            打开
+          </button>
         </div>
       </div>
     </div>
@@ -176,54 +286,73 @@ export function SettingsPanel({
   const [srv, setSrv] = useState<SrvSettings | null>(srvSettings);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { setSrv(srvSettings); }, [srvSettings]);
+  useEffect(() => {
+    setSrv(srvSettings);
+  }, [srvSettings]);
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#1e1e1e", color: "#ddd", border: "1px solid #444", borderRadius: 6, padding: 16, minWidth: 360, fontSize: 13, maxHeight: "80vh", overflowY: "auto" }}>
-        <h3 style={{ marginTop: 0, marginBottom: 12 }}>⚙ 设置</h3>
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconGear /> SETTINGS
+        </h3>
 
         {!showServer && (
-        <div style={{ marginBottom: 16, borderBottom: "1px solid #333", paddingBottom: 12 }}>
-          <div style={{ fontWeight: "bold", marginBottom: 8 }}>连接（前端 → 服务器）</div>
-          <ConfigRow label="主机">
-            <input value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} style={inputStyle} />
-          </ConfigRow>
-          <ConfigRow label="端口">
-            <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} style={inputStyle} />
-          </ConfigRow>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8, gap: 8 }}>
-            <button onClick={onClose} style={btnStyleCancel}>关闭</button>
-            <button onClick={() => onConnChange(conn)} style={btnStyleConfirm}>应用并重连</button>
-          </div>
-          <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>改连别的远程 Serial Studio 服务</div>
-        </div>
+          <>
+            <div className="dialog__group-label">连接（前端 → 服务器）</div>
+            <ConfigRow label="主机">
+              <input value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" />
+            </ConfigRow>
+            <ConfigRow label="端口">
+              <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" />
+            </ConfigRow>
+            <p className="dialog__hint">改连别的远程 Serial Studio 服务</p>
+            <div className="btn-row">
+              <button className="btn btn--ghost" onClick={onClose}>
+                关闭
+              </button>
+              <button className="btn btn--primary" onClick={() => onConnChange(conn)}>
+                应用并重连
+              </button>
+            </div>
+          </>
         )}
 
         {showServer && (
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontWeight: "bold", marginBottom: 8 }}>服务器监听（热重启生效）</div>
-          {srv ? (
-            <>
-              <ConfigRow label="监听地址">
-                <input value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} style={inputStyle} />
-              </ConfigRow>
-              <ConfigRow label="WS 端口">
-                <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} style={inputStyle} />
-              </ConfigRow>
-              <ConfigRow label="Telnet 端口">
-                <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} style={inputStyle} />
-              </ConfigRow>
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8, gap: 8, alignItems: "center" }}>
-                {saved && (<span style={{ color: "#7ee787", fontSize: 11 }}>已应用</span>)}
-                <button onClick={onClose} style={btnStyleCancel}>关闭</button>
-                <button onClick={() => { onSaveSrv(srv); setSaved(true); setTimeout(() => setSaved(false), 3000); }} style={btnStyleConfirm}>应用</button>
-              </div>
-            </>
-          ) : (
-            <div style={{ color: "#888" }}>加载中…</div>
-          )}
-        </div>
+          <>
+            <div className="dialog__group-label">服务器监听（热重启生效）</div>
+            {srv ? (
+              <>
+                <ConfigRow label="监听地址">
+                  <input value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" />
+                </ConfigRow>
+                <ConfigRow label="WS 端口">
+                  <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" />
+                </ConfigRow>
+                <ConfigRow label="Telnet 端口">
+                  <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" />
+                </ConfigRow>
+                <div className="btn-row">
+                  {saved && <span className="btn--save-pulse">已应用</span>}
+                  <button className="btn btn--ghost" onClick={onClose}>
+                    关闭
+                  </button>
+                  <button
+                    className="btn btn--primary"
+                    onClick={() => {
+                      onSaveSrv(srv);
+                      setSaved(true);
+                      setTimeout(() => setSaved(false), 3000);
+                    }}
+                  >
+                    应用
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ color: "var(--ink-faint)" }}>加载中…</div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -234,10 +363,14 @@ export function SettingsPanel({
 
 export function newStep(type: StepType): MacroStep {
   switch (type) {
-    case "send": return { type: "send", data: "", format: "text", auto_newline: true };
-    case "delay": return { type: "delay", ms: 500 };
-    case "expect": return { type: "expect", pattern: "", timeout_ms: 3000 };
-    case "clear": return { type: "clear" };
+    case "send":
+      return { type: "send", data: "", format: "text", auto_newline: true };
+    case "delay":
+      return { type: "delay", ms: 500 };
+    case "expect":
+      return { type: "expect", pattern: "", timeout_ms: 3000 };
+    case "clear":
+      return { type: "clear" };
   }
 }
 
@@ -262,10 +395,61 @@ export function validateMacro(m: Macro): string | null {
   return null;
 }
 
-const stepIcon: Record<StepType, string> = { send: "→", delay: "⏱", expect: "⏳", clear: "✕" };
+const STEP_TAG: Record<StepType, string> = { send: "SEND", delay: "DELAY", expect: "EXPECT", clear: "CLEAR" };
+
+function StepGlyph({ type }: { type: StepType }) {
+  const common = {
+    width: 11,
+    height: 11,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.7,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  switch (type) {
+    case "send":
+      return (
+        <svg {...common}>
+          <path d="M4 12h14M13 6l6 6-6 6" />
+        </svg>
+      );
+    case "delay":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="13" r="7.5" />
+          <path d="M12 9.5v3.6l2.4 1.5" />
+          <path d="M9.5 3.5h5" />
+        </svg>
+      );
+    case "expect":
+      return (
+        <svg {...common}>
+          <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" />
+          <circle cx="12" cy="12" r="2.6" />
+        </svg>
+      );
+    case "clear":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8" />
+          <path d="M6.5 6.5l11 11" />
+        </svg>
+      );
+  }
+}
 
 export function MacroEditor({
-  name, macro, error, isNew, onName, onMacroChange, onSave, onDelete, onCancel,
+  name,
+  macro,
+  error,
+  isNew,
+  onName,
+  onMacroChange,
+  onSave,
+  onDelete,
+  onCancel,
 }: {
   name: string;
   macro: Macro;
@@ -294,40 +478,71 @@ export function MacroEditor({
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#1e1e1e", color: "#ddd", border: "1px solid #444", borderRadius: 6, padding: 16, width: 560, maxWidth: "90vw", fontSize: 13, maxHeight: "85vh", overflowY: "auto" }}>
-        <h3 style={{ marginTop: 0, marginBottom: 12 }}>{isNew ? "新增宏" : `编辑 ${name}`}</h3>
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconBolt /> MACRO
+        </h3>
+        <div className="dialog__sub">{isNew ? "新增宏" : name}</div>
         <ConfigRow label="名称">
-          <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} style={{ ...inputStyle, opacity: isNew ? 1 : 0.5 }} />
+          <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
         </ConfigRow>
         <ConfigRow label="描述">
-          <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" style={inputStyle} />
+          <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
         </ConfigRow>
-        <div style={{ color: "#888", marginBottom: 6, marginTop: 4 }}>步骤</div>
-        {macro.steps.length === 0 && (<p style={{ color: "#888", fontSize: 12 }}>无步骤（点下方添加）</p>)}
-        {macro.steps.map((s, i) => (
-          <StepEditor key={i} step={s} index={i} total={macro.steps.length}
-            onChange={(ns) => setStep(i, ns)} onRemove={() => removeStep(i)}
-            onMoveUp={() => moveStep(i, -1)} onMoveDown={() => moveStep(i, 1)} />
-        ))}
-        <div style={{ display: "flex", gap: 6, margin: "8px 0 12px", flexWrap: "wrap" }}>
-          <button onClick={() => addStep("send")} style={addStepBtnStyle}>＋ 发送</button>
-          <button onClick={() => addStep("delay")} style={addStepBtnStyle}>＋ 延时</button>
-          <button onClick={() => addStep("expect")} style={addStepBtnStyle}>＋ 等待</button>
-          <button onClick={() => addStep("clear")} style={addStepBtnStyle}>＋ 清空</button>
+
+        <div className="dialog__group-label" style={{ marginTop: 6 }}>
+          步骤
         </div>
-        {error && (<div style={{ color: "#ff7b72", fontSize: 12, marginBottom: 8 }}>⚠ {error}</div>)}
-        <details style={{ marginBottom: 8 }}>
-          <summary style={{ cursor: "pointer", color: "#888" }}>JSON 预览（只读）</summary>
-          <pre style={{ ...textareaStyle, margin: "6px 0 0", padding: 8, maxHeight: 160, overflow: "auto", whiteSpace: "pre-wrap" }}>
-            {JSON.stringify(macro, null, 2)}
-          </pre>
+        {macro.steps.length === 0 && <p className="sidebar__empty">无步骤（点下方添加）</p>}
+        {macro.steps.map((s, i) => (
+          <StepEditor
+            key={i}
+            step={s}
+            index={i}
+            total={macro.steps.length}
+            onChange={(ns) => setStep(i, ns)}
+            onRemove={() => removeStep(i)}
+            onMoveUp={() => moveStep(i, -1)}
+            onMoveDown={() => moveStep(i, 1)}
+          />
+        ))}
+
+        <div className="add-step-row">
+          <button className="add-step" onClick={() => addStep("send")}>
+            <IconPlus /> 发送
+          </button>
+          <button className="add-step" onClick={() => addStep("delay")}>
+            <IconPlus /> 延时
+          </button>
+          <button className="add-step" onClick={() => addStep("expect")}>
+            <IconPlus /> 等待
+          </button>
+          <button className="add-step" onClick={() => addStep("clear")}>
+            <IconPlus /> 清空
+          </button>
+        </div>
+
+        {error && (
+          <div className="editor-error">
+            <IconAlert /> {error}
+          </div>
+        )}
+
+        <details>
+          <summary className="json-summary">JSON 预览（只读）</summary>
+          <pre className="json-preview">{JSON.stringify(macro, null, 2)}</pre>
         </details>
-        <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <div>{!isNew && (<button onClick={onDelete} style={btnStyleCancel}>🗑 删除</button>)}</div>
+
+        <div className="btn-row" style={{ justifyContent: "space-between" }}>
+          <div>{!isNew && <button className="btn btn--danger" onClick={onDelete}><IconTrash /></button>}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onCancel} style={btnStyleCancel}>取消</button>
-            <button onClick={onSave} style={btnStyleConfirm}>保存</button>
+            <button className="btn btn--ghost" onClick={onCancel}>
+              取消
+            </button>
+            <button className="btn btn--primary" onClick={onSave}>
+              保存
+            </button>
           </div>
         </div>
       </div>
@@ -336,7 +551,13 @@ export function MacroEditor({
 }
 
 function StepEditor({
-  step, index, total, onChange, onRemove, onMoveUp, onMoveDown,
+  step,
+  index,
+  total,
+  onChange,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
 }: {
   step: MacroStep;
   index: number;
@@ -352,57 +573,72 @@ function StepEditor({
   };
 
   return (
-    <div style={{ border: "1px solid #3a3a3a", borderRadius: 4, padding: 8, marginBottom: 6, background: "#252525" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-        <span style={{ color: "#888", width: 18, textAlign: "center" }}>{stepIcon[step.type]}</span>
-        <span style={{ color: "#888", fontSize: 11 }}>#{index + 1}</span>
-        <select value={step.type} onChange={(e) => changeType(e.target.value as StepType)} style={{ ...selectStyle, flex: "0 0 auto", width: 80 }}>
-          <option value="send">发送</option><option value="delay">延时</option><option value="expect">等待</option><option value="clear">清空</option>
+    <div className="step-card" data-kind={step.type}>
+      <div className="step-head">
+        <span className="step-num">#{String(index + 1).padStart(2, "0")}</span>
+        <span className="step-tag">
+          <StepGlyph type={step.type} />
+          {STEP_TAG[step.type]}
+        </span>
+        <select value={step.type} onChange={(e) => changeType(e.target.value as StepType)} className="field-select" style={{ flex: "0 0 auto", width: 92 }}>
+          <option value="send">发送</option>
+          <option value="delay">延时</option>
+          <option value="expect">等待</option>
+          <option value="clear">清空</option>
         </select>
-        <div style={{ flex: 1 }} />
-        <button onClick={onMoveUp} disabled={index === 0} title="上移" style={{ ...miniBtn, opacity: index === 0 ? 0.3 : 1 }}>↑</button>
-        <button onClick={onMoveDown} disabled={index === total - 1} title="下移" style={{ ...miniBtn, opacity: index === total - 1 ? 0.3 : 1 }}>↓</button>
-        <button onClick={onRemove} title="删除" style={{ ...miniBtn, color: "#ff7b72" }}>✕</button>
+        <div className="step-head__spacer" />
+        <div className="step-actions">
+          <button onClick={onMoveUp} disabled={index === 0} title="上移" className="mini-btn">
+            <IconChevronUp />
+          </button>
+          <button onClick={onMoveDown} disabled={index === total - 1} title="下移" className="mini-btn">
+            <IconChevronDown />
+          </button>
+          <button onClick={onRemove} title="删除" className="mini-btn mini-btn--danger">
+            <IconClose />
+          </button>
+        </div>
       </div>
-      <div style={{ paddingLeft: 24 }}>
+      <div className="step-body">
         {step.type === "send" && (
           <>
-            <textarea value={step.data} onChange={(e) => onChange({ ...step, data: e.target.value })} placeholder="发送内容" rows={1} style={{ ...textareaStyle, width: "100%", minHeight: 28 }} />
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 4, flexWrap: "wrap" }}>
-              <label style={{ color: "#888", fontSize: 12 }}>
+            <textarea value={step.data} onChange={(e) => onChange({ ...step, data: e.target.value })} placeholder="发送内容" rows={1} className="field-textarea" />
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6, flexWrap: "wrap" }}>
+              <label className="inline-label">
                 格式
-                <select value={step.format} onChange={(e) => onChange({ ...step, format: e.target.value })} style={{ ...selectStyle, marginLeft: 6, flex: "0 0 auto", width: 72 }}>
-                  <option value="text">text</option><option value="hex">hex</option>
+                <select value={step.format} onChange={(e) => onChange({ ...step, format: e.target.value })} className="field-select" style={{ marginLeft: 6, flex: "0 0 auto", width: 74 }}>
+                  <option value="text">text</option>
+                  <option value="hex">hex</option>
                 </select>
               </label>
-              <label style={{ color: "#888", fontSize: 12, cursor: "pointer" }}>
-                <input type="checkbox" checked={step.auto_newline} onChange={(e) => onChange({ ...step, auto_newline: e.target.checked })} style={{ marginRight: 4 }} />
+              <label className="inline-label">
+                <input type="checkbox" checked={step.auto_newline} onChange={(e) => onChange({ ...step, auto_newline: e.target.checked })} />
                 自动换行（按端口设置）
               </label>
             </div>
           </>
         )}
         {step.type === "delay" && (
-          <label style={{ color: "#888", fontSize: 12 }}>
+          <label className="inline-label">
             等待
-            <input type="number" value={step.ms} onChange={(e) => onChange({ ...step, ms: Number(e.target.value) })} min={1} style={{ ...inputStyle, display: "inline-block", width: 80, margin: "0 6px" }} />
+            <input type="number" value={step.ms} onChange={(e) => onChange({ ...step, ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 84, margin: "0 6px" }} />
             毫秒
           </label>
         )}
         {step.type === "expect" && (
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
-            <label style={{ color: "#888", fontSize: 12, flex: 1, minWidth: 120 }}>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap" }}>
+            <label className="inline-label" style={{ flex: 1, minWidth: 140, flexDirection: "column", alignItems: "stretch" }}>
               等待匹配
-              <input value={step.pattern} onChange={(e) => onChange({ ...step, pattern: e.target.value })} placeholder="正则 / 子串" style={{ ...inputStyle, display: "block", marginTop: 2 }} />
+              <input value={step.pattern} onChange={(e) => onChange({ ...step, pattern: e.target.value })} placeholder="正则 / 子串" className="field" style={{ display: "block", marginTop: 4 }} />
             </label>
-            <label style={{ color: "#888", fontSize: 12 }}>
+            <label className="inline-label">
               超时
-              <input type="number" value={step.timeout_ms} onChange={(e) => onChange({ ...step, timeout_ms: Number(e.target.value) })} min={1} style={{ ...inputStyle, display: "inline-block", width: 70, margin: "0 6px" }} />
+              <input type="number" value={step.timeout_ms} onChange={(e) => onChange({ ...step, timeout_ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 74, margin: "0 6px" }} />
               ms
             </label>
           </div>
         )}
-        {step.type === "clear" && (<div style={{ color: "#888", fontSize: 12 }}>清空接收缓冲区</div>)}
+        {step.type === "clear" && <div className="step-body__note">清空接收缓冲区</div>}
       </div>
     </div>
   );
@@ -410,10 +646,9 @@ function StepEditor({
 
 // ===== 活动栏 / 关于 / 远程 =====
 
-export function ActivityIcon({ icon, title, active, onClick }: { icon: string; title: string; active: boolean; onClick: () => void }) {
+export function ActivityIcon({ icon, title, active, onClick }: { icon: React.ReactNode; title: string; active: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} title={title}
-      style={{ width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, background: "transparent", color: active ? "#fff" : "#888", border: "none", borderLeft: active ? "2px solid #fff" : "2px solid transparent", cursor: "pointer", boxSizing: "border-box" }}>
+    <button onClick={onClick} title={title} data-active={active} className="act-icon" aria-label={title}>
       {icon}
     </button>
   );
@@ -421,15 +656,23 @@ export function ActivityIcon({ icon, title, active, onClick }: { icon: string; t
 
 export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ background: "#1e1e1e", color: "#ddd", border: "1px solid #444", borderRadius: 6, padding: 24, width: 360, maxWidth: "90vw", textAlign: "center" }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}>🔌</div>
-        <h3 style={{ margin: "0 0 4px" }}>Serial Studio</h3>
-        <p style={{ color: "#888", margin: "0 0 16px", fontSize: 13 }}>版本 {version || "..."}</p>
-        <p style={{ color: "#aaa", fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
-          多形态串口通信工具<br />本地/远程双模式 · Tauri + WebSocket
-        </p>
-        <button onClick={onClose} style={btnStyleConfirm}>关闭</button>
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="about">
+          <div className="about__mark">
+            <IconPlug />
+          </div>
+          <h3 className="about__name">Serial Studio</h3>
+          <p className="about__version">版本 {version || "…"}</p>
+          <p className="about__tagline">
+            多形态串口通信工具
+            <br />
+            <span className="pip">本地 / 远程</span> 双模式 · Tauri + WebSocket
+          </p>
+          <button className="btn btn--primary" onClick={onClose}>
+            关闭
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -442,19 +685,26 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
   onCancel: () => void;
 }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ background: "#1e1e1e", color: "#ddd", border: "1px solid #444", borderRadius: 6, padding: 16, width: 380, maxWidth: "90vw", fontSize: 13 }}>
-        <h3 style={{ marginTop: 0, marginBottom: 12 }}>🌐 打开远程窗口</h3>
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconGlobe /> REMOTE
+        </h3>
+        <div className="dialog__sub">连接远程服务</div>
         <ConfigRow label="地址">
-          <input value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" style={inputStyle} autoFocus />
+          <input value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoFocus />
         </ConfigRow>
         <ConfigRow label="端口">
-          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} style={inputStyle} />
+          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" />
         </ConfigRow>
-        <p style={{ fontSize: 11, color: "#888", margin: "8px 0" }}>将在新窗口连接远程 Serial Studio 服务，本地窗口保留。</p>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button onClick={onCancel} style={btnStyleCancel}>取消</button>
-          <button onClick={onConfirm} style={btnStyleConfirm}>连接</button>
+        <p className="dialog__hint">将在新窗口连接远程 Serial Studio 服务，本地窗口保留。</p>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button className="btn btn--primary" onClick={onConfirm}>
+            连接
+          </button>
         </div>
       </div>
     </div>

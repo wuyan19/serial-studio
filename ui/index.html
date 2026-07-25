@@ -1,12 +1,37 @@
 <!doctype html>
-<html lang="zh">
+<html lang="zh" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Serial Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <style>
       html, body, #root { margin: 0; height: 100%; }
+      html { background: #14161a; color-scheme: dark; }
+      html[data-theme="light"] { background: #f4f2ec; color-scheme: light; }
     </style>
+    <script>
+      // 首帧前定主题，避免闪烁。优先用户选择，否则跟随系统。
+      (function () {
+        try {
+          var s = localStorage.getItem("serial-studio-theme");
+          var t =
+            s === "light" || s === "dark"
+              ? s
+              : window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+          document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
