@@ -10,7 +10,12 @@ pub mod supervisor;
 pub mod telnet;
 mod ws;
 
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{extract::State, routing::{get, post}, Json, Router};
+use rust_embed::RustEmbed;
 use ss_core::{EventBus, RealPortOpener, SerialManager};
 use std::sync::Arc;
 
@@ -29,12 +34,40 @@ pub fn create_state() -> AppState {
 }
 
 
+/// 内嵌前端（ui/dist，编译期打入）。ss-server 单文件即"网关 + 网页"：
+/// 浏览器开 http://host:port/ 直接出界面，自动连本机 /ws。
+#[derive(RustEmbed)]
+#[folder = "../../ui/dist"]
+struct WebAsset;
+
+/// 静态资源 + SPA 回退：命中文件就返回，否则回退 index.html。
+async fn serve_web(req: Request) -> Response {
+    let path = req.uri().path().trim_start_matches('/');
+    if !path.is_empty() {
+        if let Some(file) = WebAsset::get(path) {
+            return asset_response(path, file);
+        }
+    }
+    match WebAsset::get("index.html") {
+        Some(file) => asset_response("index.html", file),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
+    let ct = mime_guess::from_path(path).first_or_octet_stream().to_string();
+    let mut res = Response::new(Body::from(file.data.into_owned()));
+    res.headers_mut().insert(header::CONTENT_TYPE, ct.parse().unwrap());
+    res
+}
+
 /// 构造 axum 路由。GUI/headless 共用。
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/ports", get(list_ports))
         .route("/mcp", post(mcp::mcp_handler))
+        .fallback(serve_web)
         .with_state(state)
 }
 

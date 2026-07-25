@@ -56,7 +56,8 @@ export function loadConn(): ConnConfig {
   } catch {
     /* ignore */
   }
-  return { host: location.hostname || "localhost", port: 18700 };
+  // Web 模式默认连"同源"：从 ss-server 打开页面时即连回它自己（含自定义 --port）
+  return { host: location.hostname || "localhost", port: location.port ? Number(location.port) : 18700 };
 }
 export function saveConn(c: ConnConfig) {
   try {
