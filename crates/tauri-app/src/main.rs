@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
-#[command(name = "ss-tauri", version, about = "Serial Studio 桌面应用")]
+#[command(name = "serial-studio", version, about = "Serial Studio 桌面应用")]
 struct Args {
     /// 禁用 GUI，以 headless 模式运行（仅后台服务）
     #[arg(long)]

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Serial Studio Tauri 桌面壳"
 
 [[bin]]
-name = "ss-tauri"
+name = "serial-studio"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -17,7 +17,9 @@ ss-core = { workspace = true }
 ss-server = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
-tauri = { version = "2", features = ["devtools"] }
+# devtools 不在 release 启用：debug 构建由 Tauri 自动开启（cargo tauri dev 照常 F12），
+# release 不带 F12，既省体积也避免线上可调试。
+tauri = { version = "2", features = [] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
