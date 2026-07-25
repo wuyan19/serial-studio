@@ -81,6 +81,11 @@ pub async fn run(
             if quit_read.load(Ordering::Relaxed) {
                 return;
             }
+            // 匀化节奏（借鉴 terminal-serial）：固定周期读，把细碎 read 攒成匀速小批，
+            // 降低 IPC 次数与抖动幅度，缓解 webview 架构下输入/输出双 IPC 抖动导致的
+            // “忽快忽慢”。代价：数据最多等一个周期(~5ms)才被读。
+            // 5ms ≈ 每帧(rAF 16ms)约 3 批；要更匀调大、要更低延迟调小。
+            std::thread::sleep(Duration::from_millis(5));
             let mut buf = [0u8; 1024];
             let n = {
                 let mut guard = match port_for_read.lock() {

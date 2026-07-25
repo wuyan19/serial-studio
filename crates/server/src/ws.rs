@@ -38,7 +38,6 @@ use tokio::sync::mpsc;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
     Ports { ports: Vec<ss_core::PortInfo> },
-    Data { port: String, data: String, encoding: String },
     Opened { port: String },
     Closed { port: String },
     /// open 的直接回复：opened=true 首开，false 附加（config 为实际配置，holders 为当前持有数）。
@@ -90,9 +89,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // 输出 channel：所有要发给 client 的消息汇到这里统一发送（避免 select 中 &mut 冲突）
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+    let (out_tx, mut out_rx) = mpsc::channel::<OutFrame>(64);
 
-    // 订阅 EventBus
+    // 订阅原始事件流（A/B：暂时跳过合批层测延迟；MCP 不走此路，不受影响）
     let mut event_rx = state.event_bus.subscribe();
 
     // 推送初始端口列表
@@ -143,7 +142,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             Some(out) = out_rx.recv() => {
-                if ws_tx.send(Message::Text(out)).await.is_err() {
+                let msg = match out {
+                    OutFrame::Text(s) => Message::Text(s),
+                    OutFrame::Binary(v) => Message::Binary(v),
+                };
+                if ws_tx.send(msg).await.is_err() {
                     break;
                 }
             }
@@ -159,31 +162,45 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     tracing::info!("WS 客户端断开 (session={:?})", session);
 }
 
-fn to_json(msg: ServerMsg) -> String {
-    serde_json::to_string(&msg).unwrap()
+/// 输出帧：控制消息走 Text(JSON)，串口数据走 Binary(帧头+原始字节)。
+enum OutFrame {
+    Text(String),
+    Binary(Vec<u8>),
 }
 
-fn event_to_msg(event: &SerialEvent) -> Option<String> {
-    let msg = match event {
-        SerialEvent::DataReceived { port, data } => ServerMsg::Data {
-            port: port.clone(),
-            data: hex::encode(data),
-            encoding: "hex".into(),
-        },
-        SerialEvent::PortOpened { port } => ServerMsg::Opened { port: port.clone() },
-        SerialEvent::PortClosed { port } => ServerMsg::Closed { port: port.clone() },
-        SerialEvent::HoldersChanged { port, holders } => ServerMsg::Holders {
+/// 构造数据 Binary 帧：`[port_len:u8][port UTF-8][data]`。
+/// port_len 用 u8：串口设备名（COMn、/dev/ttyUSBn）远小于 255；超长由 debug_assert 拦截。
+fn data_frame(port: &str, data: &[u8]) -> Vec<u8> {
+    debug_assert!(port.len() <= 255, "port name too long for binary frame header");
+    let port_bytes = port.as_bytes();
+    let mut frame = Vec::with_capacity(1 + port_bytes.len() + data.len());
+    frame.push(port_bytes.len() as u8);
+    frame.extend_from_slice(port_bytes);
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn to_json(msg: ServerMsg) -> OutFrame {
+    OutFrame::Text(serde_json::to_string(&msg).unwrap())
+}
+
+fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
+    Some(match event {
+        // 数据走 Binary 帧直传字节（[port_len][port][data]），前端零解码
+        SerialEvent::DataReceived { port, data } => OutFrame::Binary(data_frame(port, data)),
+        SerialEvent::PortOpened { port } => to_json(ServerMsg::Opened { port: port.clone() }),
+        SerialEvent::PortClosed { port } => to_json(ServerMsg::Closed { port: port.clone() }),
+        SerialEvent::HoldersChanged { port, holders } => to_json(ServerMsg::Holders {
             port: port.clone(),
             holders: *holders,
-        },
-        SerialEvent::Error { port, message } => ServerMsg::Error {
+        }),
+        SerialEvent::Error { port, message } => to_json(ServerMsg::Error {
             message: format!("{}: {}", port, message),
-        },
-    };
-    Some(to_json(msg))
+        }),
+    })
 }
 
-async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<String>, session: SessionId) {
+async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<OutFrame>, session: SessionId) {
     let msg: ClientMsg = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
@@ -296,5 +313,33 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<S
                 let _ = out_tx2.send(to_json(msg)).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_frame_layout() {
+        let f = data_frame("COM3", &[0x41, 0x42, 0x43]);
+        // [port_len=4][C O M 3][data...]
+        assert_eq!(f, vec![4, b'C', b'O', b'M', b'3', 0x41, 0x42, 0x43]);
+    }
+
+    #[test]
+    fn data_frame_empty_data() {
+        let f = data_frame("COM7", &[]);
+        assert_eq!(f, vec![4, b'C', b'O', b'M', b'7']);
+    }
+
+    #[test]
+    fn data_frame_multibyte_port() {
+        // 多字节端口名（UTF-8）：port_len 是字节长度，不是字符数
+        let port = "串口1";
+        let f = data_frame(port, &[0xff]);
+        assert_eq!(f[0] as usize, port.len());
+        assert_eq!(&f[1..1 + port.len()], port.as_bytes());
+        assert_eq!(&f[1 + port.len()..], &[0xff]);
     }
 }

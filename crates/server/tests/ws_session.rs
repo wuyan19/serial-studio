@@ -77,7 +77,10 @@ impl PortOpener for FakeOpener {
 async fn boot() -> (String, Arc<SerialManager>) {
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpener)));
-    let state = AppState { manager: manager.clone(), event_bus };
+    let state = AppState {
+        manager: manager.clone(),
+        event_bus,
+    };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

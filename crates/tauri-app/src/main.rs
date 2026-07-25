@@ -14,7 +14,7 @@
 use clap::Parser;
 use ss_core::SessionId;
 use ss_server::AppState;
-use tauri::{Emitter, Manager};
+use tauri::{ipc::{Channel, InvokeResponseBody}, Emitter, Manager};
 use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
 use ss_server::create_state;
@@ -133,40 +133,120 @@ impl SessionRegistry {
     }
 }
 
+/// 本地模式字节直传通道注册表：(窗口 label, 端口) → Channel。
+///
+/// 与 SessionRegistry 同构（都按 window.label 索引），让 Destroyed 清理一行搞定。
+/// DataReceived 按 port 广播到所有登记窗口——当前只有主窗口用 LocalTransport，
+/// 远程窗口走 WS 不登记 channel，故 send 返回 0 时静默丢弃（本地不关心）。
+#[derive(Default)]
+struct PortChannels {
+    // window_label → (port → channel)
+    map: Mutex<HashMap<String, HashMap<String, Channel<InvokeResponseBody>>>>,
+}
+
+impl PortChannels {
+    /// 登记。同 (window,port) 重复登记覆盖前者（前端 reload 重连场景）。
+    fn register(&self, window_label: &str, port: &str, channel: Channel<InvokeResponseBody>) {
+        let mut map = self.map.lock().unwrap();
+        map.entry(window_label.to_string())
+            .or_default()
+            .insert(port.to_string(), channel);
+    }
+
+    /// 按 port 广播原始字节到所有登记窗口。返回命中窗口数。
+    /// 锁内只收集 Channel clone（Arc 内部，廉价），立即放锁再 send，
+    /// 避免 Channel::send 的 webview eval 在锁内阻塞 register/remove。
+    fn send(&self, port: &str, data: Vec<u8>) -> usize {
+        let targets: Vec<Channel<InvokeResponseBody>> = {
+            let map = self.map.lock().unwrap();
+            map.values().filter_map(|w| w.get(port).cloned()).collect()
+        };
+        let len = targets.len();
+        if len == 0 {
+            return 0;
+        }
+        let mut data = Some(data);
+        for (i, ch) in targets.iter().enumerate() {
+            // 最后一个窗口吃原始 data（move），其余 clone。实际单窗口恒为 1 个。
+            let payload = if i == len - 1 {
+                data.take().unwrap()
+            } else {
+                data.as_ref().unwrap().clone()
+            };
+            // send 失败（webview 已死）→ Err，静默忽略；不阻断其它窗口
+            let _ = ch.send(InvokeResponseBody::Raw(payload));
+        }
+        len
+    }
+
+    /// 摘某窗口某端口（close_port_stream）。
+    fn remove_port(&self, window_label: &str, port: &str) {
+        if let Some(w) = self.map.lock().unwrap().get_mut(window_label) {
+            w.remove(port);
+        }
+    }
+
+    /// 摘所有窗口下该端口（PortClosed 全局关闭兜底）。
+    fn remove_port_all(&self, port: &str) {
+        for w in self.map.lock().unwrap().values_mut() {
+            w.remove(port);
+        }
+    }
+
+    /// 摘某窗口全部通道（Destroyed）。
+    fn remove_window(&self, window_label: &str) {
+        self.map.lock().unwrap().remove(window_label);
+    }
+}
+
 #[tauri::command]
 async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::PortInfo>, String> {
     Ok(state.manager.list_ports().await)
 }
 
+/// 打开端口并订阅字节流。
+/// 顺序：先 register channel 再 acquire——确保端口产生数据前通道已就位，不丢首批；
+/// acquire 失败时回滚 register，防悬挂通道。
 #[tauri::command]
-async fn open_port(
+async fn open_port_stream(
     sessions: tauri::State<'_, SessionRegistry>,
+    channels: tauri::State<'_, PortChannels>,
     state: tauri::State<'_, AppState>,
     window: tauri::Window,
     port: String,
     config: ss_core::SerialConfig,
+    on_event: Channel<InvokeResponseBody>,
 ) -> Result<ss_core::AcquireResult, String> {
     let session = sessions.get_or_create(window.label());
-    state
-        .manager
-        .acquire(port, config, session)
-        .await
-        .map_err(|e| e.to_string())
+    let label = window.label().to_string();
+    channels.register(&label, &port, on_event);
+    match state.manager.acquire(port.clone(), config, session).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            channels.remove_port(&label, &port);
+            Err(e.to_string())
+        }
+    }
 }
 
+/// 关闭订阅并释放持有。先 release 再 remove：
+/// release 期间仍在途的数据能被通道消费；末位释放触发 PortClosed 会兜底 remove_port_all。
 #[tauri::command]
-async fn close_port(
+async fn close_port_stream(
     sessions: tauri::State<'_, SessionRegistry>,
+    channels: tauri::State<'_, PortChannels>,
     state: tauri::State<'_, AppState>,
     window: tauri::Window,
     port: String,
 ) -> Result<ss_core::ReleaseOutcome, String> {
     let session = sessions.get_or_create(window.label());
-    state
+    let outcome = state
         .manager
         .release(&port, session)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    channels.remove_port(window.label(), &port);
+    Ok(outcome)
 }
 
 /// 强制关闭：无视持有者直接拆毁。仅本地 UI 提供（不暴露给 WS）。
@@ -220,15 +300,20 @@ fn spawn_event_emitter(app: tauri::AppHandle, event_bus: std::sync::Arc<ss_core:
         while let Ok(event) = rx.recv().await {
             match event {
                 ss_core::SerialEvent::DataReceived { port, data } => {
-                    let _ = app.emit(
-                        "serial-data",
-                        serde_json::json!({ "port": port, "data": hex::encode(&data) }),
-                    );
+                    // 本地字节直传：per-(window,port) channel 二进制快路径。
+                    // 无 channel（端口仅 WS/telnet 持有）→ send 返回 0，静默丢弃。
+                    if let Some(c) = app.try_state::<PortChannels>() {
+                        c.send(&port, data);
+                    }
                 }
                 ss_core::SerialEvent::PortOpened { port } => {
                     let _ = app.emit("serial-opened", &port);
                 }
                 ss_core::SerialEvent::PortClosed { port } => {
+                    // 端口全局关闭：摘所有窗口该端口通道，防悬挂发送到已无效订阅
+                    if let Some(c) = app.try_state::<PortChannels>() {
+                        c.remove_port_all(&port);
+                    }
                     let _ = app.emit("serial-closed", &port);
                 }
                 ss_core::SerialEvent::HoldersChanged { port, holders } => {
@@ -272,10 +357,15 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let app = window.app_handle();
+                let label = window.label().to_string();
+                // 先摘本窗口通道，防后续 DataReceived 发到已销毁 webview
+                if let Some(channels) = app.try_state::<PortChannels>() {
+                    channels.remove_window(&label);
+                }
                 let mgr = app.try_state::<AppState>().map(|s| s.manager.clone());
                 let session = app
                     .try_state::<SessionRegistry>()
-                    .and_then(|s| s.take(window.label()));
+                    .and_then(|s| s.take(&label));
                 if let (Some(mgr), Some(session)) = (mgr, session) {
                     tauri::async_runtime::spawn(async move {
                         let released = mgr.release_all(session).await;
@@ -295,7 +385,12 @@ fn run_gui() {
             let supervisor = Arc::new(ServiceSupervisor::new(state.clone()));
             let settings = ss_server::settings::load();
 
-            // 本地模式数据流：EventBus → Tauri event（推给前端 LocalTransport）
+            // 窗口级 state 必须在 spawn_event_emitter 之前 manage：
+            // emitter 的 DataReceived 分支用 try_state::<PortChannels>()
+            app.manage(SessionRegistry::default());
+            app.manage(PortChannels::default());
+
+            // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
             spawn_event_emitter(app.handle().clone(), state.event_bus.clone());
 
             // 启动初始服务（异步，不阻塞 setup）
@@ -308,7 +403,6 @@ fn run_gui() {
 
             app.manage(state);
             app.manage(supervisor);
-            app.manage(SessionRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -320,8 +414,8 @@ fn run_gui() {
             save_macros,
             open_remote_window,
             list_ports,
-            open_port,
-            close_port,
+            open_port_stream,
+            close_port_stream,
             force_close_port,
             write_port,
             run_macro,
