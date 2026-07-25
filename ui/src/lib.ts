@@ -115,3 +115,16 @@ export async function persistMacros(macros: Record<string, Macro>) {
 // ===== 共享常量 =====
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+/** 触发浏览器下载一个 JSON 文件（WebView2 内同样可用）。 */
+export function downloadJson(filename: string, obj: unknown) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

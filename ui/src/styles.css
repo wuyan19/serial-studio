@@ -248,6 +248,10 @@ button {
   align-items: center;
   margin-bottom: 10px;
 }
+.section-head__actions {
+  display: flex;
+  gap: 4px;
+}
 .section-head__title {
   margin: 0;
   font-family: var(--font-mono);

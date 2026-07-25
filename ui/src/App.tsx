@@ -41,6 +41,7 @@ import {
   IconGear,
   IconGlobe,
   IconInfo,
+  IconImport,
   IconPlay,
   IconPlug,
   IconPlus,
@@ -102,6 +103,29 @@ function Leds({ port, activityRef }: { port: string; activityRef: React.MutableR
   );
 }
 
+/** 对象是否像一个 Macro（有 steps 数组）。 */
+function isMacroLike(v: unknown): v is Macro {
+  return !!v && typeof v === "object" && Array.isArray((v as { steps?: unknown }).steps);
+}
+function uniqueMacroName(base: string, taken: Record<string, unknown>): string {
+  if (!taken[base]) return base;
+  let i = 2;
+  while (taken[`${base} ${i}`]) i++;
+  return `${base} ${i}`;
+}
+/** 导入 JSON → [名称, 宏]：兼容 {"名称": 宏} 记录 与 单个宏对象。 */
+function parseImportedMacros(data: unknown, existing: Record<string, Macro>): [string, Macro][] {
+  if (isMacroLike(data)) return [[uniqueMacroName("导入的宏", existing), data]];
+  if (data && typeof data === "object") {
+    const out: [string, Macro][] = [];
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      if (isMacroLike(v)) out.push([k, v]);
+    }
+    return out;
+  }
+  return [];
+}
+
 /**
  * Serial Studio 前端主组件（Tauri 与浏览器共用）。
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
@@ -148,6 +172,7 @@ export default function App() {
 
   const transportRef = useRef<Transport | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
+  const importInputRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef("");
   activeRef.current = activePort;
   /** per-port 字节流活动时间戳——驱动 TX/RX LED。 */
@@ -384,6 +409,42 @@ export default function App() {
     });
   };
 
+  /** 导入宏：读 JSON 文件，合并入库（重名/无效跳过），Tauri/Web 均落 persistMacros。 */
+  const onImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const entries = parseImportedMacros(data, macros);
+      if (entries.length === 0) {
+        setErrorMsg('导入失败：未找到有效宏（需 {"名称": {steps:[...]}} 或单个宏）');
+        setTimeout(() => setErrorMsg(""), 6000);
+        return;
+      }
+      const next = { ...macros };
+      let added = 0;
+      let skipped = 0;
+      for (const [n, m] of entries) {
+        if (next[n] || validateMacro(m)) {
+          skipped++;
+          continue;
+        }
+        next[n] = m;
+        added++;
+      }
+      if (added > 0) {
+        setMacros(next);
+        await persistMacros(next);
+      }
+      setNotice(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或无效）` : ""}。`);
+      setTimeout(() => setNotice(""), 5000);
+    } catch (err) {
+      setErrorMsg("导入失败：" + String(err));
+      setTimeout(() => setErrorMsg(""), 6000);
+    }
+  };
+
   const openRemoteWindow = async () => {
     const host = remoteInput.host.trim();
     if (!host) return;
@@ -497,9 +558,21 @@ export default function App() {
                 <h4 className="section-head__title">
                   MACROS{activePort && <span className="accent">→ {activePort}</span>}
                 </h4>
-                <button className="icon-btn" onClick={() => openMacroEditor(null)} title="新增宏">
-                  <IconPlus />
-                </button>
+                <div className="section-head__actions">
+                  <button className="icon-btn" onClick={() => importInputRef.current?.click()} title="导入宏">
+                    <IconImport />
+                  </button>
+                  <button className="icon-btn" onClick={() => openMacroEditor(null)} title="新增宏">
+                    <IconPlus />
+                  </button>
+                </div>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: "none" }}
+                  onChange={onImportFile}
+                />
               </div>
               {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
               {Object.entries(macros).map(([name]) => (

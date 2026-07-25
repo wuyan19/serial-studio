@@ -13,7 +13,7 @@ import type {
   StepType,
   TermInstance,
 } from "./types";
-import { BAUD_RATES } from "./lib";
+import { BAUD_RATES, downloadJson } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
 import {
@@ -23,6 +23,7 @@ import {
   IconChevronUp,
   IconClose,
   IconCopy,
+  IconExport,
   IconGear,
   IconGlobe,
   IconGrip,
@@ -774,7 +775,23 @@ export function MacroEditor({
         </details>
 
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
-          <div>{!isNew && <button className="btn btn--danger btn--icon" onClick={onDelete}><IconTrash /></button>}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="btn btn--ghost btn--icon"
+              onClick={() => {
+                const n = name.trim() || "macro";
+                downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: macro });
+              }}
+              title="导出为 JSON 文件（可分享 / 导入）"
+            >
+              <IconExport />
+            </button>
+            {!isNew && (
+              <button className="btn btn--danger btn--icon" onClick={onDelete} title="删除">
+                <IconTrash />
+              </button>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn btn--ghost" onClick={onCancel}>
               取消

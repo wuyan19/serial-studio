@@ -236,3 +236,25 @@ export function IconGrip({ className }: IconProps) {
     </Svg>
   );
 }
+
+/** 导入宏（文件 → 应用，箭头入匣）。 */
+export function IconImport({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="M7 10l5 5 5-5" />
+      <path d="M12 15V3" />
+    </Svg>
+  );
+}
+
+/** 导出宏（应用 → 文件，箭头出匣）。 */
+export function IconExport({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="M17 8l-5-5-5 5" />
+      <path d="M12 3v12" />
+    </Svg>
+  );
+}
