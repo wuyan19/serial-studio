@@ -16,9 +16,6 @@ pub enum SerialError {
     #[error("串口 {0} 未打开")]
     NotOpen(String),
 
-    #[error("串口 {0} 已打开")]
-    AlreadyOpen(String),
-
     #[error("串口写入失败: {0}")]
     WriteFailed(String),
 

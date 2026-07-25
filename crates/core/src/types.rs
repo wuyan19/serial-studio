@@ -3,6 +3,7 @@
 //! 这些类型可从 JSON 反序列化，供 WS / REST / MCP 各接入层共用。
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 串口配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +42,7 @@ fn default_flow_control() -> FlowControl {
     FlowControl::None
 }
 fn default_line_ending() -> LineEnding {
-    LineEnding::CRLF
+    LineEnding::LF
 }
 fn default_timeout_ms() -> u64 {
     100
@@ -55,7 +56,7 @@ impl Default for SerialConfig {
             stop_bits: StopBits::One,
             parity: Parity::None,
             flow_control: FlowControl::None,
-            line_ending: LineEnding::CRLF,
+            line_ending: LineEnding::LF,
             timeout_ms: 100,
         }
     }
@@ -102,11 +103,50 @@ pub enum LineEnding {
     CRLF,
 }
 
-/// 端口信息（含是否已由本管理器打开）。
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 会话标识：一条 WS 连接或一个 Tauri 窗口的唯一身份，进程内全局单调递增。
+/// 仅需进程内唯一，故用自增计数器而非 uuid。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    /// 分配一个新的会话标识。
+    pub fn next() -> Self {
+        Self(NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// acquire 的结果：区分"真正打开"与"附加到已开端口"。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AcquireResult {
+    /// 本次真正打开了端口（首个持有者）。
+    Opened { config: SerialConfig },
+    /// 端口已开，本次为附加（持有者 +1）。config 为端口当前实际配置
+    /// （请求的配置被忽略），调用方应据此告知用户。
+    Attached { config: SerialConfig, holders: usize },
+}
+
+/// release 的结果：本会话退出持有的实际效果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReleaseOutcome {
+    /// 本会话是末位持有者，端口已拆毁。
+    Closed,
+    /// 仍有其它持有者，端口保持打开。
+    Released { remaining: usize },
+    /// 本会话未持有此端口（幂等，非错误）。
+    NotHeld,
+}
+
+/// 端口信息（含是否已由本管理器打开及当前持有者数）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PortInfo {
     pub name: String,
     pub opened: bool,
+    /// 当前持有该端口的会话数（多端共享时 >1）。
+    pub holders: usize,
 }
 
 #[cfg(test)]
@@ -118,6 +158,7 @@ mod tests {
         let c = SerialConfig::default();
         assert_eq!(c.baud_rate, 115200);
         assert_eq!(c.data_bits, DataBits::Eight);
+        assert_eq!(c.line_ending, LineEnding::LF);
         assert_eq!(c.timeout_ms, 100);
     }
 
@@ -128,6 +169,7 @@ mod tests {
         assert_eq!(c.baud_rate, 9600);
         assert_eq!(c.parity, Parity::None);
         assert_eq!(c.data_bits, DataBits::Eight);
+        assert_eq!(c.line_ending, LineEnding::LF);
     }
 
     #[test]

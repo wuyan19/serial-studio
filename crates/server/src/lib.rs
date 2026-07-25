@@ -11,7 +11,7 @@ pub mod telnet;
 mod ws;
 
 use axum::{extract::State, routing::{get, post}, Json, Router};
-use ss_core::{EventBus, SerialManager};
+use ss_core::{EventBus, RealPortOpener, SerialManager};
 use std::sync::Arc;
 
 /// 应用共享状态：GUI 模式和 headless 模式共用。
@@ -24,7 +24,7 @@ pub struct AppState {
 /// 构造默认状态。宏定义存前端本地，服务端无状态（只执行 run_macro）。
 pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
-    let manager = Arc::new(SerialManager::new(event_bus.clone()));
+    let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(RealPortOpener)));
     AppState { manager, event_bus }
 }
 

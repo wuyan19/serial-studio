@@ -26,3 +26,7 @@ bytes = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 futures-util = "0.3"
+
+[dev-dependencies]
+tokio-tungstenite = "0.21"
+serialport = { workspace = true }

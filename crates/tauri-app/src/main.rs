@@ -12,12 +12,14 @@
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
 use clap::Parser;
+use ss_core::SessionId;
 use ss_server::AppState;
 use tauri::{Emitter, Manager};
 use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
 use ss_server::create_state;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "ss-tauri", version, about = "Serial Studio 桌面应用")]
@@ -114,6 +116,23 @@ async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> R
 
 // ===== 数据面：Tauri command（本地模式 IPC，与 axum WS 是同一核心域的两个 adapter）=====
 
+/// 窗口级会话注册表：把 Tauri 窗口 label 映射到串口占有份额归属的 SessionId。
+/// open/close 命令按调用窗口取/建会话；窗口销毁时 take 出会话并 release_all。
+#[derive(Default)]
+struct SessionRegistry {
+    map: Mutex<HashMap<String, SessionId>>,
+}
+
+impl SessionRegistry {
+    fn get_or_create(&self, label: &str) -> SessionId {
+        let mut map = self.map.lock().unwrap();
+        *map.entry(label.to_string()).or_insert_with(SessionId::next)
+    }
+    fn take(&self, label: &str) -> Option<SessionId> {
+        self.map.lock().unwrap().remove(label)
+    }
+}
+
 #[tauri::command]
 async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::PortInfo>, String> {
     Ok(state.manager.list_ports().await)
@@ -121,16 +140,39 @@ async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::Po
 
 #[tauri::command]
 async fn open_port(
+    sessions: tauri::State<'_, SessionRegistry>,
     state: tauri::State<'_, AppState>,
+    window: tauri::Window,
     port: String,
     config: ss_core::SerialConfig,
-) -> Result<(), String> {
-    state.manager.open(port, config).await.map_err(|e| e.to_string())
+) -> Result<ss_core::AcquireResult, String> {
+    let session = sessions.get_or_create(window.label());
+    state
+        .manager
+        .acquire(port, config, session)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn close_port(state: tauri::State<'_, AppState>, port: String) -> Result<(), String> {
-    state.manager.close(port).await.map_err(|e| e.to_string())
+async fn close_port(
+    sessions: tauri::State<'_, SessionRegistry>,
+    state: tauri::State<'_, AppState>,
+    window: tauri::Window,
+    port: String,
+) -> Result<ss_core::ReleaseOutcome, String> {
+    let session = sessions.get_or_create(window.label());
+    state
+        .manager
+        .release(&port, session)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 强制关闭：无视持有者直接拆毁。仅本地 UI 提供（不暴露给 WS）。
+#[tauri::command]
+async fn force_close_port(state: tauri::State<'_, AppState>, port: String) -> Result<(), String> {
+    state.manager.force_close(&port).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -189,6 +231,12 @@ fn spawn_event_emitter(app: tauri::AppHandle, event_bus: std::sync::Arc<ss_core:
                 ss_core::SerialEvent::PortClosed { port } => {
                     let _ = app.emit("serial-closed", &port);
                 }
+                ss_core::SerialEvent::HoldersChanged { port, holders } => {
+                    let _ = app.emit(
+                        "serial-holders",
+                        serde_json::json!({ "port": port, "holders": holders }),
+                    );
+                }
                 ss_core::SerialEvent::Error { port, message } => {
                     let _ = app.emit(
                         "serial-error",
@@ -221,6 +269,27 @@ fn run_headless() -> anyhow::Result<()> {
 /// GUI：Tauri 窗口 + Supervisor 管理服务（支持热重启）。
 fn run_gui() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle();
+                let mgr = app.try_state::<AppState>().map(|s| s.manager.clone());
+                let session = app
+                    .try_state::<SessionRegistry>()
+                    .and_then(|s| s.take(window.label()));
+                if let (Some(mgr), Some(session)) = (mgr, session) {
+                    tauri::async_runtime::spawn(async move {
+                        let released = mgr.release_all(session).await;
+                        if !released.is_empty() {
+                            tracing::info!(
+                                "窗口 {:?} 销毁，释放 {} 个持有端口",
+                                session,
+                                released.len()
+                            );
+                        }
+                    });
+                }
+            }
+        })
         .setup(|app| {
             let state = create_state();
             let supervisor = Arc::new(ServiceSupervisor::new(state.clone()));
@@ -239,6 +308,7 @@ fn run_gui() {
 
             app.manage(state);
             app.manage(supervisor);
+            app.manage(SessionRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -252,6 +322,7 @@ fn run_gui() {
             list_ports,
             open_port,
             close_port,
+            force_close_port,
             write_port,
             run_macro,
         ])

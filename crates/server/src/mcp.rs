@@ -3,7 +3,7 @@
 //! 移植自 terminal-serial，适配 serial-studio 的异步 SerialManager + 多串口：
 //! - 工具加 `port` 参数（缺省时用唯一打开的串口）
 //! - handle_request 与各 tool 函数均为 async（调 manager 的 async 方法）
-//! - 暴露 5 工具：serial_send / serial_read / serial_status / serial_grep / serial_clear
+//! - 暴露 6 工具：serial_list / serial_send / serial_read / serial_status / serial_grep / serial_clear
 
 use crate::AppState;
 use axum::extract::State;
@@ -76,15 +76,23 @@ fn handle_tools_list() -> Value {
     json!({
         "tools": [
             {
+                "name": "serial_list",
+                "description": "列出系统所有串口及其打开状态。无需指定端口，用于发现可用串口或确认某端口是否已打开。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
                 "name": "serial_send",
-                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，按端口 line_ending 追加换行（open 时配 LF/CR/CRLF）。设置 timeout_ms > 0 时会等待并返回响应。",
+                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，自动追加换行。设置 timeout_ms > 0 时会等待并返回响应。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名（如 COM3）。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口名（如 COM7 / /dev/ttyUSB0）。缺省时使用唯一打开的串口" },
                         "data": { "type": "string", "description": "要发送的数据" },
-                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text" },
-                        "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行（换行符由端口 line_ending 决定）" },
+                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
+                        "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
                         "timeout_ms": { "type": "integer", "default": 0, "description": "发送后等待响应的超时（毫秒），0 不等待" }
                     },
                     "required": ["data"]
@@ -97,7 +105,7 @@ fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "port": { "type": "string", "description": "串口名" },
-                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text" },
+                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "输出编码：text 为文本，hex 为十六进制" },
                         "timeout_ms": { "type": "integer", "default": 100, "description": "缓冲区空时等待超时（毫秒）" }
                     }
                 }
@@ -120,7 +128,7 @@ fn handle_tools_list() -> Value {
                     "properties": {
                         "port": { "type": "string", "description": "串口名" },
                         "pattern": { "type": "string", "description": "搜索模式" },
-                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text" },
+                        "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "pattern 的编码：text 为文本（正则），hex 为十六进制字节序列" },
                         "timeout_ms": { "type": "integer", "default": 1000, "description": "等待匹配的超时（毫秒）" }
                     },
                     "required": ["pattern"]
@@ -147,6 +155,7 @@ async fn handle_tools_call(params: &Value, manager: &SerialManager) -> Value {
     };
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     match name {
+        "serial_list" => tool_serial_list(arguments, manager).await,
         "serial_send" => tool_serial_send(arguments, manager).await,
         "serial_read" => tool_serial_read(arguments, manager).await,
         "serial_status" => tool_serial_status(arguments, manager).await,
@@ -166,6 +175,26 @@ async fn resolve_port(args: &Value, manager: &SerialManager) -> Result<String, S
         0 => Err("未打开任何串口，请先在 UI 打开或通过 WS 的 open 命令".into()),
         _ => Err(format!("打开了多个串口 {:?}，必须指定 port 参数", open)),
     }
+}
+
+async fn tool_serial_list(_args: Value, manager: &SerialManager) -> Value {
+    let ports = manager.list_ports().await;
+    if ports.is_empty() {
+        return ok_text("未发现任何串口".into());
+    }
+    let mut out = Vec::with_capacity(ports.len());
+    for p in ports {
+        let line = if p.opened {
+            match manager.holder_count(&p.name).await {
+                Some(n) if n > 0 => format!("{} (open, {} holder(s))", p.name, n),
+                _ => format!("{} (open)", p.name),
+            }
+        } else {
+            format!("{} (closed)", p.name)
+        };
+        out.push(line);
+    }
+    ok_text(out.join("\n"))
 }
 
 async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
@@ -228,10 +257,13 @@ async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
         Err(e) => return error_text(e),
     };
     match manager.status(&port).await {
-        Some(cfg) => ok_text(format!(
-            "Port: {}\nBaud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}",
-            port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending
-        )),
+        Some(cfg) => {
+            let holders = manager.holder_count(&port).await.unwrap_or(0);
+            ok_text(format!(
+                "Port: {}\nBaud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}\nHolders: {}",
+                port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending, holders
+            ))
+        }
         None => error_text(format!("Port {} not open", port)),
     }
 }
@@ -371,11 +403,11 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ss_core::{EventBus, SerialManager};
+    use ss_core::{EventBus, RealPortOpener, SerialManager};
     use std::sync::Arc;
 
     fn make_manager() -> SerialManager {
-        SerialManager::new(Arc::new(EventBus::new(16)))
+        SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener))
     }
 
     #[tokio::test]
@@ -393,11 +425,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_has_five() {
+    async fn tools_list_has_six() {
         let m = make_manager();
         let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn serial_list_returns_text() {
+        let m = make_manager();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
+        let resp = handle_request(req, &m).await;
+        assert!(resp["result"]["content"][0]["text"].is_string());
     }
 
     #[tokio::test]

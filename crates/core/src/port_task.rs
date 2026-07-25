@@ -10,8 +10,9 @@
 use crate::error::SerialError;
 use crate::event_bus::{EventBus, SerialEvent};
 use crate::rx_buffer::RxBuffer;
-use crate::types::SerialConfig;
+use crate::types::{SerialConfig, SessionId};
 use bytes::Bytes;
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +33,8 @@ pub struct PortHandle {
     pub command_tx: mpsc::Sender<PortCommand>,
     pub rx_buffer: Arc<RxBuffer>,
     pub config: SerialConfig,
+    /// 当前持有本端口的会话集合。空集时端口拆毁。
+    pub holders: HashSet<SessionId>,
 }
 
 pub async fn run(

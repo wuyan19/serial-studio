@@ -14,3 +14,6 @@
 
 # 临时图标源（生成各平台图标用，不入库）
 /crates/tauri-app/app-icon.png
+
+# mcporter 本地配置（项目级 server 定义，不入库）
+/config

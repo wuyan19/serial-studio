@@ -18,6 +18,8 @@ pub enum SerialEvent {
     PortOpened { port: String },
     /// 串口已关闭
     PortClosed { port: String },
+    /// 持有者数量变化（有人加入/退出，但端口未关闭）
+    HoldersChanged { port: String, holders: usize },
     /// 串口错误
     Error { port: String, message: String },
 }
