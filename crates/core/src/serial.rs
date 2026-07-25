@@ -60,19 +60,43 @@ fn to_flow_control(f: FlowControl) -> serialport::FlowControl {
 
 fn convert_open_error(port: &str, e: serialport::Error) -> SerialError {
     use serialport::ErrorKind;
+    let msg = e.to_string();
+
+    // Windows：serialport 把 ERROR_ACCESS_DENIED（占用）也归为 NoDevice，
+    // sharing violation 则落 Io(Other)。NoDevice 不能直接当"不存在"——
+    // 端口在册（系统能枚举到）却打不开，才是占用。用枚举结果 + 文案来区分。
+    let listed = serialport::available_ports()
+        .ok()
+        .map(|ps| ps.iter().any(|p| p.port_name == port));
+
+    let looks_busy = matches!(
+        e.kind(),
+        ErrorKind::NoDevice
+            | ErrorKind::Io(std::io::ErrorKind::NotFound)
+            | ErrorKind::Io(std::io::ErrorKind::PermissionDenied)
+    ) || is_busy_hint(&msg);
+
+    if listed == Some(true) && looks_busy {
+        return SerialError::Busy(port.to_string());
+    }
+
     match e.kind() {
-        ErrorKind::NoDevice => SerialError::NotFound(port.to_string()),
-        ErrorKind::Io(io) => match io {
-            std::io::ErrorKind::NotFound => SerialError::NotFound(port.to_string()),
-            std::io::ErrorKind::PermissionDenied => SerialError::Busy(port.to_string()),
-            _ => SerialError::OpenFailed {
-                port: port.to_string(),
-                message: e.to_string(),
-            },
-        },
+        ErrorKind::NoDevice | ErrorKind::Io(std::io::ErrorKind::NotFound) => SerialError::NotFound(port.to_string()),
+        ErrorKind::Io(std::io::ErrorKind::PermissionDenied) => SerialError::Busy(port.to_string()),
         _ => SerialError::OpenFailed {
             port: port.to_string(),
-            message: e.to_string(),
+            message: msg,
         },
     }
+}
+
+/// 错误消息是否暗示"被占用"（兼容 Windows 中/英文系统文案）。
+fn is_busy_hint(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("拒绝访问")
+        || m.contains("另一个进程")
+        || m.contains("被占用")
+        || m.contains("access is denied")
+        || m.contains("being used by another process")
+        || m.contains("sharing violation")
 }
