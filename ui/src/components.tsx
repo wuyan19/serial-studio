@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一引入
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import type { ISearchDecorationOptions } from "@xterm/addon-search";
 import type {
   ConnConfig,
   Macro,
@@ -13,14 +15,17 @@ import type {
 } from "./types";
 import { BAUD_RATES } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
+import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
 import {
   IconAlert,
   IconBolt,
   IconChevronDown,
   IconChevronUp,
   IconClose,
+  IconCopy,
   IconGear,
   IconGlobe,
+  IconGrip,
   IconPlug,
   IconPlus,
   IconTrash,
@@ -116,7 +121,7 @@ export function TermView({
     if (!container) return;
     const term = new Terminal({
       fontFamily: MONO_STACK,
-      fontSize: 13,
+      fontSize: getFontSize(),
       lineHeight: 1.3,
       cursorBlink: true,
       cursorStyle: "bar",
@@ -125,11 +130,33 @@ export function TermView({
       scrollback: 10000,
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
     term.loadAddon(fit);
+    term.loadAddon(search);
     term.open(container);
+    // Ctrl + +/-/0 缩放字体（仅本终端聚焦时拦截，不抢输入框焦点）
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !(e.ctrlKey || e.metaKey)) return true;
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        zoomIn();
+        return false;
+      }
+      if (e.key === "-") {
+        e.preventDefault();
+        zoomOut();
+        return false;
+      }
+      if (e.key === "0") {
+        e.preventDefault();
+        resetFontSize();
+        return false;
+      }
+      return true;
+    });
     fitRef.current = fit;
     termRef.current = term;
-    onReady({ term, fit });
+    onReady({ term, fit, search });
     const disposable = term.onData((data) => onWrite(port, data));
     const timer = setTimeout(() => {
       try {
@@ -154,6 +181,20 @@ export function TermView({
   useEffect(() => {
     return subscribe((t) => {
       if (termRef.current) termRef.current.options.theme = termThemeFor(t);
+    });
+  }, []);
+
+  // 字号变化（Ctrl + +/-/0）→ 应用到本终端并 fit() 重排列数
+  useEffect(() => {
+    return subscribeFont((n) => {
+      const term = termRef.current;
+      if (!term) return;
+      term.options.fontSize = n;
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* ignore */
+      }
     });
   }, []);
 
@@ -186,6 +227,152 @@ export function TermView({
   return <div ref={containerRef} style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }} />;
 }
 
+// ===== 终端内搜索（Ctrl+F）=====
+
+/** 搜索高亮配色（xterm 要求纯 #RRGGBB，故按主题各给一组，跟着 token 的青系）。 */
+function searchDecorations(t: Theme): ISearchDecorationOptions {
+  if (t === "light") {
+    return {
+      matchBackground: "#cce3df",
+      activeMatchBackground: "#7fc7bd",
+      activeMatchBorder: "#0c7f73",
+      matchOverviewRuler: "#cce3df",
+      activeMatchColorOverviewRuler: "#0c7f73",
+    };
+  }
+  return {
+    matchBackground: "#1c4a45",
+    activeMatchBackground: "#11837a",
+    activeMatchBorder: "#4fd6c2",
+    matchOverviewRuler: "#1c4a45",
+    activeMatchColorOverviewRuler: "#4fd6c2",
+  };
+}
+
+export function SearchBar({ searchAddon, onClose }: { searchAddon: SearchAddon; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [regex, setRegex] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [index, setIndex] = useState(0);
+  const [count, setCount] = useState(0);
+  const [error, setError] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const doSearch = useCallback(
+    (dir: "next" | "prev", incremental = false) => {
+      if (!query) {
+        searchAddon.clearDecorations();
+        setIndex(0);
+        setCount(0);
+        setError(false);
+        return;
+      }
+      const opts = {
+        regex,
+        caseSensitive,
+        wholeWord,
+        incremental,
+        decorations: searchDecorations(getTheme()),
+      };
+      try {
+        if (dir === "next") searchAddon.findNext(query, opts);
+        else searchAddon.findPrevious(query, opts);
+        setError(false);
+      } catch {
+        setError(true); // 多半是非法正则
+      }
+    },
+    [query, regex, caseSensitive, wholeWord, searchAddon]
+  );
+
+  // 输入/选项变化 → 重新搜索（增量）
+  useEffect(() => {
+    doSearch("next", true);
+  }, [doSearch]);
+
+  // 主题切换 → 重绘高亮（配色随主题）
+  useEffect(() => subscribe(() => doSearch("next", true)), [doSearch]);
+
+  // 命中计数
+  useEffect(() => {
+    const d = searchAddon.onDidChangeResults((e) => {
+      setIndex(e.resultIndex);
+      setCount(e.resultCount);
+    });
+    return () => d.dispose();
+  }, [searchAddon]);
+
+  // 打开即聚焦输入
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  // 关闭/卸载时清掉高亮与选区，恢复终端原状
+  useEffect(() => {
+    return () => {
+      try {
+        searchAddon.clearDecorations();
+      } catch {
+        /* addon 可能正随终端一起销毁 */
+      }
+    };
+  }, [searchAddon]);
+
+  const next = () => {
+    doSearch("next");
+    inputRef.current?.focus();
+  };
+  const prev = () => {
+    doSearch("prev");
+    inputRef.current?.focus();
+  };
+
+  const countText = !query ? "" : count === 0 ? "无匹配" : index < 0 ? `${count}+` : `${index + 1} / ${count}`;
+
+  return (
+    <div className="searchbar">
+      <button className="searchbar__toggle" data-on={caseSensitive} onClick={() => setCaseSensitive((v) => !v)} title="区分大小写">
+        Aa
+      </button>
+      <button className="searchbar__toggle" data-on={regex} onClick={() => setRegex((v) => !v)} title="正则表达式">
+        .*
+      </button>
+      <button className="searchbar__toggle" data-on={wholeWord} onClick={() => setWholeWord((v) => !v)} title="整词">
+        W
+      </button>
+      <input
+        ref={inputRef}
+        className={`searchbar__input${error ? " searchbar__input--err" : ""}`}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (e.shiftKey) prev();
+            else next();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+        placeholder="搜索终端…"
+        spellCheck={false}
+      />
+      <span className="searchbar__count">{countText}</span>
+      <button className="searchbar__btn" onClick={prev} title="上一个 (Shift+Enter)">
+        <IconChevronUp />
+      </button>
+      <button className="searchbar__btn" onClick={next} title="下一个 (Enter)">
+        <IconChevronDown />
+      </button>
+      <button className="searchbar__btn searchbar__close" onClick={onClose} title="关闭 (Esc)">
+        <IconClose />
+      </button>
+    </div>
+  );
+}
+
 // ===== 串口配置对话框 =====
 
 export function SerialConfigDialog({
@@ -202,7 +389,7 @@ export function SerialConfigDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="dialog-overlay" onClick={onCancel}>
+    <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconPlug /> OPEN PORT
@@ -291,7 +478,7 @@ export function SettingsPanel({
   }, [srvSettings]);
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
+    <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGear /> SETTINGS
@@ -477,8 +664,53 @@ export function MacroEditor({
     onMacroChange({ ...macro, steps });
   };
 
+  const duplicateStep = (i: number) => {
+    const steps = macro.steps.slice();
+    steps.splice(i + 1, 0, JSON.parse(JSON.stringify(steps[i])) as MacroStep);
+    onMacroChange({ ...macro, steps });
+  };
+
+  // 拖拽排序（HTML5 DnD）。落点按指针在上/下半区决定 before/after。
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [overAfter, setOverAfter] = useState(false);
+  const resetDrag = () => {
+    setDragIndex(null);
+    setOverIndex(null);
+    setOverAfter(false);
+  };
+  const onStepDragStart = (_e: React.DragEvent, i: number) => setDragIndex(i);
+  const onStepDragOver = (e: React.DragEvent, i: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setOverIndex(i);
+    setOverAfter(e.clientY - rect.top > rect.height / 2);
+  };
+  const onStepDrop = (e: React.DragEvent, i: number) => {
+    e.preventDefault();
+    if (dragIndex === null) {
+      resetDrag();
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const after = e.clientY - rect.top > rect.height / 2;
+    const steps = macro.steps.slice();
+    const [moved] = steps.splice(dragIndex, 1);
+    let at = i + (after ? 1 : 0);
+    if (dragIndex < at) at -= 1;
+    at = Math.max(0, Math.min(at, steps.length));
+    steps.splice(at, 0, moved);
+    onMacroChange({ ...macro, steps });
+    resetDrag();
+  };
+  const dropPosFor = (i: number): "before" | "after" | null => {
+    if (dragIndex === null || overIndex !== i) return null;
+    return overAfter ? "after" : "before";
+  };
+
   return (
-    <div className="dialog-overlay" onClick={onCancel}>
+    <div className="dialog-overlay">
       <div className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconBolt /> MACRO
@@ -505,20 +737,27 @@ export function MacroEditor({
             onRemove={() => removeStep(i)}
             onMoveUp={() => moveStep(i, -1)}
             onMoveDown={() => moveStep(i, 1)}
+            onDuplicate={() => duplicateStep(i)}
+            isDragging={dragIndex === i}
+            dropPos={dropPosFor(i)}
+            onDragStart={(e) => onStepDragStart(e, i)}
+            onDragOver={(e) => onStepDragOver(e, i)}
+            onDrop={(e) => onStepDrop(e, i)}
+            onDragEnd={resetDrag}
           />
         ))}
 
         <div className="add-step-row">
-          <button className="add-step" onClick={() => addStep("send")}>
+          <button className="add-step" data-kind="send" onClick={() => addStep("send")}>
             <IconPlus /> 发送
           </button>
-          <button className="add-step" onClick={() => addStep("delay")}>
+          <button className="add-step" data-kind="delay" onClick={() => addStep("delay")}>
             <IconPlus /> 延时
           </button>
-          <button className="add-step" onClick={() => addStep("expect")}>
+          <button className="add-step" data-kind="expect" onClick={() => addStep("expect")}>
             <IconPlus /> 等待
           </button>
-          <button className="add-step" onClick={() => addStep("clear")}>
+          <button className="add-step" data-kind="clear" onClick={() => addStep("clear")}>
             <IconPlus /> 清空
           </button>
         </div>
@@ -535,7 +774,7 @@ export function MacroEditor({
         </details>
 
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
-          <div>{!isNew && <button className="btn btn--danger" onClick={onDelete}><IconTrash /></button>}</div>
+          <div>{!isNew && <button className="btn btn--danger btn--icon" onClick={onDelete}><IconTrash /></button>}</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn btn--ghost" onClick={onCancel}>
               取消
@@ -558,6 +797,13 @@ function StepEditor({
   onRemove,
   onMoveUp,
   onMoveDown,
+  onDuplicate,
+  isDragging,
+  dropPos,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   step: MacroStep;
   index: number;
@@ -566,15 +812,48 @@ function StepEditor({
   onRemove: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onDuplicate: () => void;
+  isDragging: boolean;
+  dropPos: "before" | "after" | null;
+  onDragStart: (e: React.DragEvent) => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
 }) {
   const changeType = (type: StepType) => {
     if (type === step.type) return;
     onChange(newStep(type));
   };
 
+  const cardRef = useRef<HTMLDivElement>(null);
+  const onGripDragStart = (e: React.DragEvent) => {
+    // 必须写 dataTransfer，否则部分浏览器/webview 会取消拖拽
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(index));
+    if (cardRef.current) e.dataTransfer.setDragImage(cardRef.current, 14, 14);
+    onDragStart(e);
+  };
+
   return (
-    <div className="step-card" data-kind={step.type}>
+    <div
+      ref={cardRef}
+      className="step-card"
+      data-kind={step.type}
+      data-dragging={isDragging ? "true" : undefined}
+      data-drop={dropPos ?? undefined}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
       <div className="step-head">
+        <span
+          className="step-grip"
+          title="拖动排序"
+          draggable
+          onDragStart={onGripDragStart}
+          onDragEnd={onDragEnd}
+        >
+          <IconGrip />
+        </span>
         <span className="step-num">#{String(index + 1).padStart(2, "0")}</span>
         <span className="step-tag">
           <StepGlyph type={step.type} />
@@ -588,6 +867,9 @@ function StepEditor({
         </select>
         <div className="step-head__spacer" />
         <div className="step-actions">
+          <button onClick={onDuplicate} title="复制" className="mini-btn">
+            <IconCopy />
+          </button>
           <button onClick={onMoveUp} disabled={index === 0} title="上移" className="mini-btn">
             <IconChevronUp />
           </button>
@@ -656,7 +938,7 @@ export function ActivityIcon({ icon, title, active, onClick }: { icon: React.Rea
 
 export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
   return (
-    <div className="dialog-overlay" onClick={onClose}>
+    <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <div className="about">
           <div className="about__mark">
@@ -685,7 +967,7 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
   onCancel: () => void;
 }) {
   return (
-    <div className="dialog-overlay" onClick={onCancel}>
+    <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGlobe /> REMOTE

@@ -26,6 +26,7 @@ import {
   MacroEditor,
   newStep,
   RemoteDialog,
+  SearchBar,
   SerialConfigDialog,
   SettingsPanel,
   TermView,
@@ -42,6 +43,7 @@ import {
   IconPlay,
   IconPlug,
   IconPlus,
+  IconPower,
   IconRefresh,
   IconSliders,
   IconTrash,
@@ -130,6 +132,7 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityView>(null);
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [version, setVersion] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
@@ -231,6 +234,26 @@ export default function App() {
 
   // 主题：订阅 theme 模块，切换时刷新按钮图标
   useEffect(() => subscribe(setThemeState), []);
+
+  // Ctrl+F：在活动终端开搜索框。capture 阶段先于 xterm 拦截，避免被终端吃掉。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+        if (activePort && terminalsRef.current.has(activePort)) {
+          e.preventDefault();
+          e.stopPropagation();
+          setSearchOpen(true);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [activePort]);
+
+  // 切端口 / 关端口时收起搜索框（addon 已随实例销毁）
+  useEffect(() => {
+    setSearchOpen(false);
+  }, [activePort]);
 
   const confirmOpen = async (config: SerialConfig) => {
     const port = pendingPort;
@@ -346,6 +369,7 @@ export default function App() {
 
   const activeHolders = ports.find((p) => p.name === activePort)?.holders ?? 0;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
+  const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
 
   return (
     <div className="app">
@@ -364,14 +388,17 @@ export default function App() {
         <div className="manage">
           <ActivityIcon icon={<IconSliders className="act-icon__svg" />} title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
           {manageMenu && (
-            <div className="manage-menu">
-              <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
-                <IconGear /> 设置
-              </button>
-              <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
-                <IconInfo /> 关于
-              </button>
-            </div>
+            <>
+              <div className="manage-backdrop" onClick={() => setManageMenu(false)} />
+              <div className="manage-menu">
+                <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
+                  <IconGear /> 设置
+                </button>
+                <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
+                  <IconInfo /> 关于
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -398,16 +425,25 @@ export default function App() {
               {ports.map((p) => {
                 const isActive = p.name === activePort;
                 return (
-                  <button
-                    key={p.name}
-                    className="port-item"
-                    data-active={isActive}
-                    onClick={() => (openPorts.includes(p.name) ? switchPort(p.name) : setPendingPort(p.name))}
-                  >
-                    <span className={`port-item__dot${p.opened ? " open" : ""}`} />
-                    <span className="port-item__name">{p.name}</span>
-                    {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
-                  </button>
+                  <div key={p.name} className="port-item-row" data-active={isActive}>
+                    <button
+                      className="port-item"
+                      onClick={() => (openPorts.includes(p.name) ? switchPort(p.name) : setPendingPort(p.name))}
+                    >
+                      <span className={`port-item__dot${p.opened ? " open" : ""}`} />
+                      <span className="port-item__name">{p.name}</span>
+                      {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
+                    </button>
+                    {isLocal && p.opened && (
+                      <button
+                        className="port-item__force"
+                        title={`强制关闭 ${p.name}（踢掉所有持有者）`}
+                        onClick={() => forceClosePort(p.name)}
+                      >
+                        <IconPower />
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </>
@@ -461,18 +497,6 @@ export default function App() {
               <div key={port} className="tab" data-active={isActive} onClick={() => switchPort(port)}>
                 <span className="tab__dot" />
                 <span className="tab__name">{port}</span>
-                {isLocal && (
-                  <span
-                    className="tab__btn tab__btn--force"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      forceClosePort(port);
-                    }}
-                    title={`强制关闭 ${port}（踢掉所有持有者）`}
-                  >
-                    <IconBolt />
-                  </span>
-                )}
                 <span
                   className="tab__btn tab__btn--close"
                   onClick={(e) => {
@@ -538,6 +562,15 @@ export default function App() {
               <IconPlug className="term-empty__icon" />
               <div>从左侧 PORTS 打开一个串口开始收发</div>
             </div>
+          )}
+          {searchOpen && activeTerm?.search && (
+            <SearchBar
+              searchAddon={activeTerm.search}
+              onClose={() => {
+                setSearchOpen(false);
+                activeTerm?.term.focus();
+              }}
+            />
           )}
         </div>
       </main>

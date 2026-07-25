@@ -1,5 +1,6 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 
 export interface PortInfo {
   name: string;
@@ -30,6 +31,8 @@ export interface MacroResult {
 export interface TermInstance {
   term: Terminal;
   fit: FitAddon;
+  /** 串口内搜索（Ctrl+F）。随 xterm 实例常驻，搜的是该端口的 scrollback。 */
+  search: SearchAddon;
 }
 
 export interface SerialConfig {

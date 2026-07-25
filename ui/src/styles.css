@@ -28,6 +28,12 @@
   --danger: #e5534b;
   --warn: #e3b341;
 
+  /* 步骤类型色——4 色相拉开，一眼分辨（send 青 / delay 紫 / expect 琥珀 / clear 红） */
+  --c-send: #4fd6c2;
+  --c-delay: #c792ea;
+  --c-expect: #f2a65a;
+  --c-clear: #e5534b;
+
   /* Type */
   --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", "Cascadia Mono", "JetBrains Mono", Consolas,
@@ -156,6 +162,11 @@ button {
 /* manage menu popover */
 .manage {
   position: relative;
+}
+.manage-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 199;
 }
 .manage-menu {
   position: absolute;
@@ -290,14 +301,20 @@ button {
 }
 
 /* port item */
+.port-item-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: 5px;
+}
 .port-item {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 9px;
-  width: 100%;
+  min-width: 0;
   text-align: left;
   padding: 7px 9px;
-  margin-bottom: 5px;
   background: transparent;
   color: var(--ink-dim);
   border: 1px solid transparent;
@@ -313,10 +330,32 @@ button {
   background: var(--surface-2);
   color: var(--ink);
 }
-.port-item[data-active="true"] {
+.port-item-row[data-active="true"] .port-item {
   background: var(--surface-2);
   color: var(--ink);
   border-left-color: var(--rx);
+}
+.port-item__force {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.port-item__force:hover {
+  color: var(--warn);
+  background: rgba(227, 179, 65, 0.12);
+}
+.port-item__force svg {
+  width: 14px;
+  height: 14px;
 }
 .port-item__dot {
   width: 7px;
@@ -500,9 +539,6 @@ button {
   background: var(--surface-3);
   color: var(--ink);
 }
-.tab__btn--force:hover {
-  color: var(--warn);
-}
 .tab__btn--close:hover {
   color: var(--danger);
 }
@@ -647,6 +683,100 @@ button {
   border-radius: var(--r-sm);
   padding: 1px 6px;
   color: var(--ink-dim);
+}
+
+/* ============================================================
+   Terminal search bar (Ctrl+F)
+   ============================================================ */
+.searchbar {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.searchbar__input {
+  width: 184px;
+  background: var(--term-bg);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.searchbar__input::placeholder {
+  color: var(--ink-faint);
+}
+.searchbar__input:focus {
+  border-color: var(--rx);
+  outline: none;
+}
+.searchbar__input--err {
+  border-color: var(--danger);
+}
+.searchbar__toggle {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--ink-faint);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.searchbar__toggle:hover {
+  color: var(--ink-dim);
+}
+.searchbar__toggle[data-on="true"] {
+  color: var(--rx);
+  border-color: var(--rx);
+}
+.searchbar__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-dim);
+  min-width: 54px;
+  text-align: center;
+  white-space: nowrap;
+}
+.searchbar__btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.searchbar__btn:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.searchbar__btn svg {
+  width: 14px;
+  height: 14px;
+}
+.searchbar__close:hover {
+  color: var(--danger);
 }
 
 /* ============================================================
@@ -856,6 +986,16 @@ button {
 .btn--danger:hover {
   background: rgba(229, 83, 75, 0.12);
 }
+.btn svg {
+  width: 14px;
+  height: 14px;
+}
+.btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 11px;
+}
 .btn--save-pulse {
   color: var(--link);
   font-size: var(--fs-xs);
@@ -874,22 +1014,58 @@ button {
   background: var(--surface-2);
 }
 .step-card[data-kind="send"] {
-  border-left-color: var(--rx);
+  border-left-color: var(--c-send);
 }
 .step-card[data-kind="delay"] {
-  border-left-color: var(--tx);
+  border-left-color: var(--c-delay);
 }
 .step-card[data-kind="expect"] {
-  border-left-color: var(--warn);
+  border-left-color: var(--c-expect);
 }
 .step-card[data-kind="clear"] {
-  border-left-color: var(--ink-faint);
+  border-left-color: var(--c-clear);
+}
+.step-card[data-kind="send"] .step-tag {
+  color: var(--c-send);
+}
+.step-card[data-kind="delay"] .step-tag {
+  color: var(--c-delay);
+}
+.step-card[data-kind="expect"] .step-tag {
+  color: var(--c-expect);
+}
+.step-card[data-kind="clear"] .step-tag {
+  color: var(--c-clear);
+}
+.step-card[data-dragging="true"] {
+  opacity: 0.4;
+}
+.step-card[data-drop="before"] {
+  box-shadow: inset 0 2px 0 var(--rx);
+}
+.step-card[data-drop="after"] {
+  box-shadow: inset 0 -2px 0 var(--rx);
 }
 .step-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 7px;
+}
+.step-grip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-faint);
+  cursor: grab;
+  flex-shrink: 0;
+  margin-right: -2px;
+}
+.step-grip:active {
+  cursor: grabbing;
+}
+.step-grip svg {
+  width: 12px;
+  height: 16px;
 }
 .step-num {
   font-family: var(--font-mono);
@@ -982,8 +1158,20 @@ button {
   transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .add-step:hover {
-  border-color: var(--link);
-  background: rgba(126, 231, 135, 0.06);
+  border-color: currentColor;
+  background: var(--surface-2);
+}
+.add-step[data-kind="send"] {
+  color: var(--c-send);
+}
+.add-step[data-kind="delay"] {
+  color: var(--c-delay);
+}
+.add-step[data-kind="expect"] {
+  color: var(--c-expect);
+}
+.add-step[data-kind="clear"] {
+  color: var(--c-clear);
 }
 .add-step svg {
   width: 12px;
@@ -1110,6 +1298,10 @@ button {
   --link: #187a43;
   --danger: #c8392f;
   --warn: #9a6b0c;
+  --c-send: #0c7f73;
+  --c-delay: #8445c0;
+  --c-expect: #b06a16;
+  --c-clear: #c8392f;
 }
 
 /* 少量不随 token 自动翻转的覆盖：白底叠白 hover、深底主按钮标签、阴影/选区 */

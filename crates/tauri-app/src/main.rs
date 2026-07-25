@@ -109,6 +109,7 @@ async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> R
     tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(900.0, 640.0)
+        .drag_and_drop(false)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
