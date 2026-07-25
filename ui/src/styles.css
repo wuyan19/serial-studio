@@ -300,15 +300,13 @@ button {
   padding: 2px 2px 8px;
 }
 
-/* port item */
+/* port item —— 强制关闭按钮绝对定位到串口按钮右侧内嵌（button 不能嵌套，故用兄弟覆盖） */
 .port-item-row {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
+  position: relative;
   margin-bottom: 5px;
 }
 .port-item {
-  flex: 1;
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -326,6 +324,10 @@ button {
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
     border-color var(--t-fast) var(--ease);
 }
+/* 仅在出现强制关闭按钮时为右侧图标预留空间，避免关闭态端口右侧空一大块 */
+.port-item-row[data-force="true"] .port-item {
+  padding-right: 30px;
+}
 .port-item:hover {
   background: var(--surface-2);
   color: var(--ink);
@@ -336,17 +338,22 @@ button {
   border-left-color: var(--rx);
 }
 .port-item__force {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  flex-shrink: 0;
   padding: 0;
   background: transparent;
   border: none;
   border-radius: var(--r-sm);
   color: var(--ink-faint);
   cursor: pointer;
+  z-index: 1;
   transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .port-item__force:hover {
@@ -384,19 +391,18 @@ button {
   flex-shrink: 0;
 }
 
-/* macro rows */
+/* macro rows —— 编辑/删除按钮绝对定位到宏按钮右侧内嵌 */
 .macro-row {
-  display: flex;
-  gap: 4px;
+  position: relative;
   margin-bottom: 5px;
 }
 .macro-run {
-  flex: 1;
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 7px;
   text-align: left;
-  padding: 7px 9px;
+  padding: 7px 56px 7px 9px;
   background: var(--surface-2);
   color: var(--ink);
   border: 1px solid var(--hairline);
@@ -424,13 +430,39 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.macro-run__desc {
-  display: block;
-  font-size: var(--fs-xs);
+.macro-action {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
   color: var(--ink-faint);
-  margin-top: 2px;
-  font-weight: 400;
-  white-space: normal;
+  cursor: pointer;
+  z-index: 1;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.macro-action--edit {
+  right: 28px;
+}
+.macro-action:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+.macro-action--danger:hover {
+  color: var(--danger);
+  background: rgba(229, 83, 75, 0.12);
+}
+.macro-action svg {
+  width: 14px;
+  height: 14px;
 }
 .macro-result {
   margin-top: 10px;

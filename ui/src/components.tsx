@@ -992,3 +992,59 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
     </div>
   );
 }
+
+// ===== 确认弹窗（替代浏览器原生 confirm，统一仪器风）=====
+
+export function ConfirmDialog({
+  title,
+  icon,
+  message,
+  confirmText = "确定",
+  cancelText = "取消",
+  tone = "primary",
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  icon?: React.ReactNode;
+  message: React.ReactNode;
+  confirmText?: string;
+  cancelText?: string;
+  tone?: "primary" | "danger";
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  // Enter 确认 / Esc 取消——与搜索框一致的键盘语义。遮罩不关闭（防误触，同其它对话框）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirm();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          {icon ?? <IconAlert />} {title}
+        </h3>
+        <div className="dialog__sub">{message}</div>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            {cancelText}
+          </button>
+          <button className={`btn ${tone === "danger" ? "btn--danger" : "btn--primary"}`} onClick={onConfirm}>
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

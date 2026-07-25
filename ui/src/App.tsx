@@ -23,6 +23,7 @@ import { LocalTransport, RemoteTransport, type Transport } from "./transport";
 import {
   AboutDialog,
   ActivityIcon,
+  ConfirmDialog,
   MacroEditor,
   newStep,
   RemoteDialog,
@@ -133,6 +134,15 @@ export default function App() {
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  /** 通用确认弹窗状态（替代原生 confirm）。null = 关闭。 */
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    icon?: React.ReactNode;
+    message: string;
+    confirmText?: string;
+    tone?: "primary" | "danger";
+    onConfirm: () => void;
+  } | null>(null);
   const [version, setVersion] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
@@ -302,8 +312,17 @@ export default function App() {
   };
 
   const forceClosePort = (port: string) => {
-    if (!confirm(`强制关闭 ${port}？将断开所有持有者。`)) return;
-    transportRef.current?.forceClose(port);
+    setConfirmState({
+      title: "强制关闭端口",
+      icon: <IconPower />,
+      message: `强制关闭 ${port}？这将立即断开所有持有者（含其它窗口/会话），且不可恢复。`,
+      confirmText: "强制关闭",
+      tone: "danger",
+      onConfirm: () => {
+        transportRef.current?.forceClose(port);
+        setConfirmState(null);
+      },
+    });
   };
 
   const switchPort = (port: string) => setActivePort(port);
@@ -347,13 +366,22 @@ export default function App() {
     setEditing(null);
   };
 
-  const deleteMacro = async (name: string) => {
-    if (!confirm(`删除宏 "${name}"？`)) return;
-    const next = { ...macros };
-    delete next[name];
-    setMacros(next);
-    await persistMacros(next);
-    setEditing(null);
+  const deleteMacro = (name: string) => {
+    setConfirmState({
+      title: "删除宏",
+      icon: <IconTrash />,
+      message: `删除宏 "${name}"？此操作不可恢复。`,
+      confirmText: "删除",
+      tone: "danger",
+      onConfirm: async () => {
+        const next = { ...macros };
+        delete next[name];
+        setMacros(next);
+        await persistMacros(next);
+        setEditing(null);
+        setConfirmState(null);
+      },
+    });
   };
 
   const openRemoteWindow = async () => {
@@ -430,7 +458,7 @@ export default function App() {
               {ports.map((p) => {
                 const isActive = p.name === activePort;
                 return (
-                  <div key={p.name} className="port-item-row" data-active={isActive}>
+                  <div key={p.name} className="port-item-row" data-active={isActive} data-force={isLocal && p.opened ? "true" : undefined}>
                     <button
                       className="port-item"
                       onClick={() => {
@@ -474,19 +502,16 @@ export default function App() {
                 </button>
               </div>
               {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
-              {Object.entries(macros).map(([name, m]) => (
+              {Object.entries(macros).map(([name]) => (
                 <div key={name} className="macro-row">
                   <button className="macro-run" onClick={() => runMacro(name)} disabled={!activePort}>
                     <IconPlay />
-                    <span className="macro-run__label">
-                      {name}
-                      {m.description && <span className="macro-run__desc">{m.description}</span>}
-                    </span>
+                    <span className="macro-run__label">{name}</span>
                   </button>
-                  <button className="icon-btn" onClick={() => openMacroEditor(name)} title="编辑">
+                  <button className="macro-action macro-action--edit" onClick={() => openMacroEditor(name)} title="编辑">
                     <IconEdit />
                   </button>
-                  <button className="icon-btn icon-btn--danger" onClick={() => deleteMacro(name)} title="删除">
+                  <button className="macro-action macro-action--danger" onClick={() => deleteMacro(name)} title="删除">
                     <IconTrash />
                   </button>
                 </div>
@@ -622,6 +647,18 @@ export default function App() {
 
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
       {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={openRemoteWindow} onCancel={() => setRemoteOpen(false)} />}
+
+      {confirmState && (
+        <ConfirmDialog
+          title={confirmState.title}
+          icon={confirmState.icon}
+          message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          tone={confirmState.tone}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
+      )}
 
       {/* 宏编辑器 */}
       {editing && (
