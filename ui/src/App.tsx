@@ -255,11 +255,8 @@ export default function App() {
     setSearchOpen(false);
   }, [activePort]);
 
-  const confirmOpen = async (config: SerialConfig) => {
-    const port = pendingPort;
-    if (!port) return;
-    saveConfig(config);
-    setPendingPort(null);
+  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。 */
+  const openPort = async (port: string, config: SerialConfig) => {
     try {
       const res = await transportRef.current?.open(port, config);
       if (!res) return;
@@ -268,15 +265,23 @@ export default function App() {
       setActivePort(port);
       setPortConfigs((prev) => ({ ...prev, [port]: res.config }));
       if (!res.opened) {
-        // 附加到已开端口：请求的 config 被忽略，告知用户实际配置
+        // 附加到已开端口：请求的 config 被忽略，告知实际配置
         const c = res.config;
-        setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）。端口实际配置为 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}；你填的配置已忽略。`);
+        setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。`);
         setTimeout(() => setNotice(""), 6000);
       }
     } catch (e) {
       setErrorMsg(String(e));
       setTimeout(() => setErrorMsg(""), 5000);
     }
+  };
+
+  const confirmOpen = async (config: SerialConfig) => {
+    const port = pendingPort;
+    if (!port) return;
+    saveConfig(config);
+    setPendingPort(null);
+    await openPort(port, config);
   };
 
   const closePort = (port: string) => {
@@ -428,7 +433,16 @@ export default function App() {
                   <div key={p.name} className="port-item-row" data-active={isActive}>
                     <button
                       className="port-item"
-                      onClick={() => (openPorts.includes(p.name) ? switchPort(p.name) : setPendingPort(p.name))}
+                      onClick={() => {
+                        if (openPorts.includes(p.name)) {
+                          switchPort(p.name);
+                        } else if (p.opened) {
+                          // 已被其它会话打开：本次为附加，配置会被忽略 → 直接打开，不弹配置框
+                          void openPort(p.name, serialConfig);
+                        } else {
+                          setPendingPort(p.name);
+                        }
+                      }}
                     >
                       <span className={`port-item__dot${p.opened ? " open" : ""}`} />
                       <span className="port-item__name">{p.name}</span>
