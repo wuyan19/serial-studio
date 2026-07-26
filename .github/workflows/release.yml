@@ -75,3 +75,11 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload portable .exe (Windows · 非安装直运行)
+        if: matrix.platform == 'windows-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp target/release/serial-studio.exe target/release/serial-studio-portable-x64.exe
+          gh release upload --clobber "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" target/release/serial-studio-portable-x64.exe
