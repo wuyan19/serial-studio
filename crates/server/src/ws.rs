@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
-    Ports { ports: Vec<ss_core::PortInfo> },
+    Ports { ports: Vec<crate::PortView> },
     Opened { port: String },
     Closed { port: String },
     /// open 的直接回复：opened=true 首开，false 附加（config 为实际配置，holders 为当前持有数）。

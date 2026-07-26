@@ -48,7 +48,6 @@ impl SerialManager {
                 PortInfo {
                     opened: handle.is_some(),
                     holders: handle.map(|h| h.holders.len()).unwrap_or(0),
-                    alias: None, // 由 server 层从 ports.json 注入
                     name,
                 }
             })

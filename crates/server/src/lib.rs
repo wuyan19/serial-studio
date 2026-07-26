@@ -17,6 +17,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use rust_embed::RustEmbed;
+use serde::Serialize;
 use ss_core::{EventBus, RealPortOpener, SerialManager};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -40,19 +41,33 @@ pub fn create_state() -> AppState {
     AppState { manager, event_bus, meta_bus: Arc::new(meta_tx) }
 }
 
-/// 列出端口并注入 ports.json 中的别名元数据。
+/// 面向客户端的端口视图：core 的运行时事实(`PortInfo`) + server 层用户元数据(alias)。
+/// serde(flatten) 把 PortInfo 内联，线 JSON 扁平为 `{name,opened,holders,alias}`，
+/// 前端 PortInfo 接口无需改。core 不持有别名——别名属 server 关注点。
+/// 未来加 description/color 只在此 struct 加字段，core 不受影响。
+#[derive(Serialize)]
+pub struct PortView {
+    #[serde(flatten)]
+    pub info: ss_core::PortInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+/// 列出端口并组合 ports.json 中的别名，返回面向客户端的 PortView。
 /// 三条 list 路径（REST / WS / Tauri）共用：别名由端口所在机器的后端注入，
-/// 远程模式自动取远程别名。core 的 manager.list_ports 只出运行时事实（alias=None），
-/// 此处在 server 层覆盖——core 不接触持久化。
-pub async fn list_ports_with_meta(state: &AppState) -> Vec<ss_core::PortInfo> {
+/// 远程模式自动取远程别名。core 只出运行时事实（PortInfo），此处在 server 层组合元数据。
+pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     let meta = port_meta_store::load();
-    let mut ports = state.manager.list_ports().await;
-    for p in &mut ports {
-        if let Some(m) = meta.get(&p.name) {
-            p.alias = m.alias.clone();
-        }
-    }
-    ports
+    state
+        .manager
+        .list_ports()
+        .await
+        .into_iter()
+        .map(|info| {
+            let alias = meta.get(&info.name).and_then(|m| m.alias.clone());
+            PortView { info, alias }
+        })
+        .collect()
 }
 
 /// 设置端口别名并广播元数据变更：写 ports.json 后向 meta_bus 发一次通知，
@@ -102,6 +117,41 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 /// REST: 列出端口（带别名）。WS 客户端也可通过 `{"action":"list"}` 获取。
-async fn list_ports(State(state): State<AppState>) -> Json<Vec<ss_core::PortInfo>> {
+async fn list_ports(State(state): State<AppState>) -> Json<Vec<PortView>> {
     Json(list_ports_with_meta(&state).await)
+}
+
+#[cfg(test)]
+mod tests {
+    //! PortView 线形状契约：serde(flatten) 必须产出扁平 JSON，
+    //! 前端 PortInfo 接口（{name,opened,holders,alias?}）才能无感匹配。
+
+    use super::*;
+
+    #[test]
+    fn port_view_flattens_to_flat_wire() {
+        let v = PortView {
+            info: ss_core::PortInfo { name: "COM7".into(), opened: true, holders: 2 },
+            alias: Some("GPS".into()),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 4, "flatten 应内联 PortInfo 字段 + alias，共 4 个");
+        assert_eq!(obj["name"], "COM7");
+        assert_eq!(obj["opened"], true);
+        assert_eq!(obj["holders"], 2);
+        assert_eq!(obj["alias"], "GPS");
+    }
+
+    #[test]
+    fn port_view_skips_none_alias() {
+        let v = PortView {
+            info: ss_core::PortInfo { name: "COM3".into(), opened: false, holders: 0 },
+            alias: None,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("alias"), "None alias 不应出现在线上");
+        assert_eq!(obj.len(), 3);
+    }
 }

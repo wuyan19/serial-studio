@@ -214,7 +214,7 @@ impl PortChannels {
 }
 
 #[tauri::command]
-async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::PortInfo>, String> {
+async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_server::PortView>, String> {
     Ok(ss_server::list_ports_with_meta(&state).await)
 }
 
@@ -367,8 +367,16 @@ fn spawn_event_emitter(
     // 元数据（别名）变更 → 通知本地前端刷新端口列表
     let mut meta_rx = meta_bus.subscribe();
     tauri::async_runtime::spawn(async move {
-        while meta_rx.recv().await.is_ok() {
-            let _ = app_meta.emit("ports-meta-changed", ());
+        // 显式 match：Lagged 继续（积压时不退，否则一次 lag 就永久断本地 meta 通知），
+        // 与 ws.rs 的 meta_task 一致。Closed 才退出。
+        loop {
+            match meta_rx.recv().await {
+                Ok(()) => {
+                    let _ = app_meta.emit("ports-meta-changed", ());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 }

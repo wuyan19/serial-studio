@@ -1,7 +1,7 @@
 //! 端口元数据持久化：exe 同目录 ports.json。
 //!
 //! 端口元数据（别名等）是**端口所在机器的本地配置**，由前端（Tauri 控制面 invoke
-//! 或 WS action）读写。服务端不持有状态——list 时按需 load 注入 PortInfo。
+//! 或 WS action）读写。服务端不持有状态——list 时按需 load，由 lib.rs 的 PortView 组合。
 //! 首次运行无文件 → 空。未来加 description/color 等只在 PortMeta 加字段，不新建文件。
 
 use serde::{Deserialize, Serialize};
