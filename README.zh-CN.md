@@ -4,6 +4,7 @@
 
 <p><img src="crates/tauri-app/icons/icon.png" width="84" alt="Serial Studio 图标"></p>
 
+![release](https://img.shields.io/github/v/release/wuyan19/serial-studio)
 ![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
 ![React](https://img.shields.io/badge/React-18-61dafb)
@@ -82,6 +83,13 @@ release 产物为 `serial-studio.exe`。
   开 `http://<host>:18700/`，界面由二进制直接提供。
 - **远程窗口** —— 从桌面应用里开一个远程窗口，连接另一台 Serial Studio 主机。
 - **Headless** —— `serial-studio.exe --no-gui` 只跑后台服务（无窗口）。
+
+> **首次运行（未签名构建）：** release 暂未做代码签名。
+> - **macOS** —— 会被 Gatekeeper 拦截。拖进 `/Applications` 后去掉隔离标记：
+>   ```bash
+>   xattr -dr com.apple.quarantine "/Applications/Serial Studio.app"
+>   ```
+> - **Windows** —— SmartScreen 提示，点「更多信息 → 仍要运行」。
 
 ## ⚙️ 配置
 

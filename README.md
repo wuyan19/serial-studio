@@ -4,6 +4,7 @@
 
 <p><img src="crates/tauri-app/icons/icon.png" width="84" alt="Serial Studio icon"></p>
 
+![release](https://img.shields.io/github/v/release/wuyan19/serial-studio)
 ![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
 ![React](https://img.shields.io/badge/React-18-61dafb)
@@ -84,6 +85,13 @@ The release artifact is `serial-studio.exe`.
   on the LAN, open `http://<host>:18700/`; the UI is served from the binary itself.
 - **Remote window** — from the desktop app, open a remote window to another Serial Studio host.
 - **Headless** — `serial-studio.exe --no-gui` runs only the backend (no window).
+
+> **First run (unsigned build):** releases aren't code-signed yet.
+> - **macOS** — Gatekeeper blocks it. After dragging to `/Applications`, strip the quarantine flag:
+>   ```bash
+>   xattr -dr com.apple.quarantine "/Applications/Serial Studio.app"
+>   ```
+> - **Windows** — SmartScreen warns; click *More info → Run anyway*.
 
 ## ⚙️ Configuration
 
