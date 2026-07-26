@@ -540,6 +540,82 @@ export function AliasDialog({
   );
 }
 
+// ===== 宏批量导出对话框 =====
+
+/** 多选导出宏：勾选若干（或全选）→ 导出单个 JSON（{名: 宏}，可再导入闭环）。
+ *  对比编辑器内的单个导出，这里支持批量/全选。Enter 导出 / Esc 取消。 */
+export function ExportMacrosDialog({
+  macros,
+  onConfirm,
+  onCancel,
+}: {
+  macros: Record<string, Macro>;
+  onConfirm: (selected: string[]) => void;
+  onCancel: () => void;
+}) {
+  const names = Object.keys(macros);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const all = names.length > 0 && selected.size === names.length;
+  const toggle = (name: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const toggleAll = () => setSelected(all ? new Set() : new Set(names));
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      } else if (e.key === "Enter" && selected.size > 0) {
+        e.preventDefault();
+        onConfirm([...selected]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, onConfirm, onCancel]);
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconExport /> EXPORT MACROS
+        </h3>
+        <div className="dialog__sub">勾选要导出的宏，导出为单个 JSON（可再导入）</div>
+        <div className="export-list">
+          <label className="export-list__all">
+            <input type="checkbox" checked={all} onChange={toggleAll} />
+            <span>{all ? "取消全选" : "全选"}</span>
+            <span className="export-list__count">
+              {selected.size}/{names.length}
+            </span>
+          </label>
+          {names.map((name) => (
+            <label key={name} className="export-list__item">
+              <input type="checkbox" checked={selected.has(name)} onChange={() => toggle(name)} />
+              <span className="export-list__name">{name}</span>
+            </label>
+          ))}
+        </div>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button
+            className="btn btn--primary"
+            disabled={selected.size === 0}
+            onClick={() => onConfirm([...selected])}
+          >
+            导出{selected.size > 0 ? ` ${selected.size} 个` : ""}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== 设置面板 =====
 
 export function SettingsPanel({

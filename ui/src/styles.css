@@ -1368,6 +1368,48 @@ button {
   color: var(--rx);
 }
 
+/* 宏批量导出列表（对话框内 checkbox 列表） */
+.export-list {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 4px 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 4px;
+}
+.export-list__all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 7px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 2px;
+  cursor: pointer;
+}
+.export-list__count {
+  margin-left: auto;
+  color: var(--ink-faint);
+  font-weight: 400;
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+}
+.export-list__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.export-list__item:hover {
+  background: var(--surface-2);
+}
+.export-list__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
 /* ============================================================
    Reduced motion — kill animation & pulse
    ============================================================ */

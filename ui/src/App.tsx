@@ -9,6 +9,7 @@ import type {
   TermInstance,
 } from "./types";
 import {
+  downloadJson,
   getRemoteFromUrl,
   initConn,
   isTauri,
@@ -25,6 +26,7 @@ import {
   ActivityIcon,
   AliasDialog,
   ConfirmDialog,
+  ExportMacrosDialog,
   MacroEditor,
   newStep,
   PortLabel,
@@ -40,6 +42,7 @@ import {
   IconBolt,
   IconClose,
   IconEdit,
+  IconExport,
   IconGear,
   IconGlobe,
   IconInfo,
@@ -171,6 +174,8 @@ export default function App() {
   } | null>(null);
   /** 正在编辑别名的端口（null = 关闭别名对话框）。 */
   const [aliasEditPort, setAliasEditPort] = useState<string | null>(null);
+  /** 宏批量导出对话框是否打开。 */
+  const [exportMacrosOpen, setExportMacrosOpen] = useState(false);
   const [version, setVersion] = useState("");
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
@@ -648,6 +653,14 @@ export default function App() {
                   <button className="icon-btn" onClick={() => importInputRef.current?.click()} title="导入宏">
                     <IconImport />
                   </button>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setExportMacrosOpen(true)}
+                    disabled={Object.keys(macros).length === 0}
+                    title="导出宏（可多选 / 全选）"
+                  >
+                    <IconExport />
+                  </button>
                   <button className="icon-btn" onClick={() => openMacroEditor(null)} title="新增宏">
                     <IconPlus />
                   </button>
@@ -805,6 +818,20 @@ export default function App() {
           initial={aliasOf(aliasEditPort) ?? ""}
           onConfirm={(alias) => commitAlias(aliasEditPort, alias)}
           onCancel={() => setAliasEditPort(null)}
+        />
+      )}
+
+      {/* 宏批量导出对话框 */}
+      {exportMacrosOpen && (
+        <ExportMacrosDialog
+          macros={macros}
+          onConfirm={(names) => {
+            const obj: Record<string, Macro> = {};
+            for (const n of names) obj[n] = macros[n];
+            downloadJson("serial-studio-macros.json", obj);
+            setExportMacrosOpen(false);
+          }}
+          onCancel={() => setExportMacrosOpen(false)}
         />
       )}
 
