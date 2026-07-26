@@ -66,11 +66,24 @@ async fn save_settings(settings: Settings) -> Result<(), String> {
 /// 串口连接和宏保留（AppState 跨重启共享）。
 #[tauri::command]
 async fn apply_settings(
+    app: tauri::AppHandle,
     settings: Settings,
     supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
 ) -> Result<(), String> {
     ss_server::settings::save(&settings)?;
-    supervisor.restart(&settings).await
+    match supervisor.restart(&settings).await {
+        Ok(()) => {
+            let _ = app.emit("service-status", serde_json::json!({ "running": true }));
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "service-status",
+                serde_json::json!({ "running": false, "error": e.clone() }),
+            );
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -394,11 +407,22 @@ fn run_gui() {
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
             spawn_event_emitter(app.handle().clone(), state.event_bus.clone());
 
-            // 启动初始服务（异步，不阻塞 setup）
+            // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
+            // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。
             let sup = supervisor.clone();
+            let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = sup.start(&settings).await {
-                    tracing::error!("服务启动失败: {}", e);
+                match sup.start(&settings).await {
+                    Ok(()) => {
+                        let _ = app_handle.emit("service-status", serde_json::json!({ "running": true }));
+                    }
+                    Err(e) => {
+                        tracing::error!("服务启动失败: {}", e);
+                        let _ = app_handle.emit(
+                            "service-status",
+                            serde_json::json!({ "running": false, "error": e }),
+                        );
+                    }
                 }
             });
 

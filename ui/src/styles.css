@@ -608,6 +608,29 @@ button {
   background: rgba(227, 179, 65, 0.08);
   border-bottom-color: rgba(227, 179, 65, 0.22);
 }
+.banner__close {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.55;
+}
+.banner__close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+.banner__close svg {
+  width: 12px;
+  height: 12px;
+}
 
 /* channel strip — the instrument status bar (signature lives here) */
 .channel-strip {

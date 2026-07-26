@@ -168,6 +168,7 @@ export default function App() {
     onConfirm: () => void;
   } | null>(null);
   const [version, setVersion] = useState("");
+  const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
   const transportRef = useRef<Transport | null>(null);
@@ -266,6 +267,40 @@ export default function App() {
         .catch(() => {});
     }
   }, []);
+
+  // 服务状态：本地服务启动失败（端口被占用等）时显示持久横幅。远程/Web 无本地服务。
+  // start 是异步的：监听 service-status 事件 + 2s 后兜底查一次（避免“还在启动中”误报）。
+  useEffect(() => {
+    if (!isTauri() || isRemote) return;
+    let unlisten: (() => void) | undefined;
+    const check = () =>
+      tauriInvoke<{ running: boolean }>("service_status")
+        .then((s) =>
+          setServiceError(
+            s.running
+              ? ""
+              : "本地服务未启动（WS/Telnet 端口可能被占用）。本地串口仍可用，但无法被远程访问。"
+          )
+        )
+        .catch(() => {});
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ running: boolean; error?: string }>("service-status", (e) => {
+        if (e.payload.running) {
+          setServiceError("");
+        } else {
+          setServiceError(
+            `${e.payload.error ? e.payload.error + " " : ""}本地串口仍可用，但无法被远程访问。`
+          );
+        }
+      });
+    })();
+    const timer = setTimeout(check, 2000);
+    return () => {
+      unlisten?.();
+      clearTimeout(timer);
+    };
+  }, [isRemote]);
 
   // 主题：订阅 theme 模块，切换时刷新按钮图标
   useEffect(() => subscribe(setThemeState), []);
@@ -632,6 +667,14 @@ export default function App() {
         {notice && (
           <div className="banner banner--notice">
             <IconInfo /> {notice}
+          </div>
+        )}
+        {serviceError && (
+          <div className="banner banner--err">
+            <IconAlert /> {serviceError}
+            <button className="banner__close" onClick={() => setServiceError("")} title="关闭">
+              <IconClose />
+            </button>
           </div>
         )}
 
