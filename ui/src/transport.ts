@@ -15,8 +15,14 @@ export interface AcquiredResult {
 
 /** 数据面传输抽象：屏蔽 IPC/WS 协议差异。组件只懂领域（port/bytes/macro）。 */
 export interface Transport {
-  list(): Promise<PortInfo[]>;
+  /** 触发一次端口列表拉取；数据经 onPorts 回调推送（推送模型，避免请求-响应竞态丢回复）。 */
+  list(): Promise<void>;
+  /** 端口列表更新回调（list 响应或服务端推送均经此）。后到覆盖先到——最新数据胜出。 */
+  onPorts(cb: (ports: PortInfo[]) => void): () => void;
   open(port: string, config: SerialConfig): Promise<AcquiredResult>;
+  /** 设置端口别名（空串 = 清除）。写 ports.json，跟随端口所在机器。
+   *  open 命令不碰磁盘——rename / 首开带别名都走此入口。 */
+  setAlias(port: string, alias: string): Promise<void>;
   close(port: string): Promise<void>;
   /** 强制关闭：无视持有者直接拆毁。仅本地有意义，远程会 reject。 */
   forceClose(port: string): Promise<void>;
@@ -27,6 +33,8 @@ export interface Transport {
   onPortClosed(cb: (port: string) => void): () => void;
   /** 持有者数量变化（有人加入/退出，端口未关）。 */
   onHolders(cb: (port: string, holders: number) => void): () => void;
+  /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
+  onMetaChanged(cb: () => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
   onConnectedChange(cb: (connected: boolean) => void): () => void;
@@ -45,13 +53,14 @@ function decodeDataFrame(buf: ArrayBuffer): { port: string; data: Uint8Array } {
 /** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）。 */
 export class RemoteTransport implements Transport {
   private ws: WebSocket;
-  private listResolver: ((p: PortInfo[]) => void) | null = null;
   private openResolver: ((r: AcquiredResult) => void) | null = null;
   private handlers = {
     data: new Set<(port: string, data: Uint8Array) => void>(),
+    ports: new Set<(p: PortInfo[]) => void>(),
     opened: new Set<(port: string) => void>(),
     closed: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
+    metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
@@ -72,10 +81,8 @@ export class RemoteTransport implements Transport {
       const msg = JSON.parse(e.data);
       switch (msg.type) {
         case "ports":
-          if (this.listResolver) {
-            this.listResolver(msg.ports as PortInfo[]);
-            this.listResolver = null;
-          }
+          // 推送模型：每个 ports 消息都推给所有订阅者（后到覆盖先到，避免 resolver 丢回复）
+          this.handlers.ports.forEach((cb) => cb(msg.ports as PortInfo[]));
           break;
         case "opened":
           this.handlers.opened.forEach((cb) => cb(msg.port));
@@ -97,6 +104,9 @@ export class RemoteTransport implements Transport {
         case "holders":
           this.handlers.holders.forEach((cb) => cb(msg.port, msg.holders));
           break;
+        case "meta_changed":
+          this.handlers.metaChanged.forEach((cb) => cb());
+          break;
         case "error":
           this.handlers.error.forEach((cb) => cb(msg.message));
           break;
@@ -111,9 +121,10 @@ export class RemoteTransport implements Transport {
 
   async list() {
     this.ws.send(JSON.stringify({ action: "list" }));
-    return new Promise<PortInfo[]>((resolve) => {
-      this.listResolver = resolve;
-    });
+  }
+  onPorts(cb: (ports: PortInfo[]) => void) {
+    this.handlers.ports.add(cb);
+    return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
     this.ws.send(JSON.stringify({ action: "open", port, config }));
@@ -123,6 +134,9 @@ export class RemoteTransport implements Transport {
   }
   async close(port: string) {
     this.ws.send(JSON.stringify({ action: "close", port }));
+  }
+  async setAlias(port: string, alias: string) {
+    this.ws.send(JSON.stringify({ action: "set_alias", port, alias }));
   }
   async forceClose(_port: string) {
     // 强制关闭是本地特权，远程不可用（防止远程误操作踢掉他人）
@@ -155,6 +169,10 @@ export class RemoteTransport implements Transport {
     this.handlers.error.add(cb);
     return () => { this.handlers.error.delete(cb); };
   }
+  onMetaChanged(cb: () => void) {
+    this.handlers.metaChanged.add(cb);
+    return () => { this.handlers.metaChanged.delete(cb); };
+  }
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
@@ -177,9 +195,11 @@ export class LocalTransport implements Transport {
   private streamChannels = new Map<string, Channel<ArrayBuffer>>();
   private handlers = {
     data: new Set<(port: string, data: Uint8Array) => void>(),
+    ports: new Set<(p: PortInfo[]) => void>(),
     opened: new Set<(port: string) => void>(),
     closed: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
+    metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
@@ -219,12 +239,21 @@ export class LocalTransport implements Transport {
             )
         )
       );
+      this.unlisten.push(
+        await listen("ports-meta-changed", () =>
+          this.handlers.metaChanged.forEach((cb) => cb()))
+      );
     };
     setup().catch((e) => console.error("本地事件订阅失败", e));
   }
 
   async list() {
-    return tauriInvoke<PortInfo[]>("list_ports");
+    const ports = await tauriInvoke<PortInfo[]>("list_ports");
+    this.handlers.ports.forEach((cb) => cb(ports));
+  }
+  onPorts(cb: (ports: PortInfo[]) => void) {
+    this.handlers.ports.add(cb);
+    return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
     const chan = new Channel<ArrayBuffer>();
@@ -251,6 +280,9 @@ export class LocalTransport implements Transport {
     } finally {
       this.streamChannels.delete(port);
     }
+  }
+  async setAlias(port: string, alias: string) {
+    await tauriInvoke("set_port_alias", { port, alias });
   }
   async forceClose(port: string) {
     await tauriInvoke("force_close_port", { port });
@@ -282,6 +314,10 @@ export class LocalTransport implements Transport {
   onError(cb: (msg: string) => void) {
     this.handlers.error.add(cb);
     return () => { this.handlers.error.delete(cb); };
+  }
+  onMetaChanged(cb: () => void) {
+    this.handlers.metaChanged.add(cb);
+    return () => { this.handlers.metaChanged.delete(cb); };
   }
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);

@@ -215,7 +215,7 @@ impl PortChannels {
 
 #[tauri::command]
 async fn list_ports(state: tauri::State<'_, AppState>) -> Result<Vec<ss_core::PortInfo>, String> {
-    Ok(state.manager.list_ports().await)
+    Ok(ss_server::list_ports_with_meta(&state).await)
 }
 
 /// 打开端口并订阅字节流。
@@ -269,6 +269,17 @@ async fn force_close_port(state: tauri::State<'_, AppState>, port: String) -> Re
     state.manager.force_close(&port).await.map_err(|e| e.to_string())
 }
 
+/// 设置端口别名（""/None = 清除）。写 exe 同目录 ports.json 并广播元数据变更，
+/// 让已连的远程 WS 客户端刷新。open 命令不碰磁盘——别名一律走此入口。
+#[tauri::command]
+async fn set_port_alias(
+    state: tauri::State<'_, AppState>,
+    port: String,
+    alias: Option<String>,
+) -> Result<(), String> {
+    ss_server::set_alias_and_notify(&state, &port, alias)
+}
+
 #[tauri::command]
 async fn write_port(
     state: tauri::State<'_, AppState>,
@@ -308,7 +319,14 @@ async fn run_macro(
 
 /// 本地模式数据流：订阅 EventBus，把 SerialEvent 转成 Tauri event 推给前端。
 /// 与 axum ws.rs 的事件转发是同一 EventBus 的两个出口（一个走 WS，一个走 IPC）。
-fn spawn_event_emitter(app: tauri::AppHandle, event_bus: std::sync::Arc<ss_core::EventBus>) {
+/// 另订阅 meta_bus：别名等元数据变更时 emit "ports-meta-changed"，让本地 UI 刷新列表
+/// （远程客户端改了别名，本地桌面 UI 也能及时同步，不必等下一个串口事件）。
+fn spawn_event_emitter(
+    app: tauri::AppHandle,
+    event_bus: std::sync::Arc<ss_core::EventBus>,
+    meta_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
+) {
+    let app_meta = app.clone(); // 第二个 spawn 用；下面的 async move 会 move 掉 app
     let mut rx = event_bus.subscribe();
     tauri::async_runtime::spawn(async move {
         while let Ok(event) = rx.recv().await {
@@ -343,6 +361,14 @@ fn spawn_event_emitter(app: tauri::AppHandle, event_bus: std::sync::Arc<ss_core:
                     );
                 }
             }
+        }
+    });
+
+    // 元数据（别名）变更 → 通知本地前端刷新端口列表
+    let mut meta_rx = meta_bus.subscribe();
+    tauri::async_runtime::spawn(async move {
+        while meta_rx.recv().await.is_ok() {
+            let _ = app_meta.emit("ports-meta-changed", ());
         }
     });
 }
@@ -405,7 +431,7 @@ fn run_gui() {
             app.manage(PortChannels::default());
 
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
-            spawn_event_emitter(app.handle().clone(), state.event_bus.clone());
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone());
 
             // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
             // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。
@@ -442,6 +468,7 @@ fn run_gui() {
             open_port_stream,
             close_port_stream,
             force_close_port,
+            set_port_alias,
             write_port,
             run_macro,
         ])

@@ -77,7 +77,7 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "serial_list",
-                "description": "列出系统所有串口及其打开状态。无需指定端口，用于发现可用串口或确认某端口是否已打开。",
+                "description": "列出系统所有串口及其打开状态与别名。无需指定端口，用于发现可用串口或确认某端口是否已打开。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -89,7 +89,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名（如 COM7 / /dev/ttyUSB0）。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口名或别名（如 COM7 / /dev/ttyUSB0 / GPS）。缺省时使用唯一打开的串口" },
                         "data": { "type": "string", "description": "要发送的数据" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
                         "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
@@ -104,7 +104,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名" },
+                        "port": { "type": "string", "description": "串口名或别名" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "输出编码：text 为文本，hex 为十六进制" },
                         "timeout_ms": { "type": "integer", "default": 100, "description": "缓冲区空时等待超时（毫秒）" }
                     }
@@ -116,7 +116,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名" }
+                        "port": { "type": "string", "description": "串口名或别名" }
                     }
                 }
             },
@@ -126,7 +126,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名" },
+                        "port": { "type": "string", "description": "串口名或别名" },
                         "pattern": { "type": "string", "description": "搜索模式" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "pattern 的编码：text 为文本（正则），hex 为十六进制字节序列" },
                         "timeout_ms": { "type": "integer", "default": 1000, "description": "等待匹配的超时（毫秒）" }
@@ -140,7 +140,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名" }
+                        "port": { "type": "string", "description": "串口名或别名" }
                     }
                 }
             }
@@ -167,6 +167,17 @@ async fn handle_tools_call(params: &Value, manager: &SerialManager) -> Value {
 
 async fn resolve_port(args: &Value, manager: &SerialManager) -> Result<String, String> {
     if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
+        // 精确端口名优先：是已开端口就直接用
+        let open = manager.list_open_ports().await;
+        if open.iter().any(|x| x == p) {
+            return Ok(p.to_string());
+        }
+        // 否则按别名反查 ports.json
+        let meta = crate::port_meta_store::load();
+        if let Some((port, _)) = meta.iter().find(|(_, m)| m.alias.as_deref() == Some(p)) {
+            return Ok(port.clone());
+        }
+        // 既非已开端口名也非别名：透传，下游 NotOpen 兜底（保留原行为）
         return Ok(p.to_string());
     }
     let open = manager.list_open_ports().await;
@@ -182,15 +193,21 @@ async fn tool_serial_list(_args: Value, manager: &SerialManager) -> Value {
     if ports.is_empty() {
         return ok_text("未发现任何串口".into());
     }
+    let meta = crate::port_meta_store::load();
     let mut out = Vec::with_capacity(ports.len());
     for p in ports {
+        let alias = meta.get(&p.name).and_then(|m| m.alias.as_deref());
+        let label = match alias {
+            Some(a) => format!("{} ({})", p.name, a),
+            None => p.name.clone(),
+        };
         let line = if p.opened {
             match manager.holder_count(&p.name).await {
-                Some(n) if n > 0 => format!("{} (open, {} holder(s))", p.name, n),
-                _ => format!("{} (open)", p.name),
+                Some(n) if n > 0 => format!("{} (open, {} holder(s))", label, n),
+                _ => format!("{} (open)", label),
             }
         } else {
-            format!("{} (closed)", p.name)
+            format!("{} (closed)", label)
         };
         out.push(line);
     }
@@ -259,8 +276,15 @@ async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
     match manager.status(&port).await {
         Some(cfg) => {
             let holders = manager.holder_count(&port).await.unwrap_or(0);
+            let alias = crate::port_meta_store::load()
+                .get(&port)
+                .and_then(|m| m.alias.clone());
+            let alias_line = match alias {
+                Some(a) => format!("Alias: {}\n", a),
+                None => String::new(),
+            };
             ok_text(format!(
-                "Port: {}\nBaud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}\nHolders: {}",
+                "Port: {}\n{alias_line}Baud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}\nHolders: {}",
                 port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending, holders
             ))
         }

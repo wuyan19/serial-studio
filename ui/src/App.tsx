@@ -23,9 +23,11 @@ import { LocalTransport, RemoteTransport, type Transport } from "./transport";
 import {
   AboutDialog,
   ActivityIcon,
+  AliasDialog,
   ConfirmDialog,
   MacroEditor,
   newStep,
+  PortLabel,
   RemoteDialog,
   SearchBar,
   SerialConfigDialog,
@@ -167,6 +169,8 @@ export default function App() {
     tone?: "primary" | "danger";
     onConfirm: () => void;
   } | null>(null);
+  /** 正在编辑别名的端口（null = 关闭别名对话框）。 */
+  const [aliasEditPort, setAliasEditPort] = useState<string | null>(null);
   const [version, setVersion] = useState("");
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
@@ -191,9 +195,10 @@ export default function App() {
     const t = isLocal ? new LocalTransport() : new RemoteTransport(connConfig.host, connConfig.port);
     transportRef.current = t;
     const unsubs = [
+      t.onPorts(setPorts),
       t.onConnectedChange((conn) => {
         setConnected(conn);
-        if (conn) t.list().then(setPorts);
+        if (conn) t.list();
       }),
       t.onData((port, data) => {
         touch(port, "rx"); // 签名：收到字节 → RX 亮
@@ -201,7 +206,7 @@ export default function App() {
         if (inst) inst.term.write(data);
       }),
       t.onPortOpened(() => {
-        t.list().then(setPorts);
+        t.list();
       }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签和终端
@@ -218,10 +223,14 @@ export default function App() {
         });
         terminalsRef.current.delete(port);
         activityRef.current.delete(port);
-        t.list().then(setPorts);
+        t.list();
       }),
       t.onHolders(() => {
-        t.list().then(setPorts);
+        t.list();
+      }),
+      t.onMetaChanged(() => {
+        // 别名等元数据变更（本机或别的客户端改的）→ 及时刷新，不必等串口事件
+        t.list();
       }),
       t.onError((msg) => {
         setErrorMsg(msg);
@@ -325,11 +334,11 @@ export default function App() {
     setSearchOpen(false);
   }, [activePort]);
 
-  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。 */
+  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。 */
   const openPort = async (port: string, config: SerialConfig) => {
     try {
       const res = await transportRef.current?.open(port, config);
-      if (!res) return;
+      if (!res) return undefined;
       // 成功占有（首开或附加）：创建本会话的终端标签，并记录端口实际配置供通道条展示
       setOpenPorts((prev) => (prev.includes(port) ? prev : [...prev, port]));
       setActivePort(port);
@@ -340,18 +349,37 @@ export default function App() {
         setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。`);
         setTimeout(() => setNotice(""), 6000);
       }
+      return res;
     } catch (e) {
       setErrorMsg(String(e));
       setTimeout(() => setErrorMsg(""), 5000);
+      return undefined;
     }
   };
 
-  const confirmOpen = async (config: SerialConfig) => {
+  /** 打开对话框确认：先 open，仅首开（opened=true）才落别名——与串口参数同逻辑（附加时别名忽略）。 */
+  const confirmOpen = async (config: SerialConfig, alias: string) => {
     const port = pendingPort;
     if (!port) return;
     saveConfig(config);
     setPendingPort(null);
-    await openPort(port, config);
+    const res = await openPort(port, config);
+    const trimmed = alias.trim();
+    if (!trimmed) return;
+    if (res?.opened) {
+      // 首开：别名生效
+      try {
+        await transportRef.current?.setAlias(port, trimmed);
+        refreshPorts();
+      } catch (e) {
+        setErrorMsg("设置别名失败: " + String(e));
+        setTimeout(() => setErrorMsg(""), 5000);
+      }
+    } else if (res && !res.opened) {
+      // 附加：别名未生效（端口已被其它会话先开）
+      setNotice("端口已被其它会话打开，本次别名未生效。");
+      setTimeout(() => setNotice(""), 5000);
+    }
   };
 
   const closePort = (port: string) => {
@@ -493,7 +521,21 @@ export default function App() {
   };
 
   const refreshPorts = () => {
-    transportRef.current?.list().then(setPorts);
+    transportRef.current?.list();
+  };
+
+  const aliasOf = (name: string) => ports.find((p) => p.name === name)?.alias;
+
+  /** 提交别名：写 ports.json + 刷新列表使别名立即显示。空串 = 清除。 */
+  const commitAlias = async (port: string, alias: string) => {
+    setAliasEditPort(null);
+    try {
+      await transportRef.current?.setAlias(port, alias);
+      refreshPorts();
+    } catch (e) {
+      setErrorMsg("设置别名失败: " + String(e));
+      setTimeout(() => setErrorMsg(""), 5000);
+    }
   };
 
   const activeHolders = ports.find((p) => p.name === activePort)?.holders ?? 0;
@@ -554,7 +596,7 @@ export default function App() {
               {ports.map((p) => {
                 const isActive = p.name === activePort;
                 return (
-                  <div key={p.name} className="port-item-row" data-active={isActive} data-force={isLocal && p.opened ? "true" : undefined}>
+                  <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={isLocal && p.opened ? "true" : undefined}>
                     <button
                       className="port-item"
                       onClick={() => {
@@ -569,8 +611,17 @@ export default function App() {
                       }}
                     >
                       <span className={`port-item__dot${p.opened ? " open" : ""}`} />
-                      <span className="port-item__name">{p.name}</span>
+                      <span className="port-item__name">
+                        <PortLabel name={p.name} alias={p.alias} />
+                      </span>
                       {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
+                    </button>
+                    <button
+                      className="port-item__edit"
+                      title={`设置 ${p.name} 别名`}
+                      onClick={() => setAliasEditPort(p.name)}
+                    >
+                      <IconEdit />
                     </button>
                     {isLocal && p.opened && (
                       <button
@@ -643,7 +694,9 @@ export default function App() {
             return (
               <div key={port} className="tab" data-active={isActive} onClick={() => switchPort(port)}>
                 <span className="tab__dot" />
-                <span className="tab__name">{port}</span>
+                <span className="tab__name">
+                  <PortLabel name={port} alias={aliasOf(port)} />
+                </span>
                 <span
                   className="tab__btn tab__btn--close"
                   onClick={(e) => {
@@ -681,7 +734,9 @@ export default function App() {
         {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名） */}
         {activePort && activeConfig && (
           <div className="channel-strip">
-            <span className="channel-strip__port">{activePort}</span>
+            <span className="channel-strip__port">
+              <PortLabel name={activePort} alias={aliasOf(activePort)} />
+            </span>
             <span className="channel-strip__sep">·</span>
             <span className="channel-strip__config">{formatConfig(activeConfig)}</span>
             {activeHolders > 0 && (
@@ -730,9 +785,27 @@ export default function App() {
         </div>
       </main>
 
-      {/* 串口配置对话框 */}
+      {/* 串口配置对话框（key=pendingPort：换端口重挂，别名输入状态重置） */}
       {pendingPort && (
-        <SerialConfigDialog port={pendingPort} config={serialConfig} onChange={setSerialConfig} onConfirm={confirmOpen} onCancel={() => setPendingPort(null)} />
+        <SerialConfigDialog
+          key={pendingPort}
+          port={pendingPort}
+          config={serialConfig}
+          initialAlias={aliasOf(pendingPort) ?? ""}
+          onChange={setSerialConfig}
+          onConfirm={confirmOpen}
+          onCancel={() => setPendingPort(null)}
+        />
+      )}
+
+      {/* 别名编辑对话框 */}
+      {aliasEditPort && (
+        <AliasDialog
+          port={aliasEditPort}
+          initial={aliasOf(aliasEditPort) ?? ""}
+          onConfirm={(alias) => commitAlias(aliasEditPort, alias)}
+          onCancel={() => setAliasEditPort(null)}
+        />
       )}
 
       {/* 设置面板 */}

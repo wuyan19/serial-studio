@@ -7,6 +7,8 @@ export interface PortInfo {
   opened: boolean;
   /** 当前持有者数（多端共享时 >1） */
   holders: number;
+  /** 用户自定义别名（描述端口下连接的设备）；无则为 undefined。后端注入。 */
+  alias?: string;
 }
 
 /** 宏步骤（判别联合，与后端 MacroStep 对齐） */

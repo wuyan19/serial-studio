@@ -6,6 +6,7 @@
 //!     {"action":"open","port":"COM3","config":{"baud_rate":115200,...}}
 //!     {"action":"close","port":"COM3"}
 //!     {"action":"write","port":"COM3","data":"...","encoding":"hex|text"}
+//!     {"action":"set_alias","port":"COM3","alias":"GPS"}   # 空串/null 清除别名
 //!   server → client:
 //!     {"type":"ports","ports":[...]}
 //!     {"type":"data","port":"COM3","data":"...","encoding":"hex"}
@@ -44,6 +45,8 @@ enum ServerMsg {
     Acquired { port: String, opened: bool, config: SerialConfig, holders: usize },
     /// 持有者数量变化（有人加入/退出，端口未关）。
     Holders { port: String, holders: usize },
+    /// 端口元数据（别名等）变更——客户端应重新拉取端口列表。
+    MetaChanged,
     Error { message: String },
     Ok { message: String },
     MacroResult { name: String, success: bool, message: String },
@@ -71,6 +74,12 @@ enum ClientMsg {
         port: String,
         r#macro: ss_core::Macro,
     },
+    /// 设置端口别名（""/null = 清除）。别名写入 ports.json，跟随端口所在机器。
+    SetAlias {
+        port: String,
+        #[serde(default)]
+        alias: Option<String>,
+    },
 }
 
 fn default_encoding() -> String {
@@ -96,7 +105,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // 推送初始端口列表
     {
-        let ports = state.manager.list_ports().await;
+        let ports = crate::list_ports_with_meta(&state).await;
         let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
     }
 
@@ -110,6 +119,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if out_tx_evt.send(msg).await.is_err() {
                             break;
                         }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // 元数据（别名）变更 → 通知客户端重新拉取端口列表。
+    // 否则别的客户端改了别名，本客户端要等下一个串口事件才看到。
+    let mut meta_rx = state.meta_bus.subscribe();
+    let out_tx_meta = out_tx.clone();
+    let meta_task = tokio::spawn(async move {
+        loop {
+            match meta_rx.recv().await {
+                Ok(()) => {
+                    if out_tx_meta.send(to_json(ServerMsg::MetaChanged)).await.is_err() {
+                        break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -155,6 +182,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // 先停本连接的事件转发，再释放占有份额；末位口才拆毁，事件广播给其它仍在的客户端
     event_task.abort();
+    meta_task.abort();
     let released = state.manager.release_all(session).await;
     if !released.is_empty() {
         tracing::info!("session {:?} 断连，释放 {} 个持有端口", session, released.len());
@@ -215,7 +243,7 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
 
     match msg {
         ClientMsg::List => {
-            let ports = state.manager.list_ports().await;
+            let ports = crate::list_ports_with_meta(&state).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
         ClientMsg::Open { port, config } => match state.manager.acquire(port.clone(), config, session).await {
@@ -312,6 +340,16 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
             });
+        }
+        ClientMsg::SetAlias { port, alias } => {
+            match crate::set_alias_and_notify(state, &port, alias) {
+                Ok(()) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Ok { message: "alias set".into() })).await;
+                }
+                Err(e) => {
+                    let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
+                }
+            }
         }
     }
 }

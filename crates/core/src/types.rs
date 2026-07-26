@@ -147,6 +147,10 @@ pub struct PortInfo {
     pub opened: bool,
     /// 当前持有该端口的会话数（多端共享时 >1）。
     pub holders: usize,
+    /// 用户自定义别名（描述端口下连接的设备）。
+    /// core 不知情，构造时填 None；由 server 层从 ports.json 注入（远程模式取远程别名）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 #[cfg(test)]

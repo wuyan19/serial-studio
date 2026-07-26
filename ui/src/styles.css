@@ -328,9 +328,14 @@ button {
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
     border-color var(--t-fast) var(--ease);
 }
-/* 仅在出现强制关闭按钮时为右侧图标预留空间，避免关闭态端口右侧空一大块 */
-.port-item-row[data-force="true"] .port-item {
+/* 已打开端口：右侧有在线人数 badge + 铅笔，预留空间避免重叠。
+   关闭态不预留（无 badge/force），保持原设计不留空块。 */
+.port-item-row[data-opened="true"] .port-item {
   padding-right: 30px;
+}
+/* 本地已打开：再加强制关闭按钮，预留两图标空间（覆盖上一条）。 */
+.port-item-row[data-force="true"] .port-item {
+  padding-right: 54px;
 }
 .port-item:hover {
   background: var(--surface-2);
@@ -368,6 +373,44 @@ button {
   width: 14px;
   height: 14px;
 }
+/* 别名编辑（铅笔）overlay：所有端口都有，hover 才显现。
+   与强制关闭同区——有 force 时左移让位（force 在最右，edit 在其左）。 */
+.port-item__edit {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  cursor: pointer;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
+}
+.port-item-row:hover .port-item__edit {
+  opacity: 1;
+  pointer-events: auto;
+}
+.port-item-row[data-force="true"] .port-item__edit {
+  right: 30px;
+}
+.port-item__edit:hover {
+  color: var(--rx);
+  background: rgba(79, 214, 194, 0.12);
+}
+.port-item__edit svg {
+  width: 14px;
+  height: 14px;
+}
 .port-item__dot {
   width: 7px;
   height: 7px;
@@ -385,6 +428,11 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* PortLabel 的真名后缀：别名在前，(真名) 走浅色。port 行 / tab / 通道条共用。 */
+.port-label__raw {
+  color: var(--ink-faint);
+  margin-left: 4px;
 }
 .port-item__holders {
   font-size: var(--fs-xs);

@@ -23,6 +23,7 @@ import {
   IconChevronUp,
   IconClose,
   IconCopy,
+  IconEdit,
   IconExport,
   IconGear,
   IconGlobe,
@@ -40,6 +41,19 @@ export function ConfigRow({ label, children }: { label: string; children: React.
       <span className="row__label">{label}</span>
       {children}
     </div>
+  );
+}
+
+/** 端口名展示：有别名时显「别名(真名)」，真名走 .port-label__raw 浅色；无别名仅显真名。
+ *  端口行 / tab / 通道条共用，避免三处重复 JSX。 */
+export function PortLabel({ name, alias }: { name: string; alias?: string }) {
+  const a = alias?.trim();
+  if (!a) return <span className="port-label">{name}</span>;
+  return (
+    <span className="port-label" title={`${a}（${name}）`}>
+      {a}
+      <span className="port-label__raw">({name})</span>
+    </span>
   );
 }
 
@@ -379,16 +393,22 @@ export function SearchBar({ searchAddon, onClose }: { searchAddon: SearchAddon; 
 export function SerialConfigDialog({
   port,
   config,
+  initialAlias = "",
   onChange,
   onConfirm,
   onCancel,
 }: {
   port: string;
   config: SerialConfig;
+  /** 打开时携带的别名初值（端口已有别名则回填，便于编辑）。 */
+  initialAlias?: string;
   onChange: (c: SerialConfig) => void;
-  onConfirm: (c: SerialConfig) => void;
+  onConfirm: (c: SerialConfig, alias: string) => void;
   onCancel: () => void;
 }) {
+  // 别名是端口语义（每端口独立），用内部状态；config 仍是受控（跨端口沿用）。
+  // 调用方 key={port} 保证换端口时重挂、状态重置。
+  const [alias, setAlias] = useState(initialAlias);
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -396,6 +416,9 @@ export function SerialConfigDialog({
           <IconPlug /> OPEN PORT
         </h3>
         <div className="dialog__sub">{port}</div>
+        <ConfigRow label="别名">
+          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，描述此端口连接的设备" className="field" />
+        </ConfigRow>
         <ConfigRow label="波特率">
           <select value={config.baud_rate} onChange={(e) => onChange({ ...config, baud_rate: Number(e.target.value) })} className="field-select">
             {BAUD_RATES.map((b) => (
@@ -444,8 +467,72 @@ export function SerialConfigDialog({
           <button className="btn btn--ghost" onClick={onCancel}>
             取消
           </button>
-          <button className="btn btn--primary" onClick={() => onConfirm(config)}>
+          <button className="btn btn--primary" onClick={() => onConfirm(config, alias)}>
             打开
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== 别名编辑对话框 =====
+
+/** 设置端口别名的小对话框（复用 ConfirmDialog 风格）。空串提交 = 清除别名。
+ *  Enter 确定 / Esc 取消；遮罩不关闭（同其它对话框，防误触）。 */
+export function AliasDialog({
+  port,
+  initial = "",
+  onConfirm,
+  onCancel,
+}: {
+  port: string;
+  initial?: string;
+  onConfirm: (alias: string) => void;
+  onCancel: () => void;
+}) {
+  const [alias, setAlias] = useState(initial);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirm(alias);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [alias, onConfirm, onCancel]);
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconEdit /> ALIAS
+        </h3>
+        <div className="dialog__sub">{port}</div>
+        <ConfigRow label="别名">
+          <input
+            ref={inputRef}
+            value={alias}
+            onChange={(e) => setAlias(e.target.value)}
+            placeholder="可选，描述此端口连接的设备"
+            className="field"
+          />
+        </ConfigRow>
+        <p className="dialog__hint">留空清除别名。同名别名会从其它端口转移到此端口。</p>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button className="btn btn--primary" onClick={() => onConfirm(alias)}>
+            确定
           </button>
         </div>
       </div>

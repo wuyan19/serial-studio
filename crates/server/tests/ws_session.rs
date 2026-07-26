@@ -77,9 +77,11 @@ impl PortOpener for FakeOpener {
 async fn boot() -> (String, Arc<SerialManager>) {
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpener)));
+    let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let state = AppState {
         manager: manager.clone(),
         event_bus,
+        meta_bus: Arc::new(meta_tx),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
