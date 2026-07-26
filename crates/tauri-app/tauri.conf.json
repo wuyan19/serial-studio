@@ -24,6 +24,7 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis", "dmg", "appimage", "deb"]
   }
 }
