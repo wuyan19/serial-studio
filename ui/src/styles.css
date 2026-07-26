@@ -1336,7 +1336,7 @@ button {
   width: 56px;
   height: 56px;
   margin-bottom: 10px;
-  border-radius: var(--r-md);
+  border-radius: 13px; /* ~24%，呼应 app 图标的 squircle 圆度（仍主题自适应） */
   background: var(--surface-2);
   border: 1px solid var(--hairline);
   color: var(--rx);

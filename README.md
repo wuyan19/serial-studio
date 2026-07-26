@@ -16,7 +16,7 @@ browser on your network, or driven by an LLM over MCP — all backed by the same
 Multiple clients can share a single port, you can script repetitive exchanges as macros,
 and label ports with device aliases.
 
-> _Screenshots coming soon._
+<p align="center"><img src="docs/screenshot.png" width="720" alt="Serial Studio screenshot"></p>
 
 ---
 

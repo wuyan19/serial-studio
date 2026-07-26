@@ -14,7 +14,7 @@
 Serial Studio 让你能从精致的桌面应用、局域网内任意浏览器、或由 LLM 经 MCP 驱动来收发串口数据
 ——后端都是同一套 Rust 核心。多个客户端可共享同一端口，重复交互能写成宏，端口还能标注设备别名。
 
-> _截图待补充。_
+<p align="center"><img src="docs/screenshot.png" width="720" alt="Serial Studio 界面截图"></p>
 
 ---
 
