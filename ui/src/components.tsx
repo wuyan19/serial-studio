@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一引入
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { ISearchDecorationOptions } from "@xterm/addon-search";
 import type {
+  ActionId,
   ConnConfig,
   Macro,
   MacroStep,
   SerialConfig,
+  ShortcutMap,
   SrvSettings,
   StepType,
   TermInstance,
@@ -16,6 +18,17 @@ import type {
 import { BAUD_RATES, downloadJson } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
+import {
+  ACTION_LABELS,
+  DEFAULT_BINDINGS,
+  eventToCombo,
+  formatCombo,
+  getBindings,
+  resetAll,
+  resetBinding,
+  setBinding,
+  subscribeBindings,
+} from "./shortcuts";
 import {
   IconAlert,
   IconBolt,
@@ -149,20 +162,24 @@ export function TermView({
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
-    // Ctrl + +/-/0 缩放字体（仅本终端聚焦时拦截，不抢输入框焦点）
+    // 字体缩放：combo 实时读注册表（改键即时生效，免重建终端）。
+    // terminal 作用域，不经全局 listener / 菜单；不匹配一律放行给 xterm 作串口输入。
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== "keydown" || !(e.ctrlKey || e.metaKey)) return true;
-      if (e.key === "=" || e.key === "+") {
+      if (e.type !== "keydown") return true;
+      const combo = eventToCombo(e);
+      if (!combo) return true;
+      const m = getBindings();
+      if (combo === m["zoom.in"].combo) {
         e.preventDefault();
         zoomIn();
         return false;
       }
-      if (e.key === "-") {
+      if (combo === m["zoom.out"].combo) {
         e.preventDefault();
         zoomOut();
         return false;
       }
-      if (e.key === "0") {
+      if (combo === m["zoom.reset"].combo) {
         e.preventDefault();
         resetFontSize();
         return false;
@@ -644,6 +661,7 @@ export function SettingsPanel({
   onConnChange,
   onSaveSrv,
   showServer,
+  onOpenShortcuts,
   onClose,
 }: {
   connConfig: ConnConfig;
@@ -651,6 +669,7 @@ export function SettingsPanel({
   onConnChange: (c: ConnConfig) => void;
   onSaveSrv: (s: SrvSettings) => void;
   showServer: boolean;
+  onOpenShortcuts: () => void;
   onClose: () => void;
 }) {
   const [conn, setConn] = useState<ConnConfig>(connConfig);
@@ -667,6 +686,11 @@ export function SettingsPanel({
         <h3 className="dialog__title">
           <IconGear /> SETTINGS
         </h3>
+
+        <button type="button" className="shortcut-entry" onClick={onOpenShortcuts}>
+          <span>键盘快捷键</span>
+          <span className="shortcut-entry__hint">自定义 / 改键</span>
+        </button>
 
         {!showServer && (
           <>
@@ -725,6 +749,259 @@ export function SettingsPanel({
             )}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ===== 快捷键改键对话框 =====
+
+/** 列表展示顺序（global 在前、terminal 在后，常用动作靠上）。 */
+const SHORTCUT_ORDER: ActionId[] = [
+  "search.open",
+  "macro.palette",
+  "theme.toggle",
+  "port.refresh",
+  "port.close-active",
+  "activity.toggle-ports",
+  "activity.toggle-macros",
+  "settings.open",
+  "about.open",
+  "zoom.in",
+  "zoom.out",
+  "zoom.reset",
+];
+
+/** 快捷键改键对话框：逐行展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。
+ *  模态打开时 App 的全局 listener 已被抑制，这里的录制 listener 独占 keydown。
+ *  录制中：读下一组非纯修饰符 keydown → setBinding 校验；Esc 取消录制。
+ *  非录制：Esc 关闭对话框。 */
+export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const [map, setMap] = useState<ShortcutMap>(() => getBindings());
+  const [recording, setRecording] = useState<ActionId | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => subscribeBindings(setMap), []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (recording) {
+        e.preventDefault();
+        e.stopPropagation();
+        const combo = eventToCombo(e);
+        if (!combo) return; // 纯修饰符，等主键
+        if (combo === "escape") {
+          setRecording(null);
+          setError("");
+          return;
+        }
+        const r = setBinding(recording, combo);
+        if (r.ok) {
+          setRecording(null);
+          setError("");
+        } else {
+          setError(r.reason); // 保持录制，让用户重按
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, onClose]);
+
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconGear /> SHORTCUTS
+        </h3>
+        <div className="dialog__sub">点键帽录制，按下新组合；Esc 取消录制</div>
+
+        <div className="shortcut-list">
+          {SHORTCUT_ORDER.map((action) => {
+            const b = map[action];
+            const isRec = recording === action;
+            const isDefault = b.combo === DEFAULT_BINDINGS[action].combo;
+            return (
+              <div className="shortcut-row" key={action}>
+                <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
+                <button
+                  type="button"
+                  className={"kbd" + (isRec ? " kbd--rec" : "")}
+                  onClick={() => {
+                    setRecording(action);
+                    setError("");
+                  }}
+                >
+                  {isRec ? "按下新组合…" : formatCombo(b.combo)}
+                </button>
+                <button
+                  type="button"
+                  className="mini-btn"
+                  title="重置默认"
+                  disabled={isDefault}
+                  onClick={() => {
+                    resetBinding(action);
+                    setError("");
+                  }}
+                >
+                  ↺
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {error && <p className="editor-error">{error}</p>}
+
+        <div className="btn-row" style={{ justifyContent: "space-between" }}>
+          <button
+            className="btn btn--ghost"
+            onClick={() => {
+              resetAll();
+              setError("");
+            }}
+          >
+            全部重置
+          </button>
+          <button className="btn btn--ghost" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== 宏命令面板（Ctrl+O）=====
+
+/** 模糊匹配：查询字符按序出现在 target 里即命中（大小写不敏感）。
+ *  返回 {score, first}：score = 匹配字符间间隙累加（越小越紧凑），first = 首个命中下标（越靠前越好）。 */
+function fuzzyMatch(query: string, target: string): { score: number; first: number } | null {
+  if (!query) return { score: 0, first: 0 };
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  let qi = 0;
+  let score = 0;
+  let last = -1;
+  let first = -1;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) {
+      if (first === -1) first = ti;
+      else score += ti - last - 1;
+      last = ti;
+      qi++;
+    }
+  }
+  return qi === q.length ? { score, first: first === -1 ? 0 : first } : null;
+}
+
+/** 宏命令面板：顶部搜索框 + 模糊过滤的宏列表，方向键选择，回车执行。
+ *  模态打开时 App 的全局 listener 已被抑制；这里在输入框上自处理方向键 / 回车 / Esc。 */
+export function MacroPalette({
+  macros,
+  activePort,
+  onRun,
+  onClose,
+}: {
+  macros: Record<string, Macro>;
+  activePort: string;
+  onRun: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const [hint, setHint] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const filtered = useMemo(() => {
+    const matched: { name: string; score: number; first: number }[] = [];
+    for (const name of Object.keys(macros)) {
+      const m = fuzzyMatch(query, name);
+      if (m) matched.push({ name, score: m.score, first: m.first });
+    }
+    matched.sort(
+      (a, b) => a.score - b.score || a.first - b.first || a.name.localeCompare(b.name)
+    );
+    return matched.map((x) => x.name);
+  }, [macros, query]);
+
+  // 查询变化 → 回到首项、清提示
+  useEffect(() => {
+    setSelected(0);
+    setHint("");
+  }, [query]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const commit = (name: string) => {
+    if (!activePort) {
+      setHint("先打开一个端口再运行宏");
+      return;
+    }
+    onRun(name);
+    onClose();
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i + 1) % filtered.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i - 1 + filtered.length) % filtered.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const name = filtered[selected] ?? filtered[0];
+      if (name) commit(name);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="palette-overlay" onClick={onClose}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="palette__input"
+          placeholder={`搜索宏…（${Object.keys(macros).length} 个）`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKey}
+        />
+        <div className="palette__list">
+          {filtered.length === 0 && <div className="palette__empty">无匹配宏</div>}
+          {filtered.map((name, i) => (
+            <button
+              type="button"
+              key={name}
+              className={"palette__item" + (i === selected ? " palette__item--selected" : "")}
+              onMouseEnter={() => setSelected(i)}
+              onClick={() => commit(name)}
+            >
+              <span className="palette__name">{name}</span>
+              {macros[name].description && (
+                <span className="palette__desc">{macros[name].description}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="palette__footer">
+          {hint ? (
+            <span className="palette__hint">{hint}</span>
+          ) : activePort ? (
+            <span>↑↓ 选择 · 回车运行</span>
+          ) : (
+            <span className="palette__hint palette__hint--faint">未打开端口</span>
+          )}
+        </div>
       </div>
     </div>
   );

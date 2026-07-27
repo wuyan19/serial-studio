@@ -56,3 +56,44 @@ export interface SrvSettings {
   ws_port: number;
   telnet_port: number;
 }
+
+// ===== 快捷键（可改键；唯一真相源在 shortcuts.ts） =====
+
+/**
+ * 快捷键动作 id。与 shortcuts.ts 的 DEFAULT_BINDINGS 键严格对齐——
+ * 漏写一个即编译错，借此强制两处同步。
+ */
+export type ActionId =
+  | "search.open"
+  | "theme.toggle"
+  | "port.refresh"
+  | "settings.open"
+  | "about.open"
+  | "activity.toggle-ports"
+  | "activity.toggle-macros"
+  | "port.close-active"
+  | "macro.palette"
+  | "zoom.in"
+  | "zoom.out"
+  | "zoom.reset";
+
+/**
+ * 作用域：
+ * - global   = 全局窗口监听 + 桌面菜单 accelerator（焦点/模态抑制由 App 控制）
+ * - terminal = 仅 xterm 聚焦时生效（字体缩放），不进菜单、不经全局 listener
+ */
+export type BindingScope = "global" | "terminal";
+
+/**
+ * 单条绑定。combo 规范形如 "mod+shift+f"：小写、修饰符在前、主键在后。
+ * mod = 平台主修饰符（Win/Linux Ctrl、Mac ⌘）：匹配用 ctrlKey||metaKey，
+ * 序列化成 Tauri accelerator 的 CmdOrCtrl（OS 按平台展开），配置天然跨平台。
+ * 空 combo = 未绑定（动作仍可在桌面菜单点选，只是无快捷键）。
+ */
+export interface KeyBinding {
+  combo: string;
+  scope: BindingScope;
+}
+
+/** action → 绑定。 */
+export type ShortcutMap = Record<ActionId, KeyBinding>;

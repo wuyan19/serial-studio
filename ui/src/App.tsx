@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  ActionId,
   ConnConfig,
   Macro,
   MacroResult,
@@ -28,12 +29,14 @@ import {
   ConfirmDialog,
   ExportMacrosDialog,
   MacroEditor,
+  MacroPalette,
   newStep,
   PortLabel,
   RemoteDialog,
   SearchBar,
   SerialConfigDialog,
   SettingsPanel,
+  ShortcutsDialog,
   TermView,
   validateMacro,
 } from "./components";
@@ -58,6 +61,7 @@ import {
   IconSun,
 } from "./icons";
 import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
+import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
 
@@ -163,6 +167,8 @@ export default function App() {
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
   /** 通用确认弹窗状态（替代原生 confirm）。null = 关闭。 */
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -185,6 +191,14 @@ export default function App() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef("");
   activeRef.current = activePort;
+  /** 快捷键处理器表：每 render 用最新闭包刷新；dispatch 经 ref 读，菜单/action 闭包不陈旧。
+   *  Partial：terminal 作用域（zoom）不经此 dispatch（在 xterm handler 内自处理）。 */
+  const handlersRef = useRef<Partial<Record<ActionId, () => void>>>({});
+  /** 任一模态打开 → 抑制全局快捷键（不抢对话框裸 Enter/Esc、不抢输入）。 */
+  const modalOpenRef = useRef(false);
+  const dispatch = useCallback((action: ActionId) => {
+    handlersRef.current[action]?.();
+  }, []);
   /** per-port 字节流活动时间戳——驱动 TX/RX LED。 */
   const activityRef = useRef<Map<string, Activity>>(new Map());
   const touch = (port: string, dir: "rx" | "tx") => {
@@ -320,20 +334,43 @@ export default function App() {
   // 主题：订阅 theme 模块，切换时刷新按钮图标
   useEffect(() => subscribe(setThemeState), []);
 
-  // Ctrl+F：在活动终端开搜索框。capture 阶段先于 xterm 拦截，避免被终端吃掉。
+  // 全局快捷键：单一 capture listener——combo 查 global 表 → dispatch。
+  // 焦点在输入控件或任一模态打开时抑制（不抢对话框裸 Enter/Esc、不抢输入）。
+  // 桌面若该 combo 已是菜单 accelerator，OS 先于 webview 拦截，listener 本就不会收到。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
-        if (activePort && terminalsRef.current.has(activePort)) {
-          e.preventDefault();
-          e.stopPropagation();
-          setSearchOpen(true);
-        }
+      const t = e.target as HTMLElement | null;
+      // 焦点在表单控件时跳过（不抢输入）；但 xterm 聚焦时 e.target 是隐藏的
+      // .xterm-helper-textarea（终端的输入/IME 代理），那属于“终端聚焦”而非“填表”，
+      // 必须放行——否则终端一聚焦，所有全局快捷键失效。
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable) &&
+        !t.closest(".xterm")
+      ) {
+        return;
+      }
+      if (modalOpenRef.current) return;
+      const combo = eventToCombo(e);
+      if (!combo) return;
+      const action = findAction(combo, "global");
+      if (action) {
+        e.preventDefault();
+        e.stopPropagation();
+        dispatch(action);
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [activePort]);
+  }, [dispatch]);
+
+  // 原生菜单（B 层）暂不启用：Windows 上建菜单会占一条菜单栏，而所有全局快捷键已由
+  // 上面的 listener 覆盖（菜单只是同一批动作的第二入口，属冗余）。要恢复原生菜单 /
+  // accelerator，调 menu.ts 的 setupAppMenu(dispatch) 即可（web/远程模式自动 no-op）。
+  // menu.ts 保留待用。
 
   // 切端口 / 关端口时收起搜索框（addon 已随实例销毁）
   useEffect(() => {
@@ -547,6 +584,37 @@ export default function App() {
   const activeHolders = ports.find((p) => p.name === activePort)?.holders ?? 0;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
+
+  // 快捷键处理器表（每 render 刷新最新闭包；dispatch 经 handlersRef 读，不陈旧）。
+  handlersRef.current = {
+    "search.open": () => {
+      const p = activeRef.current;
+      if (p && terminalsRef.current.has(p)) setSearchOpen(true);
+    },
+    "theme.toggle": toggleTheme,
+    "port.refresh": refreshPorts,
+    "settings.open": () => setSettingsOpen(true),
+    "about.open": () => setAboutOpen(true),
+    "macro.palette": () => setMacroPaletteOpen(true),
+    "activity.toggle-ports": () => setActivity(activity === "ports" ? null : "ports"),
+    "activity.toggle-macros": () => setActivity(activity === "macros" ? null : "macros"),
+    "port.close-active": () => {
+      const p = activeRef.current;
+      if (p) closePort(p);
+    },
+  };
+  modalOpenRef.current = !!(
+    settingsOpen ||
+    aboutOpen ||
+    remoteOpen ||
+    pendingPort ||
+    aliasEditPort ||
+    exportMacrosOpen ||
+    confirmState ||
+    editing ||
+    shortcutsOpen ||
+    macroPaletteOpen
+  );
 
   return (
     <div className="app">
@@ -848,6 +916,7 @@ export default function App() {
           connConfig={connConfig}
           srvSettings={srvSettings}
           showServer={isTauri() && !isRemote}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
           onConnChange={(c) => {
             saveConn(c);
             setConnConfig(c);
@@ -869,6 +938,19 @@ export default function App() {
       )}
 
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      {macroPaletteOpen && (
+        <MacroPalette
+          macros={macros}
+          activePort={activePort}
+          onRun={runMacro}
+          onClose={() => {
+            setMacroPaletteOpen(false);
+            // 关面板后焦点还给活动终端，否则执行完宏无法继续键入（同 SearchBar）
+            activeTerm?.term.focus();
+          }}
+        />
+      )}
       {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={openRemoteWindow} onCancel={() => setRemoteOpen(false)} />}
 
       {confirmState && (
