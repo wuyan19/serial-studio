@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "ss-core"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "regex",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "ss-server"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "ss-tauri"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
