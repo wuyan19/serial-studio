@@ -16,7 +16,7 @@ import type {
   StepType,
   TermInstance,
 } from "./types";
-import { BAUD_RATES, downloadJson } from "./lib";
+import { BAUD_RATES, downloadJson, isTauri } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
 import {
@@ -60,6 +60,8 @@ export function ConfigRow({ label, children }: { label: string; children: React.
 
 /** 裸 Esc 关闭对话框（无修饰符）。给仅靠按钮关闭、无 Enter 语义的通用对话框用。
  *  模态打开期间 App 全局 listener 已被抑制，不会与之冲突。 */
+// Esc/Enter 走 capture:终端聚焦时 xterm 会在 bubble 阶段吃掉 Esc(About 无 autoFocus、
+// 从终端用快捷键打开后 Esc 关不掉),capture 先于 xterm 触发,焦点在不在对话框里都能关。
 export function useEscClose(onClose: () => void) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -68,8 +70,8 @@ export function useEscClose(onClose: () => void) {
         onClose();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 }
 
@@ -86,8 +88,8 @@ export function useDialogKeys({ onClose, onEnter }: { onClose: () => void; onEnt
         onEnter();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, onEnter]);
 }
 
@@ -839,6 +841,8 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const [map, setMap] = useState<ShortcutMap>(() => getBindings());
   const [recording, setRecording] = useState<ActionId | null>(null);
   const [error, setError] = useState("");
+  // Web 页面端(!isTauri)只隐藏 remote.open(已处远程,再开远程无意义);其余均显示
+  const order = isTauri() ? SHORTCUT_ORDER : SHORTCUT_ORDER.filter((a) => a !== "remote.open");
 
   useEffect(() => subscribeBindings(setMap), []);
 
@@ -872,14 +876,14 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
+      <div className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGear /> SHORTCUTS
         </h3>
         <div className="dialog__sub">点键帽录制，按下新组合；Esc 取消录制</div>
 
         <div className="shortcut-list">
-          {SHORTCUT_ORDER.map((action) => {
+          {order.map((action) => {
             const b = map[action];
             const isRec = recording === action;
             const isDefault = b.combo === DEFAULT_BINDINGS[action].combo;
@@ -1600,7 +1604,7 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
             <br />
             <span className="pip">本地 / 远程</span> 双模式 · Tauri + WebSocket
           </p>
-          <button className="btn btn--primary" onClick={onClose}>
+          <button className="btn btn--primary" onClick={onClose} autoFocus>
             关闭
           </button>
         </div>

@@ -22,12 +22,15 @@ export const DEFAULT_BINDINGS: ShortcutMap = {
   "search.open": { combo: "mod+shift+f", scope: "global" },
   "theme.toggle": { combo: "mod+shift+l", scope: "global" },
   "port.refresh": { combo: "mod+shift+p", scope: "global" },
-  "settings.open": { combo: "mod+,", scope: "global" },
+  // Ctrl+, 被 WebView2 在 JS 之前吞掉(只收到裸 Control 修饰键),改 mod+alt+s
+  "settings.open": { combo: "mod+alt+s", scope: "global" },
   "activity.toggle-ports": { combo: "mod+shift+i", scope: "global" },
   "activity.toggle-macros": { combo: "mod+shift+o", scope: "global" },
-  "about.open": { combo: "mod+.", scope: "global" },
+  // Ctrl+. 同理被吞,改 mod+alt+a
+  "about.open": { combo: "mod+alt+a", scope: "global" },
   "remote.open": { combo: "mod+t", scope: "global" },
-  "port.close-active": { combo: "mod+w", scope: "global" },
+  // Ctrl+W 是浏览器保留键(web 会关掉页面标签),改 mod+alt+w 避免冲突
+  "port.close-active": { combo: "mod+alt+w", scope: "global" },
   "macro.palette": { combo: "mod+o", scope: "global" },
   "port.palette": { combo: "mod+i", scope: "global" },
   // 标签页切换：tab.select 是一族键（Ctrl+Alt+1..9，0→末个），用 pattern 捕获数字，不可改键；

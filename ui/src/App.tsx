@@ -644,7 +644,7 @@ export default function App() {
     "tab.prev": () => cycleTab(-1),
     "tab.select": (arg) => selectTab(Number(arg)),
   };
-  modalOpenRef.current = !!(
+  const modalOpen = !!(
     settingsOpen ||
     aboutOpen ||
     remoteOpen ||
@@ -657,6 +657,16 @@ export default function App() {
     macroPaletteOpen ||
     portPaletteOpen
   );
+  modalOpenRef.current = modalOpen;
+
+  // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)
+  useEffect(() => {
+    if (modalOpen) return;
+    const id = window.setTimeout(() => {
+      terminalsRef.current.get(activeRef.current)?.term.focus();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [modalOpen]);
 
   return (
     <div className="app">

@@ -949,6 +949,23 @@ button {
 .dialog--macro > .btn-row {
   flex-shrink: 0;
 }
+/* Shortcuts 对话框：标题/按钮固定，快捷键列表超高滚动（同 macro-editor 模式） */
+.dialog--shortcuts {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dialog--shortcuts .shortcut-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dialog--shortcuts > .dialog__title,
+.dialog--shortcuts > .dialog__sub,
+.dialog--shortcuts > .editor-error,
+.dialog--shortcuts > .btn-row {
+  flex-shrink: 0;
+}
 .dialog__title {
   display: flex;
   align-items: center;
