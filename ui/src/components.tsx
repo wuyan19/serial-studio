@@ -819,6 +819,8 @@ const SHORTCUT_ORDER: ActionId[] = [
   "theme.toggle",
   "port.refresh",
   "port.close-active",
+  "tab.next",
+  "tab.prev",
   "activity.toggle-ports",
   "activity.toggle-macros",
   "settings.open",
@@ -909,6 +911,12 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
               </div>
             );
           })}
+          {/* tab.select 是一族键（Ctrl+Alt+1..9，0→末个），不可改键——静态说明行 */}
+          <div className="shortcut-row shortcut-row--fixed">
+            <span className="shortcut-row__label">{ACTION_LABELS["tab.select"]}</span>
+            <span className="kbd kbd--fixed">{formatCombo("mod+alt+1")}…9</span>
+            <span className="shortcut-row__hint">固定</span>
+          </div>
         </div>
 
         {error && <p className="editor-error">{error}</p>}

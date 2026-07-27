@@ -10,6 +10,8 @@
  * action 闭包稳定（只 dispatch id），不必重建菜单。
  *
  * terminal 作用域（zoom 等）不进菜单——它们留在 xterm handler 里，不经此。
+ * 参数化绑定（带 pattern，如 tab.select 一族键）也不进菜单——无单一 accelerator，
+ * 且需要 arg，菜单项给不出；它们只走 App.tsx 的全局 listener。
  *
  * Tauri menu API 走动态 import（同 transport.ts 的 listen / lib.ts 的 tauriInvoke），
  * 避免在 web bundle 静态加载 @tauri-apps/api。
@@ -27,7 +29,7 @@ import {
 } from "./shortcuts";
 import { getRemoteFromUrl, isTauri } from "./lib";
 
-export type Dispatch = (action: ActionId) => void;
+export type Dispatch = (action: ActionId, arg?: string) => void;
 
 /** 菜单分组与顺序：[分组名, 动作列表]。仅 global 作用域子集。 */
 const GROUPS: [string, ActionId[]][] = [
@@ -61,7 +63,10 @@ export async function setupAppMenu(dispatch: Dispatch): Promise<(() => void) | n
   const groups: { text: string; items: MenuItem[] }[] = [];
   for (const [label, actions] of GROUPS) {
     const children: MenuItem[] = [];
-    for (const a of actions) children.push(await buildItem(a));
+    for (const a of actions) {
+      if (bindings[a].pattern) continue; // 参数化动作（如 tab.select）无单一 accelerator，不进菜单
+      children.push(await buildItem(a));
+    }
     groups.push({ text: label, items: children });
   }
 

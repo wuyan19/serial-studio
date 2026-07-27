@@ -1062,6 +1062,20 @@ button {
   background: rgba(79, 214, 194, 0.1);
   animation: kbd-pulse 1.1s var(--ease) infinite;
 }
+/* 固定（不可改键）说明行：tab.select 一族键，键帽不可点、视觉更弱 */
+.kbd--fixed {
+  cursor: default;
+  background: transparent;
+  color: var(--ink-faint);
+}
+.kbd--fixed:hover {
+  color: var(--ink-faint);
+  border-color: var(--hairline);
+}
+.shortcut-row__hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+}
 @keyframes kbd-pulse {
   0%,
   100% {

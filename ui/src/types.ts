@@ -75,6 +75,9 @@ export type ActionId =
   | "port.close-active"
   | "macro.palette"
   | "port.palette"
+  | "tab.select"
+  | "tab.next"
+  | "tab.prev"
   | "zoom.in"
   | "zoom.out"
   | "zoom.reset";
@@ -95,6 +98,12 @@ export type BindingScope = "global" | "terminal";
 export interface KeyBinding {
   combo: string;
   scope: BindingScope;
+  /**
+   * 正则源（如 "^mod\\+alt\\+(\\d)$"）。存在即表示这是一族键对应一个动作的**参数化绑定**：
+   * findAction 精确等值落空后，用 new RegExp(pattern) 匹配 combo，捕获组作为 arg 透传给 handler。
+   * 此类绑定无单一 combo（combo 留空），不可改键、不进菜单 accelerator。例：Ctrl+Alt+1..9 切标签页。
+   */
+  pattern?: string;
 }
 
 /** action → 绑定。 */

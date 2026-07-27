@@ -30,6 +30,11 @@ export const DEFAULT_BINDINGS: ShortcutMap = {
   "port.close-active": { combo: "mod+w", scope: "global" },
   "macro.palette": { combo: "mod+o", scope: "global" },
   "port.palette": { combo: "mod+i", scope: "global" },
+  // 标签页切换：tab.select 是一族键（Ctrl+Alt+1..9，0→末个），用 pattern 捕获数字，不可改键；
+  // tab.next/prev 是普通可改键动作，左右循环 wrap。mod+alt+* 是干净命名空间（无默认占用、非浏览器保留）。
+  "tab.select": { combo: "", scope: "global", pattern: "^mod\\+alt\\+(\\d)$" },
+  "tab.next": { combo: "mod+alt+arrowright", scope: "global" },
+  "tab.prev": { combo: "mod+alt+arrowleft", scope: "global" },
   "zoom.in": { combo: "mod+=", scope: "terminal" },
   "zoom.out": { combo: "mod+-", scope: "terminal" },
   "zoom.reset": { combo: "mod+0", scope: "terminal" },
@@ -48,6 +53,9 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   "port.close-active": "关闭当前端口",
   "macro.palette": "宏命令面板",
   "port.palette": "串口选择面板",
+  "tab.select": "切换到第 N 个标签页",
+  "tab.next": "下一个标签页",
+  "tab.prev": "上一个标签页",
   "zoom.in": "放大字体",
   "zoom.out": "缩小字体",
   "zoom.reset": "重置字体",
@@ -98,12 +106,25 @@ export function getBindings(): ShortcutMap {
   return current;
 }
 
-/** 当前 combo（不论作用域）对应的动作；无则 null。 */
-export function findAction(combo: string, scope?: "global" | "terminal"): ActionId | null {
+/** combo 命中的动作（精确优先）。精确等值命中返回 { id }；若精确落空但某参数化绑定的
+ *  pattern 匹配该 combo，返回 { id, arg }（arg = 捕获组，如 "3"）。无则 null。 */
+export function findAction(
+  combo: string,
+  scope?: "global" | "terminal",
+): { id: ActionId; arg?: string } | null {
+  // 第一遍：精确等值（所有 1:1 动作在此命中，arg 永不产生）
   for (const k of Object.keys(current) as ActionId[]) {
     const b = current[k];
     if (b.combo && b.combo === combo && (!scope || b.scope === scope)) {
-      return k;
+      return { id: k };
+    }
+  }
+  // 第二遍：参数化绑定（pattern）兜底，捕获组当 arg
+  for (const k of Object.keys(current) as ActionId[]) {
+    const b = current[k];
+    if (b.pattern && (!scope || b.scope === scope)) {
+      const m = new RegExp(b.pattern).exec(combo);
+      if (m) return { id: k, arg: m[1] };
     }
   }
   return null;
@@ -126,6 +147,15 @@ export function validateCombo(combo: string, action: ActionId): SetResult {
   for (const k of Object.keys(current) as ActionId[]) {
     if (k === action) continue;
     if (current[k].combo && current[k].combo === combo) {
+      return { ok: false, reason: `与「${ACTION_LABELS[k]}」冲突` };
+    }
+  }
+  // 参数化绑定（pattern）冲突：候选 combo 落在别族的 pattern 里也拒
+  // （如把 tab.next 改成 mod+alt+5 会吃掉 tab.select 数字族）
+  for (const k of Object.keys(current) as ActionId[]) {
+    if (k === action) continue;
+    const pat = current[k].pattern;
+    if (pat && new RegExp(pat).test(combo)) {
       return { ok: false, reason: `与「${ACTION_LABELS[k]}」冲突` };
     }
   }

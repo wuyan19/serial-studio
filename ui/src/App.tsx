@@ -195,11 +195,11 @@ export default function App() {
   activeRef.current = activePort;
   /** 快捷键处理器表：每 render 用最新闭包刷新；dispatch 经 ref 读，菜单/action 闭包不陈旧。
    *  Partial：terminal 作用域（zoom）不经此 dispatch（在 xterm handler 内自处理）。 */
-  const handlersRef = useRef<Partial<Record<ActionId, () => void>>>({});
+  const handlersRef = useRef<Partial<Record<ActionId, (arg?: string) => void>>>({});
   /** 任一模态打开 → 抑制全局快捷键（不抢对话框裸 Enter/Esc、不抢输入）。 */
   const modalOpenRef = useRef(false);
-  const dispatch = useCallback((action: ActionId) => {
-    handlersRef.current[action]?.();
+  const dispatch = useCallback((action: ActionId, arg?: string) => {
+    handlersRef.current[action]?.(arg);
   }, []);
   /** per-port 字节流活动时间戳——驱动 TX/RX LED。 */
   const activityRef = useRef<Map<string, Activity>>(new Map());
@@ -358,11 +358,11 @@ export default function App() {
       if (modalOpenRef.current) return;
       const combo = eventToCombo(e);
       if (!combo) return;
-      const action = findAction(combo, "global");
-      if (action) {
+      const hit = findAction(combo, "global");
+      if (hit) {
         e.preventDefault();
         e.stopPropagation();
-        dispatch(action);
+        dispatch(hit.id, hit.arg);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -459,6 +459,28 @@ export default function App() {
   };
 
   const switchPort = (port: string) => setActivePort(port);
+
+  // 标签页切换快捷键：Ctrl+Alt+1..9 直达、Ctrl+Alt+←/→ 循环。复用 switchPort +
+  // 聚焦新终端（TermView display 切换不销毁，term 实例常驻 terminalsRef，可立即 focus）。
+  const focusTab = (name: string) => terminalsRef.current.get(name)?.term.focus();
+  const cycleTab = (dir: 1 | -1) => {
+    const tabs = openPorts;
+    if (tabs.length < 2) return;
+    const i = tabs.indexOf(activePort);
+    const next = tabs[((i < 0 ? 0 : i) + dir + tabs.length) % tabs.length]; // 循环 wrap
+    switchPort(next);
+    focusTab(next);
+  };
+  const selectTab = (n: number) => {
+    const tabs = openPorts;
+    if (!tabs.length) return;
+    const idx = n === 0 ? tabs.length - 1 : n - 1; // 1..9→第 n 个，0→末个（浏览器惯例）
+    const t = tabs[idx]; // 越界 → undefined → no-op
+    if (t) {
+      switchPort(t);
+      focusTab(t);
+    }
+  };
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
@@ -618,6 +640,9 @@ export default function App() {
       const p = activeRef.current;
       if (p) closePort(p);
     },
+    "tab.next": () => cycleTab(1),
+    "tab.prev": () => cycleTab(-1),
+    "tab.select": (arg) => selectTab(Number(arg)),
   };
   modalOpenRef.current = !!(
     settingsOpen ||
