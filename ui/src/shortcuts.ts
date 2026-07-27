@@ -19,7 +19,7 @@ const KEY = "serial-studio-keybindings2";
 
 /** 默认绑定。combo 留空 = 该动作默认无快捷键（仍可在桌面菜单点选）。 */
 export const DEFAULT_BINDINGS: ShortcutMap = {
-  "search.open": { combo: "mod+f", scope: "global" },
+  "search.open": { combo: "mod+shift+f", scope: "global" },
   "theme.toggle": { combo: "mod+shift+l", scope: "global" },
   "port.refresh": { combo: "mod+shift+p", scope: "global" },
   "settings.open": { combo: "mod+,", scope: "global" },
