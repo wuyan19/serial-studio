@@ -116,9 +116,16 @@ export async function persistMacros(macros: Record<string, Macro>) {
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
-/** 触发浏览器下载一个 JSON 文件（WebView2 内同样可用）。 */
-export function downloadJson(filename: string, obj: unknown) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+/** 下载 / 保存 JSON 文件。
+ * - Tauri 桌面端：弹原生保存对话框（用户选位置 + 文件名），写文件。返回 false = 用户取消。
+ * - Web：浏览器 blob 下载到下载文件夹（无取消概念，返回 true）。
+ * 写入失败抛错（调用方 catch）。 */
+export async function downloadJson(filename: string, obj: unknown): Promise<boolean> {
+  const content = JSON.stringify(obj, null, 2);
+  if (isTauri()) {
+    return tauriInvoke<boolean>("save_json_file", { defaultName: filename, content });
+  }
+  const blob = new Blob([content], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -127,4 +134,5 @@ export function downloadJson(filename: string, obj: unknown) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  return true;
 }

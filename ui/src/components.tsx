@@ -941,9 +941,13 @@ export function MacroEditor({
           <div style={{ display: "flex", gap: 8 }}>
             <button
               className="btn btn--ghost btn--icon"
-              onClick={() => {
+              onClick={async () => {
                 const n = name.trim() || "macro";
-                downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: macro });
+                try {
+                  await downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: macro });
+                } catch (e) {
+                  console.error("导出失败", e);
+                }
               }}
               title="导出为 JSON 文件（可分享 / 导入）"
             >

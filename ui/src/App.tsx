@@ -825,11 +825,16 @@ export default function App() {
       {exportMacrosOpen && (
         <ExportMacrosDialog
           macros={macros}
-          onConfirm={(names) => {
+          onConfirm={async (names) => {
             const obj: Record<string, Macro> = {};
             for (const n of names) obj[n] = macros[n];
-            downloadJson("serial-studio-macros.json", obj);
-            setExportMacrosOpen(false);
+            try {
+              const saved = await downloadJson("serial-studio-macros.json", obj);
+              if (saved) setExportMacrosOpen(false); // 用户取消（saved=false）则保持对话框打开
+            } catch (e) {
+              setErrorMsg("导出失败: " + String(e));
+              setTimeout(() => setErrorMsg(""), 5000);
+            }
           }}
           onCancel={() => setExportMacrosOpen(false)}
         />

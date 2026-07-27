@@ -281,6 +281,24 @@ async fn set_port_alias(
     ss_server::set_alias_and_notify(&state, &port, alias)
 }
 
+/// 弹出原生保存对话框让用户选位置，写 JSON 文本。桌面端导出用（Web 走浏览器 blob 下载）。
+/// 返回 true=已保存，false=用户取消（不报错）。
+#[tauri::command]
+async fn save_json_file(default_name: String, content: String) -> Result<bool, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_file_name(&default_name)
+        .add_filter("JSON", &["json"])
+        .save_file()
+        .await;
+    match file {
+        Some(handle) => {
+            handle.write(content.as_bytes()).await.map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 #[tauri::command]
 async fn write_port(
     state: tauri::State<'_, AppState>,
@@ -480,6 +498,7 @@ fn run_gui() {
             set_port_alias,
             write_port,
             run_macro,
+            save_json_file,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
