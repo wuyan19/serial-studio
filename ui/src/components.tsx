@@ -218,6 +218,9 @@ export function TermView({
       const timer = setTimeout(() => {
         try {
           fitRef.current?.fit();
+          // 切到本标签即聚焦终端，免得用户还得点一下才能键入。
+          // display 已在渲染时切回 block，setTimeout(0) 推到下一 tick 确保可见后再 focus。
+          termRef.current?.focus();
         } catch {
           /* ignore */
         }
@@ -264,7 +267,15 @@ function searchDecorations(t: Theme): ISearchDecorationOptions {
   };
 }
 
-export function SearchBar({ searchAddon, onClose }: { searchAddon: SearchAddon; onClose: () => void }) {
+export function SearchBar({
+  searchAddon,
+  term,
+  onClose,
+}: {
+  searchAddon: SearchAddon;
+  term: Terminal;
+  onClose: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [regex, setRegex] = useState(false);
@@ -291,14 +302,23 @@ export function SearchBar({ searchAddon, onClose }: { searchAddon: SearchAddon; 
         decorations: searchDecorations(getTheme()),
       };
       try {
-        if (dir === "next") searchAddon.findNext(query, opts);
-        else searchAddon.findPrevious(query, opts);
+        if (dir === "next") {
+          // 无既有命中时，把选区种子播到当前视口顶部：addon 的 findNext 默认从 row 0
+          // （scrollback 最开头）起搜，这里让它从"当前可见窗口"起搜，符合直觉。
+          // 该 select 在同一次同步调用内被 addon 读到后立即 clearSelection 清掉，不会闪现。
+          if (!term.getSelectionPosition()) {
+            term.select(0, term.buffer.active.viewportY, 1);
+          }
+          searchAddon.findNext(query, opts);
+        } else {
+          searchAddon.findPrevious(query, opts);
+        }
         setError(false);
       } catch {
         setError(true); // 多半是非法正则
       }
     },
-    [query, regex, caseSensitive, wholeWord, searchAddon]
+    [query, regex, caseSensitive, wholeWord, searchAddon, term]
   );
 
   // 输入/选项变化 → 重新搜索（增量）

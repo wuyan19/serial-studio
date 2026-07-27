@@ -195,7 +195,11 @@ export default function App() {
 
   const isLocal = isTauri() && !isRemote;
 
-  // 数据面连接。本地模式用 IPC（常驻不重连）；远程/Web 用 WS（connConfig 变化重建）
+  // 数据面连接。本地模式 IPC 常驻——不随 connConfig 重连：connConfig 在本地仅用于显示，
+  // 重建 LocalTransport 会丢掉已开端口的 per-port RX Channel，导致改服务监听设置后串口"变哑"
+  // （输入发出但收不到回显/响应，重开端口才好）。远程/Web 用 WS，connConfig 变化时重建。
+  // transportKey 表达此意图：本地恒为 "local"，远程随地址变。
+  const transportKey = isLocal ? "local" : `${connConfig.host}:${connConfig.port}`;
   useEffect(() => {
     const t = isLocal ? new LocalTransport() : new RemoteTransport(connConfig.host, connConfig.port);
     transportRef.current = t;
@@ -248,7 +252,7 @@ export default function App() {
       t.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLocal, connConfig]);
+  }, [transportKey]);
 
   // 服务器配置：Tauri 控制面 invoke 读本地 settings.json
   useEffect(() => {
@@ -272,14 +276,11 @@ export default function App() {
     }
   }, []);
 
-  // 版本号（Tauri getAppVersion）
+  // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。
+  // 远程窗口虽 isTauri() 为真，但连的是远程服务，版本应反映服务端而非本机 app。
+  // 连接时序由 RemoteTransport.send() 内部 await open 兜底，挂载即取也不会踩 CONNECTING 异常。
   useEffect(() => {
-    if (isTauri()) {
-      import("@tauri-apps/api/app")
-        .then(({ getVersion }) => getVersion())
-        .then(setVersion)
-        .catch(() => {});
-    }
+    transportRef.current?.getVersion().then(setVersion).catch(() => {});
   }, []);
 
   // 服务状态：本地服务启动失败（端口被占用等）时显示持久横幅。远程/Web 无本地服务。
@@ -789,6 +790,7 @@ export default function App() {
           {searchOpen && activeTerm?.search && (
             <SearchBar
               searchAddon={activeTerm.search}
+              term={activeTerm.term}
               onClose={() => {
                 setSearchOpen(false);
                 activeTerm?.term.focus();

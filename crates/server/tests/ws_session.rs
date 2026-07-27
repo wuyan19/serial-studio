@@ -180,3 +180,15 @@ async fn last_close_tears_down_port() {
     }
     assert!(ok, "末位 close 应拆毁端口（holder_count → None）");
 }
+
+#[tokio::test]
+async fn version_action_returns_server_version() {
+    // 远程/Web 关于页通过此动作取版本。服务端回 CARGO_PKG_VERSION，
+    // 与桌面端 Tauri getVersion() 共用 workspace 版本号（当前同为 0.1.0）。
+    let (url, _mgr) = boot().await;
+    let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(&mut a, r#"{"action":"version"}"#).await;
+    let resp = recv_until(&mut a, "\"type\":\"version\"").await;
+    let want = format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"));
+    assert!(resp.contains(&want), "期望包含 {}，实际: {}", want, resp);
+}

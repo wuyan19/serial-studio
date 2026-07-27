@@ -7,6 +7,7 @@
 //!     {"action":"close","port":"COM3"}
 //!     {"action":"write","port":"COM3","data":"...","encoding":"hex|text"}
 //!     {"action":"set_alias","port":"COM3","alias":"GPS"}   # 空串/null 清除别名
+//!     {"action":"version"}                                # 查询服务版本（远程/Web 关于页用）
 //!   server → client:
 //!     {"type":"ports","ports":[...]}
 //!     {"type":"data","port":"COM3","data":"...","encoding":"hex"}
@@ -14,6 +15,7 @@
 //!     {"type":"closed","port":"COM3"}
 //!     {"type":"acquired","port":"COM3","opened":bool,"config":{...},"holders":n}  # open 的直接回复（区分首开/附加）
 //!     {"type":"holders","port":"COM3","holders":n}                                 # 持有者数量变化
+//!     {"type":"version","version":"0.1.0"}                                         # version 的直接回复
 //!     {"type":"ok","message":"..."}
 //!     {"type":"error","message":"..."}
 //!
@@ -50,6 +52,8 @@ enum ServerMsg {
     Error { message: String },
     Ok { message: String },
     MacroResult { name: String, success: bool, message: String },
+    /// version 的直接回复：服务端编译版本（远程/Web 关于页展示）。
+    Version { version: String },
 }
 
 /// 客户端 → 服务器 消息。
@@ -80,6 +84,8 @@ enum ClientMsg {
         #[serde(default)]
         alias: Option<String>,
     },
+    /// 查询服务版本。
+    Version,
 }
 
 fn default_encoding() -> String {
@@ -350,6 +356,13 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                     let _ = out_tx.send(to_json(ServerMsg::Error { message: e })).await;
                 }
             }
+        }
+        ClientMsg::Version => {
+            let _ = out_tx
+                .send(to_json(ServerMsg::Version {
+                    version: env!("CARGO_PKG_VERSION").into(),
+                }))
+                .await;
         }
     }
 }

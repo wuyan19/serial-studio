@@ -38,6 +38,8 @@ export interface Transport {
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
   onConnectedChange(cb: (connected: boolean) => void): () => void;
+  /** 服务版本号（关于页展示）。本地取 Tauri app 版本，远程取服务端 CARGO_PKG_VERSION。 */
+  getVersion(): Promise<string>;
   dispose(): void;
 }
 
@@ -54,6 +56,9 @@ function decodeDataFrame(buf: ArrayBuffer): { port: string; data: Uint8Array } {
 export class RemoteTransport implements Transport {
   private ws: WebSocket;
   private openResolver: ((r: AcquiredResult) => void) | null = null;
+  private versionResolver: ((v: string) => void) | null = null;
+  /** WS 连接就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。 */
+  private openPromise: Promise<void>;
   private handlers = {
     data: new Set<(port: string, data: Uint8Array) => void>(),
     ports: new Set<(p: PortInfo[]) => void>(),
@@ -69,6 +74,11 @@ export class RemoteTransport implements Transport {
   constructor(host: string, port: number) {
     this.ws = new WebSocket(`ws://${host}:${port}/ws`);
     this.ws.binaryType = "arraybuffer"; // 数据帧 Binary，控制帧 Text
+    // openPromise 在 onopen 触发时 resolve；send() 统一 await 它，把"连上再发"做成不变量，
+    // 调用方无需各自判断连接时机（getVersion 等程序性早调也不会再踩 CONNECTING 抛异常）。
+    this.openPromise = new Promise<void>((resolve) => {
+      this.ws.addEventListener("open", () => resolve(), { once: true });
+    });
     this.ws.onopen = () => this.handlers.connected.forEach((cb) => cb(true));
     this.ws.onclose = () => this.handlers.connected.forEach((cb) => cb(false));
     this.ws.onmessage = (e) => {
@@ -115,38 +125,59 @@ export class RemoteTransport implements Transport {
             cb(msg.name, msg.success, msg.message)
           );
           break;
+        case "version":
+          if (this.versionResolver) {
+            this.versionResolver(msg.version);
+            this.versionResolver = null;
+          }
+          break;
       }
     };
   }
 
+  /** 统一发送出口：等 WS open 后再 send，消除裸 ws.send 在 CONNECTING 态抛异常的隐患。 */
+  private async send(payload: string) {
+    await this.openPromise;
+    this.ws.send(payload);
+  }
+
   async list() {
-    this.ws.send(JSON.stringify({ action: "list" }));
+    await this.send(JSON.stringify({ action: "list" }));
   }
   onPorts(cb: (ports: PortInfo[]) => void) {
     this.handlers.ports.add(cb);
     return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
-    this.ws.send(JSON.stringify({ action: "open", port, config }));
-    return new Promise<AcquiredResult>((resolve) => {
+    // 先挂 resolver 再发：确保 "acquired" 回复到达时 resolver 已就位（不靠微任务时序）。
+    const result = new Promise<AcquiredResult>((resolve) => {
       this.openResolver = resolve;
     });
+    await this.send(JSON.stringify({ action: "open", port, config }));
+    return result;
   }
   async close(port: string) {
-    this.ws.send(JSON.stringify({ action: "close", port }));
+    await this.send(JSON.stringify({ action: "close", port }));
   }
   async setAlias(port: string, alias: string) {
-    this.ws.send(JSON.stringify({ action: "set_alias", port, alias }));
+    await this.send(JSON.stringify({ action: "set_alias", port, alias }));
   }
   async forceClose(_port: string) {
     // 强制关闭是本地特权，远程不可用（防止远程误操作踢掉他人）
     throw new Error("强制关闭仅本地可用");
   }
   async write(port: string, data: string) {
-    this.ws.send(JSON.stringify({ action: "write", port, data, encoding: "text" }));
+    await this.send(JSON.stringify({ action: "write", port, data, encoding: "text" }));
   }
   async runMacro(name: string, port: string, macro: Macro) {
-    this.ws.send(JSON.stringify({ action: "run_macro", name, port, macro }));
+    await this.send(JSON.stringify({ action: "run_macro", name, port, macro }));
+  }
+  async getVersion() {
+    const result = new Promise<string>((resolve) => {
+      this.versionResolver = resolve;
+    });
+    await this.send(JSON.stringify({ action: "version" }));
+    return result;
   }
 
   onData(cb: (port: string, data: Uint8Array) => void) {
@@ -293,6 +324,10 @@ export class LocalTransport implements Transport {
   }
   async runMacro(name: string, port: string, macro: Macro) {
     await tauriInvoke("run_macro", { name, port, macro });
+  }
+  async getVersion() {
+    const { getVersion } = await import("@tauri-apps/api/app");
+    return getVersion();
   }
 
   onData(cb: (port: string, data: Uint8Array) => void) {
