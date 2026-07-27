@@ -69,10 +69,12 @@ export type ActionId =
   | "port.refresh"
   | "settings.open"
   | "about.open"
+  | "remote.open"
   | "activity.toggle-ports"
   | "activity.toggle-macros"
   | "port.close-active"
   | "macro.palette"
+  | "port.palette"
   | "zoom.in"
   | "zoom.out"
   | "zoom.reset";

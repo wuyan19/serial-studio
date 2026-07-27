@@ -30,6 +30,7 @@ import {
   ExportMacrosDialog,
   MacroEditor,
   MacroPalette,
+  PortPalette,
   newStep,
   PortLabel,
   RemoteDialog,
@@ -169,6 +170,7 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
+  const [portPaletteOpen, setPortPaletteOpen] = useState(false);
   /** 通用确认弹窗状态（替代原生 confirm）。null = 关闭。 */
   const [confirmState, setConfirmState] = useState<{
     title: string;
@@ -458,6 +460,18 @@ export default function App() {
 
   const switchPort = (port: string) => setActivePort(port);
 
+  /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
+   *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
+  const triggerPort = (name: string) => {
+    if (openPorts.includes(name)) {
+      switchPort(name);
+    } else if (ports.find((p) => p.name === name)?.opened) {
+      void openPort(name, serialConfig);
+    } else {
+      setPendingPort(name);
+    }
+  };
+
   const runMacro = (name: string) => {
     if (!activePort) {
       setMacroResult({ name, success: false, message: "请先选择并打开一个串口" });
@@ -595,7 +609,9 @@ export default function App() {
     "port.refresh": refreshPorts,
     "settings.open": () => setSettingsOpen(true),
     "about.open": () => setAboutOpen(true),
+    "remote.open": () => setRemoteOpen(true),
     "macro.palette": () => setMacroPaletteOpen(true),
+    "port.palette": () => setPortPaletteOpen(true),
     "activity.toggle-ports": () => setActivity(activity === "ports" ? null : "ports"),
     "activity.toggle-macros": () => setActivity(activity === "macros" ? null : "macros"),
     "port.close-active": () => {
@@ -613,7 +629,8 @@ export default function App() {
     confirmState ||
     editing ||
     shortcutsOpen ||
-    macroPaletteOpen
+    macroPaletteOpen ||
+    portPaletteOpen
   );
 
   return (
@@ -673,16 +690,7 @@ export default function App() {
                   <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={isLocal && p.opened ? "true" : undefined}>
                     <button
                       className="port-item"
-                      onClick={() => {
-                        if (openPorts.includes(p.name)) {
-                          switchPort(p.name);
-                        } else if (p.opened) {
-                          // 已被其它会话打开：本次为附加，配置会被忽略 → 直接打开，不弹配置框
-                          void openPort(p.name, serialConfig);
-                        } else {
-                          setPendingPort(p.name);
-                        }
-                      }}
+                      onClick={() => triggerPort(p.name)}
                     >
                       <span className={`port-item__dot${p.opened ? " open" : ""}`} />
                       <span className="port-item__name">
@@ -813,25 +821,6 @@ export default function App() {
           </div>
         )}
 
-        {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名） */}
-        {activePort && activeConfig && (
-          <div className="channel-strip">
-            <span className="channel-strip__port">
-              <PortLabel name={activePort} alias={aliasOf(activePort)} />
-            </span>
-            <span className="channel-strip__sep">·</span>
-            <span className="channel-strip__config">{formatConfig(activeConfig)}</span>
-            {activeHolders > 0 && (
-              <>
-                <span className="channel-strip__sep">·</span>
-                <span className="channel-strip__holders">● {activeHolders} 人</span>
-              </>
-            )}
-            <span className="channel-strip__spacer" />
-            <Leds port={activePort} activityRef={activityRef} />
-          </div>
-        )}
-
         {/* 终端区：每个 openPort 一个 TermView，display 切换可见（不销毁） */}
         <div className="term-area">
           {openPorts.map((port) => (
@@ -866,6 +855,25 @@ export default function App() {
             />
           )}
         </div>
+
+        {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名）。置底 */}
+        {activePort && activeConfig && (
+          <div className="channel-strip">
+            <span className="channel-strip__port">
+              <PortLabel name={activePort} alias={aliasOf(activePort)} />
+            </span>
+            <span className="channel-strip__sep">·</span>
+            <span className="channel-strip__config">{formatConfig(activeConfig)}</span>
+            {activeHolders > 0 && (
+              <>
+                <span className="channel-strip__sep">·</span>
+                <span className="channel-strip__holders">● {activeHolders} 人</span>
+              </>
+            )}
+            <span className="channel-strip__spacer" />
+            <Leds port={activePort} activityRef={activityRef} />
+          </div>
+        )}
       </main>
 
       {/* 串口配置对话框（key=pendingPort：换端口重挂，别名输入状态重置） */}
@@ -947,6 +955,16 @@ export default function App() {
           onClose={() => {
             setMacroPaletteOpen(false);
             // 关面板后焦点还给活动终端，否则执行完宏无法继续键入（同 SearchBar）
+            activeTerm?.term.focus();
+          }}
+        />
+      )}
+      {portPaletteOpen && (
+        <PortPalette
+          ports={ports}
+          onSelect={triggerPort}
+          onClose={() => {
+            setPortPaletteOpen(false);
             activeTerm?.term.focus();
           }}
         />

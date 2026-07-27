@@ -685,9 +685,9 @@ button {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 6px 14px;
+  padding: 3px 14px;
   background: var(--surface);
-  border-bottom: 1px solid var(--hairline-soft);
+  border-top: 1px solid var(--hairline-soft);
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   color: var(--ink-dim);
@@ -932,6 +932,23 @@ button {
   width: 560px;
   max-width: 90vw;
 }
+/* Macro editor：顶（标题/名称/描述）与底（按钮）固定，中间（步骤→JSON 预览）超高滚动 */
+.dialog--macro {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 覆盖 .dialog 的 overflow-y: auto，滚动交给内部 */
+}
+.macro-editor__head {
+  flex-shrink: 0;
+}
+.macro-editor__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dialog--macro > .btn-row {
+  flex-shrink: 0;
+}
 .dialog__title {
   display: flex;
   align-items: center;
@@ -982,7 +999,7 @@ button {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  margin: 0 0 14px;
+  margin: 14px 0 0;
   padding: 8px 12px;
   background: var(--surface-2);
   border: 1px solid var(--hairline);

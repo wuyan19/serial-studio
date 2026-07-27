@@ -15,7 +15,7 @@
 import type { ActionId, ShortcutMap } from "./types";
 import { isTauri } from "./lib";
 
-const KEY = "serial-studio-keybindings";
+const KEY = "serial-studio-keybindings2";
 
 /** 默认绑定。combo 留空 = 该动作默认无快捷键（仍可在桌面菜单点选）。 */
 export const DEFAULT_BINDINGS: ShortcutMap = {
@@ -23,11 +23,13 @@ export const DEFAULT_BINDINGS: ShortcutMap = {
   "theme.toggle": { combo: "mod+shift+l", scope: "global" },
   "port.refresh": { combo: "mod+shift+p", scope: "global" },
   "settings.open": { combo: "mod+,", scope: "global" },
-  "activity.toggle-ports": { combo: "mod+b", scope: "global" },
-  "activity.toggle-macros": { combo: "mod+shift+b", scope: "global" },
-  "about.open": { combo: "", scope: "global" },
-  "port.close-active": { combo: "", scope: "global" },
+  "activity.toggle-ports": { combo: "mod+shift+i", scope: "global" },
+  "activity.toggle-macros": { combo: "mod+shift+o", scope: "global" },
+  "about.open": { combo: "mod+.", scope: "global" },
+  "remote.open": { combo: "mod+t", scope: "global" },
+  "port.close-active": { combo: "mod+w", scope: "global" },
   "macro.palette": { combo: "mod+o", scope: "global" },
+  "port.palette": { combo: "mod+i", scope: "global" },
   "zoom.in": { combo: "mod+=", scope: "terminal" },
   "zoom.out": { combo: "mod+-", scope: "terminal" },
   "zoom.reset": { combo: "mod+0", scope: "terminal" },
@@ -40,10 +42,12 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   "port.refresh": "刷新端口列表",
   "settings.open": "打开设置",
   "about.open": "关于",
+  "remote.open": "打开远程窗口",
   "activity.toggle-ports": "切到端口侧栏",
   "activity.toggle-macros": "切到宏侧栏",
   "port.close-active": "关闭当前端口",
   "macro.palette": "宏命令面板",
+  "port.palette": "串口选择面板",
   "zoom.in": "放大字体",
   "zoom.out": "缩小字体",
   "zoom.reset": "重置字体",
@@ -52,25 +56,35 @@ export const ACTION_LABELS: Record<ActionId, string> = {
 type Listener = (m: ShortcutMap) => void;
 const listeners = new Set<Listener>();
 
-/** 读 localStorage，defaults 兜底，stored 覆盖（同 loadConfig 的合并策略）。 */
+/** 存储为 overlay：只存用户改动（action→combo），不存默认值。这样改默认值时，
+ *  未被用户改过的动作自动跟随新默认，无需清缓存或 bump key。 */
 function load(): ShortcutMap {
+  const map: ShortcutMap = { ...DEFAULT_BINDINGS };
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<ShortcutMap>;
-      return { ...DEFAULT_BINDINGS, ...parsed };
+      const overrides = JSON.parse(raw) as Partial<Record<ActionId, string>>;
+      for (const k of Object.keys(overrides) as ActionId[]) {
+        if (map[k]) map[k] = { ...map[k], combo: overrides[k] ?? map[k].combo };
+      }
     }
   } catch {
     /* ignore */
   }
-  return { ...DEFAULT_BINDINGS };
+  return map;
 }
 
 let current: ShortcutMap = load();
 
 function persist() {
+  const overrides: Record<string, string> = {};
+  for (const k of Object.keys(current) as ActionId[]) {
+    if (current[k].combo !== DEFAULT_BINDINGS[k].combo) {
+      overrides[k] = current[k].combo;
+    }
+  }
   try {
-    localStorage.setItem(KEY, JSON.stringify(current));
+    localStorage.setItem(KEY, JSON.stringify(overrides));
   } catch {
     /* ignore */
   }

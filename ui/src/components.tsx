@@ -9,6 +9,7 @@ import type {
   ConnConfig,
   Macro,
   MacroStep,
+  PortInfo,
   SerialConfig,
   ShortcutMap,
   SrvSettings,
@@ -55,6 +56,39 @@ export function ConfigRow({ label, children }: { label: string; children: React.
       {children}
     </div>
   );
+}
+
+/** 裸 Esc 关闭对话框（无修饰符）。给仅靠按钮关闭、无 Enter 语义的通用对话框用。
+ *  模态打开期间 App 全局 listener 已被抑制，不会与之冲突。 */
+export function useEscClose(onClose: () => void) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+}
+
+/** 对话框通用键：Esc 关闭、回车触发主操作（同 AliasDialog 语义）。
+ *  回车是 window 级监听，故点击输入框编辑后按回车仍能触发主操作（不依赖按钮焦点）。 */
+export function useDialogKeys({ onClose, onEnter }: { onClose: () => void; onEnter?: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "Enter" && onEnter) {
+        e.preventDefault();
+        onEnter();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, onEnter]);
 }
 
 /** 端口名展示：有别名时显「别名(真名)」，真名走 .port-label__raw 浅色；无别名仅显真名。
@@ -259,7 +293,7 @@ export function TermView({
     return () => window.removeEventListener("resize", onResize);
   }, [active]);
 
-  return <div ref={containerRef} style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }} />;
+  return <div ref={containerRef} style={{ position: "absolute", inset: "0 0 0 4px", display: active ? "block" : "none" }} />;
 }
 
 // ===== 终端内搜索（Ctrl+F）=====
@@ -443,9 +477,15 @@ export function SerialConfigDialog({
   onConfirm: (c: SerialConfig, alias: string) => void;
   onCancel: () => void;
 }) {
+  useEscClose(onCancel);
   // 别名是端口语义（每端口独立），用内部状态；config 仍是受控（跨端口沿用）。
   // 调用方 key={port} 保证换端口时重挂、状态重置。
   const [alias, setAlias] = useState(initialAlias);
+  const openRef = useRef<HTMLButtonElement>(null);
+  // 默认聚焦「打开」：用默认串口参数时直接回车即开，免点鼠标。
+  useEffect(() => {
+    openRef.current?.focus();
+  }, []);
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -504,7 +544,7 @@ export function SerialConfigDialog({
           <button className="btn btn--ghost" onClick={onCancel}>
             取消
           </button>
-          <button className="btn btn--primary" onClick={() => onConfirm(config, alias)}>
+          <button ref={openRef} className="btn btn--primary" onClick={() => onConfirm(config, alias)}>
             打开
           </button>
         </div>
@@ -680,6 +720,28 @@ export function SettingsPanel({
     setSrv(srvSettings);
   }, [srvSettings]);
 
+  /** 应用：本地模式存服务设置并打「已应用」标；远程客户端模式应用连接。按钮和回车都走这里。 */
+  const apply = () => {
+    if (!showServer) {
+      onConnChange(conn);
+    } else if (srv) {
+      onSaveSrv(srv);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    }
+  };
+
+  // 同 AliasDialog：默认聚焦首个输入框可直接键入；回车（任意焦点）触发主操作。
+  useDialogKeys({ onClose, onEnter: apply });
+
+  // 置于内容与按钮行之间（本地模式在 Telnet 端口下），两分支共用，避免重复。
+  const shortcutEntry = (
+    <button type="button" className="shortcut-entry" onClick={onOpenShortcuts}>
+      <span>键盘快捷键</span>
+      <span className="shortcut-entry__hint">自定义 / 改键</span>
+    </button>
+  );
+
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -687,26 +749,22 @@ export function SettingsPanel({
           <IconGear /> SETTINGS
         </h3>
 
-        <button type="button" className="shortcut-entry" onClick={onOpenShortcuts}>
-          <span>键盘快捷键</span>
-          <span className="shortcut-entry__hint">自定义 / 改键</span>
-        </button>
-
         {!showServer && (
           <>
             <div className="dialog__group-label">连接（前端 → 服务器）</div>
             <ConfigRow label="主机">
-              <input value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" />
+              <input autoFocus value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" />
             </ConfigRow>
             <ConfigRow label="端口">
               <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" />
             </ConfigRow>
             <p className="dialog__hint">改连别的远程 Serial Studio 服务</p>
+            {shortcutEntry}
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onClose}>
                 关闭
               </button>
-              <button className="btn btn--primary" onClick={() => onConnChange(conn)}>
+              <button className="btn btn--primary" onClick={apply}>
                 应用并重连
               </button>
             </div>
@@ -719,7 +777,7 @@ export function SettingsPanel({
             {srv ? (
               <>
                 <ConfigRow label="监听地址">
-                  <input value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" />
+                  <input autoFocus value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" />
                 </ConfigRow>
                 <ConfigRow label="WS 端口">
                   <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" />
@@ -727,6 +785,7 @@ export function SettingsPanel({
                 <ConfigRow label="Telnet 端口">
                   <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" />
                 </ConfigRow>
+                {shortcutEntry}
                 <div className="btn-row">
                   {saved && <span className="btn--save-pulse">已应用</span>}
                   <button className="btn btn--ghost" onClick={onClose}>
@@ -734,11 +793,7 @@ export function SettingsPanel({
                   </button>
                   <button
                     className="btn btn--primary"
-                    onClick={() => {
-                      onSaveSrv(srv);
-                      setSaved(true);
-                      setTimeout(() => setSaved(false), 3000);
-                    }}
+                    onClick={apply}
                   >
                     应用
                   </button>
@@ -760,6 +815,7 @@ export function SettingsPanel({
 const SHORTCUT_ORDER: ActionId[] = [
   "search.open",
   "macro.palette",
+  "port.palette",
   "theme.toggle",
   "port.refresh",
   "port.close-active",
@@ -767,6 +823,7 @@ const SHORTCUT_ORDER: ActionId[] = [
   "activity.toggle-macros",
   "settings.open",
   "about.open",
+  "remote.open",
   "zoom.in",
   "zoom.out",
   "zoom.reset",
@@ -1007,6 +1064,103 @@ export function MacroPalette({
   );
 }
 
+// ===== 串口选择面板（Ctrl+B）=====
+
+/** 串口选择面板：模糊搜索端口，方向键选择，回车打开（onSelect 走与点端口行同一流程）。 */
+export function PortPalette({
+  ports,
+  onSelect,
+  onClose,
+}: {
+  ports: PortInfo[];
+  onSelect: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const filtered = useMemo(() => {
+    const matched: { name: string; score: number; first: number }[] = [];
+    for (const p of ports) {
+      const hay = p.alias ? `${p.alias} ${p.name}` : p.name;
+      const m = fuzzyMatch(query, hay);
+      if (m) matched.push({ name: p.name, score: m.score, first: m.first });
+    }
+    matched.sort((a, b) => a.score - b.score || a.first - b.first || a.name.localeCompare(b.name));
+    return matched.map((x) => x.name);
+  }, [ports, query]);
+
+  useEffect(() => {
+    setSelected(0);
+  }, [query]);
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const byName = useMemo(() => {
+    const m: Record<string, PortInfo> = {};
+    for (const p of ports) m[p.name] = p;
+    return m;
+  }, [ports]);
+
+  const commit = (name: string) => {
+    onSelect(name);
+    onClose();
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i + 1) % filtered.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i - 1 + filtered.length) % filtered.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const name = filtered[selected] ?? filtered[0];
+      if (name) commit(name);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="palette-overlay" onClick={onClose}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="palette__input"
+          placeholder={`搜索串口…（${ports.length} 个）`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKey}
+        />
+        <div className="palette__list">
+          {filtered.length === 0 && <div className="palette__empty">无匹配串口</div>}
+          {filtered.map((name, i) => (
+            <button
+              type="button"
+              key={name}
+              className={"palette__item" + (i === selected ? " palette__item--selected" : "")}
+              onMouseEnter={() => setSelected(i)}
+              onClick={() => commit(name)}
+            >
+              <span className="palette__name">
+                <PortLabel name={name} alias={byName[name]?.alias} />
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="palette__footer">
+          <span>↑↓ 选择 · 回车打开</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== 宏编辑器 =====
 
 export function newStep(type: StepType): MacroStep {
@@ -1109,6 +1263,7 @@ export function MacroEditor({
   onDelete: () => void;
   onCancel: () => void;
 }) {
+  useEscClose(onCancel);
   const setDesc = (description: string) => onMacroChange({ ...macro, description });
   const setStep = (i: number, s: MacroStep) => {
     const steps = macro.steps.slice();
@@ -1172,21 +1327,24 @@ export function MacroEditor({
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
-        <h3 className="dialog__title">
-          <IconBolt /> MACRO
-        </h3>
-        <div className="dialog__sub">{isNew ? "新增宏" : name}</div>
-        <ConfigRow label="名称">
-          <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
-        </ConfigRow>
-        <ConfigRow label="描述">
-          <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
-        </ConfigRow>
-
-        <div className="dialog__group-label" style={{ marginTop: 6 }}>
-          步骤
+      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+        <div className="macro-editor__head">
+          <h3 className="dialog__title">
+            <IconBolt /> MACRO
+          </h3>
+          <div className="dialog__sub">{isNew ? "新增宏" : name}</div>
+          <ConfigRow label="名称">
+            <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
+          </ConfigRow>
+          <ConfigRow label="描述">
+            <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+          </ConfigRow>
         </div>
+
+        <div className="macro-editor__scroll">
+          <div className="dialog__group-label" style={{ marginTop: 6 }}>
+            步骤
+          </div>
         {macro.steps.length === 0 && <p className="sidebar__empty">无步骤（点下方添加）</p>}
         {macro.steps.map((s, i) => (
           <StepEditor
@@ -1233,6 +1391,7 @@ export function MacroEditor({
           <summary className="json-summary">JSON 预览（只读）</summary>
           <pre className="json-preview">{JSON.stringify(macro, null, 2)}</pre>
         </details>
+        </div>
 
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 8 }}>
@@ -1418,6 +1577,7 @@ export function ActivityIcon({ icon, title, active, onClick }: { icon: React.Rea
 }
 
 export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
+  useEscClose(onClose);
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -1447,6 +1607,7 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  useDialogKeys({ onClose: onCancel, onEnter: onConfirm });
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -1455,7 +1616,7 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
         </h3>
         <div className="dialog__sub">连接远程服务</div>
         <ConfigRow label="地址">
-          <input value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoFocus />
+          <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" />
         </ConfigRow>
         <ConfigRow label="端口">
           <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" />
