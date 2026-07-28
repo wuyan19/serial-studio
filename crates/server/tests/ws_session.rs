@@ -82,6 +82,8 @@ async fn boot() -> (String, Arc<SerialManager>) {
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx),
+        enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

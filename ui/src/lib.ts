@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, SerialConfig } from "./types";
+import type { ConnConfig, Macro, Script, SerialConfig } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -109,6 +109,37 @@ export async function persistMacros(macros: Record<string, Macro>) {
     }
   } else {
     persistMacrosLocal(macros);
+  }
+}
+
+const SCRIPTS_KEY = "serial-studio-scripts";
+export function loadScriptsLocal(): Record<string, Script> {
+  try {
+    const raw = localStorage.getItem(SCRIPTS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+export function persistScriptsLocal(scripts: Record<string, Script>) {
+  try {
+    localStorage.setItem(SCRIPTS_KEY, JSON.stringify(scripts));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 持久化脚本：Tauri → invoke save_scripts；Web → localStorage */
+export async function persistScripts(scripts: Record<string, Script>) {
+  if (isTauri()) {
+    try {
+      await tauriInvoke("save_scripts", { scripts });
+    } catch (e) {
+      console.error("保存脚本失败", e);
+    }
+  } else {
+    persistScriptsLocal(scripts);
   }
 }
 

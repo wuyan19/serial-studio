@@ -5,6 +5,8 @@ import type {
   Macro,
   MacroResult,
   PortInfo,
+  Script,
+  ScriptResult,
   SerialConfig,
   SrvSettings,
   TermInstance,
@@ -16,7 +18,9 @@ import {
   isTauri,
   loadConfig,
   loadMacrosLocal,
+  loadScriptsLocal,
   persistMacros,
+  persistScripts,
   saveConfig,
   saveConn,
   tauriInvoke,
@@ -28,12 +32,15 @@ import {
   AliasDialog,
   ConfirmDialog,
   ExportMacrosDialog,
+  ExportScriptsDialog,
   MacroEditor,
   MacroPalette,
+  ScriptPalette,
   PortPalette,
   newStep,
   PortLabel,
   RemoteDialog,
+  ScriptEditor,
   SearchBar,
   SerialConfigDialog,
   SettingsPanel,
@@ -45,6 +52,7 @@ import {
   IconAlert,
   IconBolt,
   IconClose,
+  IconCode,
   IconEdit,
   IconExport,
   IconGear,
@@ -136,6 +144,29 @@ function parseImportedMacros(data: unknown, existing: Record<string, Macro>): [s
   return [];
 }
 
+/** 对象是否像一个 Script（有 code 字符串）。 */
+function isScriptLike(v: unknown): v is Script {
+  return !!v && typeof v === "object" && typeof (v as { code?: unknown }).code === "string";
+}
+function uniqueScriptName(base: string, taken: Record<string, unknown>): string {
+  if (!taken[base]) return base;
+  let i = 2;
+  while (taken[`${base} ${i}`]) i++;
+  return `${base} ${i}`;
+}
+/** 导入 JSON → [名称, 脚本]：兼容 {"名称": 脚本} 记录 与 单个脚本对象。 */
+function parseImportedScripts(data: unknown, existing: Record<string, Script>): [string, Script][] {
+  if (isScriptLike(data)) return [[uniqueScriptName("导入的脚本", existing), data]];
+  if (data && typeof data === "object") {
+    const out: [string, Script][] = [];
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      if (isScriptLike(v)) out.push([k, v]);
+    }
+    return out;
+  }
+  return [];
+}
+
 /**
  * Serial Studio 前端主组件（Tauri 与浏览器共用）。
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
@@ -163,13 +194,20 @@ export default function App() {
   const [editorName, setEditorName] = useState("");
   const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
   const [editorError, setEditorError] = useState("");
-  type ActivityView = "ports" | "macros" | null;
+  const [scripts, setScripts] = useState<Record<string, Script>>({});
+  const [scriptResult, setScriptResult] = useState<ScriptResult | null>(null);
+  const [editingScript, setEditingScript] = useState<{ name: string; isNew: boolean } | null>(null);
+  const [editorScriptName, setEditorScriptName] = useState("");
+  const [editorScript, setEditorScript] = useState<Script>({ code: "" });
+  const [editorScriptError, setEditorScriptError] = useState("");
+  type ActivityView = "ports" | "macros" | "scripts" | null;
   const [activity, setActivity] = useState<ActivityView>(null);
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
+  const [scriptPaletteOpen, setScriptPaletteOpen] = useState(false);
   const [portPaletteOpen, setPortPaletteOpen] = useState(false);
   /** 通用确认弹窗状态（替代原生 confirm）。null = 关闭。 */
   const [confirmState, setConfirmState] = useState<{
@@ -184,13 +222,16 @@ export default function App() {
   const [aliasEditPort, setAliasEditPort] = useState<string | null>(null);
   /** 宏批量导出对话框是否打开。 */
   const [exportMacrosOpen, setExportMacrosOpen] = useState(false);
+  const [exportScriptsOpen, setExportScriptsOpen] = useState(false);
   const [version, setVersion] = useState("");
+  const [scriptEnabled, setScriptEnabled] = useState(false);
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
   const transportRef = useRef<Transport | null>(null);
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const importInputRef = useRef<HTMLInputElement>(null);
+  const scriptImportInputRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef("");
   activeRef.current = activePort;
   /** 快捷键处理器表：每 render 用最新闭包刷新；dispatch 经 ref 读，菜单/action 闭包不陈旧。
@@ -210,6 +251,8 @@ export default function App() {
   };
 
   const isLocal = isTauri() && !isRemote;
+  // 脚本入口显隐：本地主权恒显；远程/Web 取决于服务端 enable_scripting
+  const showScripts = isLocal || scriptEnabled;
 
   // 数据面连接。本地模式 IPC 常驻——不随 connConfig 重连：connConfig 在本地仅用于显示，
   // 重建 LocalTransport 会丢掉已开端口的 per-port RX Channel，导致改服务监听设置后串口"变哑"
@@ -262,6 +305,7 @@ export default function App() {
         setTimeout(() => setErrorMsg(""), 5000);
       }),
       t.onMacroResult((name, success, message) => setMacroResult({ name, success, message })),
+      t.onScriptResult((name, success, message) => setScriptResult({ name, success, message })),
     ];
     return () => {
       unsubs.forEach((fn) => fn());
@@ -292,11 +336,23 @@ export default function App() {
     }
   }, []);
 
+  // 脚本加载：Tauri → invoke load_scripts；Web → localStorage 回退
+  useEffect(() => {
+    if (isTauri()) {
+      tauriInvoke<Record<string, Script>>("load_scripts").then(setScripts).catch((e) => console.error("加载脚本失败", e));
+    } else {
+      setScripts(loadScriptsLocal());
+    }
+  }, []);
+
   // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。
   // 远程窗口虽 isTauri() 为真，但连的是远程服务，版本应反映服务端而非本机 app。
   // 连接时序由 RemoteTransport.send() 内部 await open 兜底，挂载即取也不会踩 CONNECTING 异常。
   useEffect(() => {
-    transportRef.current?.getVersion().then(setVersion).catch(() => {});
+    transportRef.current?.getVersion().then(({ version, enableScripting }) => {
+      setVersion(version);
+      setScriptEnabled(enableScripting);
+    }).catch(() => {});
   }, []);
 
   // 服务状态：本地服务启动失败（端口被占用等）时显示持久横幅。远程/Web 无本地服务。
@@ -551,6 +607,62 @@ export default function App() {
     });
   };
 
+  const runScript = (name: string) => {
+    if (!activePort) {
+      setScriptResult({ name, success: false, message: "请先选择并打开一个串口" });
+      return;
+    }
+    setScriptResult({ name, success: true, message: "运行中..." });
+    transportRef.current?.runScript(name, activePort, scripts[name]);
+  };
+
+  const openScriptEditor = (name: string | null) => {
+    if (name && scripts[name]) {
+      setEditingScript({ name, isNew: false });
+      setEditorScriptName(name);
+      setEditorScript(JSON.parse(JSON.stringify(scripts[name])));
+    } else {
+      setEditingScript({ name: "", isNew: true });
+      setEditorScriptName("");
+      setEditorScript({ code: "// 在此写 JS 脚本\n" });
+    }
+    setEditorScriptError("");
+  };
+
+  const saveScriptDef = async () => {
+    const trimmedName = editorScriptName.trim();
+    if (!trimmedName) {
+      setEditorScriptError("脚本名不能为空");
+      return;
+    }
+    if (!editorScript.code.trim()) {
+      setEditorScriptError("脚本代码不能为空");
+      return;
+    }
+    const next = { ...scripts, [trimmedName]: editorScript };
+    setScripts(next);
+    await persistScripts(next);
+    setEditingScript(null);
+  };
+
+  const deleteScript = (name: string) => {
+    setConfirmState({
+      title: "删除脚本",
+      icon: <IconTrash />,
+      message: `删除脚本 "${name}"？此操作不可恢复。`,
+      confirmText: "删除",
+      tone: "danger",
+      onConfirm: async () => {
+        const next = { ...scripts };
+        delete next[name];
+        setScripts(next);
+        await persistScripts(next);
+        setEditingScript(null);
+        setConfirmState(null);
+      },
+    });
+  };
+
   /** 导入宏：读 JSON 文件，合并入库（重名/无效跳过），Tauri/Web 均落 persistMacros。 */
   const onImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -580,6 +692,42 @@ export default function App() {
         await persistMacros(next);
       }
       setNotice(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或无效）` : ""}。`);
+      setTimeout(() => setNotice(""), 5000);
+    } catch (err) {
+      setErrorMsg("导入失败：" + String(err));
+      setTimeout(() => setErrorMsg(""), 6000);
+    }
+  };
+
+  /** 导入脚本：读 JSON 文件，合并入库（重名/空 code 跳过），Tauri/Web 均落 persistScripts。 */
+  const onImportScripts = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const entries = parseImportedScripts(data, scripts);
+      if (entries.length === 0) {
+        setErrorMsg('导入失败：未找到有效脚本（需 {"名称": {code:"..."}} 或单个脚本）');
+        setTimeout(() => setErrorMsg(""), 6000);
+        return;
+      }
+      const next = { ...scripts };
+      let added = 0;
+      let skipped = 0;
+      for (const [n, s] of entries) {
+        if (next[n] || !s.code.trim()) {
+          skipped++;
+          continue;
+        }
+        next[n] = s;
+        added++;
+      }
+      if (added > 0) {
+        setScripts(next);
+        await persistScripts(next);
+      }
+      setNotice(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或空代码）` : ""}。`);
       setTimeout(() => setNotice(""), 5000);
     } catch (err) {
       setErrorMsg("导入失败：" + String(err));
@@ -633,9 +781,11 @@ export default function App() {
     "about.open": () => setAboutOpen(true),
     "remote.open": () => setRemoteOpen(true),
     "macro.palette": () => setMacroPaletteOpen(true),
+    "script.palette": () => setScriptPaletteOpen(true),
     "port.palette": () => setPortPaletteOpen(true),
     "activity.toggle-ports": () => setActivity(activity === "ports" ? null : "ports"),
     "activity.toggle-macros": () => setActivity(activity === "macros" ? null : "macros"),
+    "activity.toggle-scripts": () => setActivity(activity === "scripts" ? null : "scripts"),
     "port.close-active": () => {
       const p = activeRef.current;
       if (p) closePort(p);
@@ -653,8 +803,10 @@ export default function App() {
     exportMacrosOpen ||
     confirmState ||
     editing ||
+    editingScript ||
     shortcutsOpen ||
     macroPaletteOpen ||
+    scriptPaletteOpen ||
     portPaletteOpen
   );
   modalOpenRef.current = modalOpen;
@@ -674,6 +826,9 @@ export default function App() {
       <div className="activity-bar">
         <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
         <ActivityIcon icon={<IconBolt className="act-icon__svg" />} title="宏" active={activity === "macros"} onClick={() => setActivity(activity === "macros" ? null : "macros")} />
+        {showScripts && (
+          <ActivityIcon icon={<IconCode className="act-icon__svg" />} title="脚本" active={activity === "scripts"} onClick={() => setActivity(activity === "scripts" ? null : "scripts")} />
+        )}
         <div className="activity-bar__spacer" />
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="打开远程窗口" active={false} onClick={() => setRemoteOpen(true)} />}
         <ActivityIcon
@@ -803,6 +958,59 @@ export default function App() {
               {macroResult && (
                 <div className={`macro-result ${macroResult.success && macroResult.message !== "运行中..." ? "ok" : macroResult.message === "运行中..." ? "run" : "err"}`}>
                   {macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}
+                </div>
+              )}
+            </>
+          )}
+
+          {activity === "scripts" && (
+            <>
+              <div className="section-head">
+                <h4 className="section-head__title">
+                  SCRIPTS{activePort && <span className="accent">→ {activePort}</span>}
+                </h4>
+                <div className="section-head__actions">
+                  <button className="icon-btn" onClick={() => scriptImportInputRef.current?.click()} title="导入脚本">
+                    <IconImport />
+                  </button>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setExportScriptsOpen(true)}
+                    disabled={Object.keys(scripts).length === 0}
+                    title="导出脚本（可多选 / 全选）"
+                  >
+                    <IconExport />
+                  </button>
+                  <button className="icon-btn" onClick={() => openScriptEditor(null)} title="新增脚本">
+                    <IconPlus />
+                  </button>
+                </div>
+                <input
+                  ref={scriptImportInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: "none" }}
+                  onChange={onImportScripts}
+                />
+              </div>
+              {Object.keys(scripts).length === 0 && <p className="sidebar__empty">无脚本（点 ＋ 新增）</p>}
+              {Object.entries(scripts).map(([name]) => (
+                <div key={name} className="macro-row">
+                  <button className="macro-run" onClick={() => runScript(name)} disabled={!activePort}>
+                    <IconPlay />
+                    <span className="macro-run__label">{name}</span>
+                  </button>
+                  <button className="macro-action macro-action--edit" onClick={() => openScriptEditor(name)} title="编辑">
+                    <IconEdit />
+                  </button>
+                  <button className="macro-action macro-action--danger" onClick={() => deleteScript(name)} title="删除">
+                    <IconTrash />
+                  </button>
+                </div>
+              ))}
+              {scriptResult && (
+                <div className={`macro-result ${scriptResult.success && scriptResult.message !== "运行中..." ? "ok" : scriptResult.message === "运行中..." ? "run" : "err"}`}>
+                  {scriptResult.success ? "✓" : "✗"} {scriptResult.name}: {scriptResult.message}
                 </div>
               )}
             </>
@@ -953,6 +1161,25 @@ export default function App() {
         />
       )}
 
+      {/* 脚本批量导出对话框 */}
+      {exportScriptsOpen && (
+        <ExportScriptsDialog
+          scripts={scripts}
+          onConfirm={async (names) => {
+            const obj: Record<string, Script> = {};
+            for (const n of names) obj[n] = scripts[n];
+            try {
+              const saved = await downloadJson("serial-studio-scripts.json", obj);
+              if (saved) setExportScriptsOpen(false);
+            } catch (e) {
+              setErrorMsg("导出失败: " + String(e));
+              setTimeout(() => setErrorMsg(""), 5000);
+            }
+          }}
+          onCancel={() => setExportScriptsOpen(false)}
+        />
+      )}
+
       {/* 设置面板 */}
       {settingsOpen && (
         <SettingsPanel
@@ -994,6 +1221,17 @@ export default function App() {
           }}
         />
       )}
+      {scriptPaletteOpen && (
+        <ScriptPalette
+          scripts={scripts}
+          activePort={activePort}
+          onRun={runScript}
+          onClose={() => {
+            setScriptPaletteOpen(false);
+            activeTerm?.term.focus();
+          }}
+        />
+      )}
       {portPaletteOpen && (
         <PortPalette
           ports={ports}
@@ -1030,6 +1268,21 @@ export default function App() {
           onSave={saveMacroDef}
           onDelete={() => deleteMacro(editing.name)}
           onCancel={() => setEditing(null)}
+        />
+      )}
+
+      {/* 脚本编辑器 */}
+      {editingScript && (
+        <ScriptEditor
+          name={editorScriptName}
+          script={editorScript}
+          error={editorScriptError}
+          isNew={editingScript.isNew}
+          onName={setEditorScriptName}
+          onScriptChange={setEditorScript}
+          onSave={saveScriptDef}
+          onDelete={() => deleteScript(editingScript.name)}
+          onCancel={() => setEditingScript(null)}
         />
       )}
     </div>

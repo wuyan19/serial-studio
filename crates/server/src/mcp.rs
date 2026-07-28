@@ -10,15 +10,29 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 use ss_core::SerialManager;
+use std::sync::Arc;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// axum POST /mcp 入口。
 pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Json<Value> {
-    Json(handle_request(&body, &state.manager).await)
+    Json(
+        handle_request(
+            &body,
+            &state.manager,
+            state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed),
+            &state.script_semaphore,
+        )
+        .await,
+    )
 }
 
-pub async fn handle_request(body: &str, manager: &SerialManager) -> Value {
+pub async fn handle_request(
+    body: &str,
+    manager: &Arc<SerialManager>,
+    enable_scripting: bool,
+    semaphore: &tokio::sync::Semaphore,
+) -> Value {
     let request: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
@@ -46,7 +60,7 @@ pub async fn handle_request(body: &str, manager: &SerialManager) -> Value {
         "initialize" => json!(handle_initialize()),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "tools/list" => json!(handle_tools_list()),
-        "tools/call" => handle_tools_call(&params, manager).await,
+        "tools/call" => handle_tools_call(&params, manager, enable_scripting, semaphore).await,
         "prompts/list" => json!(handle_prompts_list()),
         "prompts/get" => json!(handle_prompts_get(&params)),
         "ping" => json!({}),
@@ -143,24 +157,42 @@ fn handle_tools_list() -> Value {
                         "port": { "type": "string", "description": "串口名或别名" }
                     }
                 }
+            },
+            {
+                "name": "serial_run_script",
+                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data)/expect(pattern,ms)/clear()/sleep(ms)。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "port": { "type": "string", "description": "串口名或别名。缺省时使用唯一打开的串口" },
+                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" }
+                    },
+                    "required": ["code"]
+                }
             }
         ]
     })
 }
 
-async fn handle_tools_call(params: &Value, manager: &SerialManager) -> Value {
+async fn handle_tools_call(
+    params: &Value,
+    manager: &Arc<SerialManager>,
+    enable_scripting: bool,
+    semaphore: &tokio::sync::Semaphore,
+) -> Value {
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return error_text("Missing tool name".into()),
     };
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     match name {
-        "serial_list" => tool_serial_list(arguments, manager).await,
-        "serial_send" => tool_serial_send(arguments, manager).await,
-        "serial_read" => tool_serial_read(arguments, manager).await,
-        "serial_status" => tool_serial_status(arguments, manager).await,
-        "serial_grep" => tool_serial_grep(arguments, manager).await,
-        "serial_clear" => tool_serial_clear(arguments, manager).await,
+        "serial_list" => tool_serial_list(arguments, &**manager).await,
+        "serial_send" => tool_serial_send(arguments, &**manager).await,
+        "serial_read" => tool_serial_read(arguments, &**manager).await,
+        "serial_status" => tool_serial_status(arguments, &**manager).await,
+        "serial_grep" => tool_serial_grep(arguments, &**manager).await,
+        "serial_clear" => tool_serial_clear(arguments, &**manager).await,
+        "serial_run_script" => tool_serial_run_script(arguments, manager, enable_scripting, semaphore).await,
         other => error_text(format!("Unknown tool: {}", other)),
     }
 }
@@ -352,6 +384,43 @@ async fn tool_serial_clear(args: Value, manager: &SerialManager) -> Value {
     }
 }
 
+async fn tool_serial_run_script(
+    args: Value,
+    manager: &Arc<SerialManager>,
+    enable_scripting: bool,
+    semaphore: &tokio::sync::Semaphore,
+) -> Value {
+    // 远程 MCP 路径强制闸门:服务器无认证,脚本执行须显式开启
+    if !enable_scripting {
+        return error_text("脚本执行未启用(settings.json 的 enable_scripting=false)".into());
+    }
+    let port = match resolve_port(&args, &**manager).await {
+        Ok(p) => p,
+        Err(e) => return error_text(e),
+    };
+    // 端口预检:未打开则脚本内 send 静默失败却显示"完成",误导。
+    if !manager.is_open(&port).await {
+        return error_text(format!("端口 {} 未打开", port));
+    }
+    // 并发上限(同 WS):防 DoS。permit 借用 semaphore,持到 run_script 完成(函数返回即释放)。
+    let _permit = match semaphore.try_acquire() {
+        Ok(p) => p,
+        Err(_) => return error_text("脚本执行并发已满,稍后再试".into()),
+    };
+    let code = match args.get("code").and_then(|c| c.as_str()) {
+        Some(c) => c,
+        None => return error_text("Missing required parameter: code".into()),
+    };
+    let script = ss_core::Script {
+        description: None,
+        code: code.to_string(),
+    };
+    match ss_core::run_script(&port, &script, manager.clone()).await {
+        Ok(()) => ok_text("脚本执行完成".into()),
+        Err(e) => error_text(format!("脚本失败: {}", e.display_message())),
+    }
+}
+
 // ===== helpers =====
 
 fn ok_text(text: String) -> Value {
@@ -382,6 +451,11 @@ fn handle_prompts_list() -> Value {
                 "name": "serial_usage_guide",
                 "description": "串口工具工作流指南：核心概念、推荐模式和常见陷阱",
                 "arguments": []
+            },
+            {
+                "name": "serial_script_guide",
+                "description": "脚本编写指南：serial_run_script 的可用函数、约束（expect 返回空串、无 console、正则字符串等）与重试模式",
+                "arguments": []
             }
         ]
     })
@@ -394,6 +468,12 @@ fn handle_prompts_get(params: &Value) -> Value {
             "description": "串口工具工作流指南",
             "messages": [
                 { "role": "user", "content": { "type": "text", "text": SERIAL_USAGE_GUIDE } }
+            ]
+        }),
+        "serial_script_guide" => json!({
+            "description": "脚本编写指南",
+            "messages": [
+                { "role": "user", "content": { "type": "text", "text": SERIAL_SCRIPT_GUIDE } }
             ]
         }),
         _ => error_text(format!("Unknown prompt: {}", name)),
@@ -424,52 +504,131 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 - text 模式默认追加 `\r\n`，设 `auto_newline=false` 才发原始数据。
 - `serial_grep` 等待期间新数据正常进缓冲区，不阻塞数据流。"#;
 
+/// serial_run_script 的编写指南。跨 MCP 客户端分发(Claude Desktop/Code 等),
+/// 与仓库 skills/serial-studio-script/SKILL.md 同源——前者服务任意 MCP 客户端,
+/// 后者服务装了技能的 Claude Code。改约束时两处同步。
+const SERIAL_SCRIPT_GUIDE: &str = r#"# Serial Studio 脚本编写指南
+
+serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。
+
+## 可用全局 async 函数(只有这 4 个 + 标准 JS;无 fetch/require/fs,沙箱)
+- await send(data)          发文本,自动追加换行。总成功,无返回。
+- await expect(pattern, ms) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
+                            超时无匹配返回空串 ""(不报错)——必须判断返回值。
+- await clear()             清空接收缓冲。
+- await sleep(ms)           睡眠。
+
+## 必须遵守的约束
+1. 判断 expect 返回值:expect 超时返回 "" 不报错。不判断会把"没收到"当"收到"。用 if (line === "") 识别。
+2. 无控制台输出:无 console.log。要打印/调试/回报结果,只能 throw new Error("...")——消息会显示给用户(脚本以失败结束)。
+3. expect 的 pattern 是正则字符串:写 expect("OK", 1000),不要 expect(/OK/, 1000)(字面量转 "/OK/" 会让正则编译失败)。
+4. 30 秒超时:脚本总执行上限 30s,死循环会被强杀。expect 的 ms 通常 500~3000。
+5. 用户 throw 正常传播:expect 没等到 → throw new Error("原因") 是中止报错的正道。
+
+## 模式:失败重试(脚本的核心价值)
+await clear();
+let ok = "";
+for (let i = 1; i <= 3; i++) {
+  await send("AT");
+  ok = await expect("OK", 1000);
+  if (ok) break;
+  await sleep(300);
+}
+if (!ok) throw new Error("重试 3 次无响应");
+
+## 调试
+看变量:throw new Error("debug: " + JSON.stringify(x))。
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ss_core::{EventBus, RealPortOpener, SerialManager};
     use std::sync::Arc;
 
-    fn make_manager() -> SerialManager {
-        SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener))
+    fn make_manager() -> Arc<SerialManager> {
+        Arc::new(SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener)))
     }
 
     #[tokio::test]
     async fn parse_error() {
         let m = make_manager();
-        let resp = handle_request("not json", &m).await;
+    let sem = tokio::sync::Semaphore::new(4);
+        let resp = handle_request("not json", &m, false, &sem).await;
         assert_eq!(resp["error"]["code"], -32700);
     }
 
     #[tokio::test]
     async fn initialize() {
         let m = make_manager();
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &m).await;
+    let sem = tokio::sync::Semaphore::new(4);
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &m, false, &sem).await;
         assert_eq!(resp["result"]["serverInfo"]["name"], "serial-studio");
     }
 
     #[tokio::test]
-    async fn tools_list_has_six() {
+    async fn tools_list_has_seven() {
         let m = make_manager();
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m).await;
+    let sem = tokio::sync::Semaphore::new(4);
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m, false, &sem).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
+    }
+
+    /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_run_script 应被拒。
+    #[tokio::test]
+    async fn serial_run_script_disabled_by_default() {
+        let m = make_manager();
+    let sem = tokio::sync::Semaphore::new(4);
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"code":"await sleep(1)"}}}"#;
+        let resp = handle_request(req, &m, false, &sem).await;
+        assert_eq!(resp["result"]["isError"], true);
     }
 
     #[tokio::test]
     async fn serial_list_returns_text() {
         let m = make_manager();
+    let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
-        let resp = handle_request(req, &m).await;
+        let resp = handle_request(req, &m, false, &sem).await;
         assert!(resp["result"]["content"][0]["text"].is_string());
     }
 
     #[tokio::test]
     async fn serial_status_no_port_opened() {
         let m = make_manager();
+    let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_status","arguments":{}}}"#;
-        let resp = handle_request(req, &m).await;
+        let resp = handle_request(req, &m, false, &sem).await;
         assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// prompts/list 含 serial_script_guide,且 prompts/get 返回的指南含关键约束。
+    #[tokio::test]
+    async fn prompts_include_script_guide() {
+        let m = make_manager();
+    let sem = tokio::sync::Semaphore::new(4);
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#, &m, false, &sem).await;
+        let names: Vec<&str> = resp["result"]["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"serial_script_guide"),
+            "prompts 应含 serial_script_guide: {:?}", names
+        );
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"serial_script_guide"}}"#,
+            &m,
+            false,
+            &sem,
+        )
+        .await;
+        let text = resp["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("expect"), "脚本指南应含 expect 说明");
+        assert!(text.contains("正则字符串"), "脚本指南应含 pattern 约束");
     }
 
     #[test]

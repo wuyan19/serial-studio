@@ -122,6 +122,13 @@ The server binds `0.0.0.0` by default and carries **no authentication**. Anyone 
 the port can open / send to your serial ports and read their output. Bind to `127.0.0.1` in
 `settings.json`, or sit behind a firewall / VPN, for anything beyond a trusted LAN.
 
+Remote JS scripting (WS `run_script` / MCP `serial_run_script`) is gated by `enable_scripting`
+in `settings.json`, **off by default**. When enabled, any reachable client can execute JS
+against your serial ports. The script sandbox only exposes the serial primitives
+(`send`/`expect`/`clear`/`sleep`) — there is no file, network, or process access — but it can
+still drive your devices arbitrarily and read their output. Keep it disabled on untrusted
+networks.
+
 ## 📁 Project layout
 
 ```

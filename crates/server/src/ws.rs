@@ -7,6 +7,7 @@
 //!     {"action":"close","port":"COM3"}
 //!     {"action":"write","port":"COM3","data":"...","encoding":"hex|text"}
 //!     {"action":"set_alias","port":"COM3","alias":"GPS"}   # 空串/null 清除别名
+//!     {"action":"run_script","name":"...","port":"COM3","script":{"code":"..."}}  # 运行 JS 脚本（受 enable_scripting 限制）
 //!     {"action":"version"}                                # 查询服务版本（远程/Web 关于页用）
 //!   server → client:
 //!     {"type":"ports","ports":[...]}
@@ -15,7 +16,8 @@
 //!     {"type":"closed","port":"COM3"}
 //!     {"type":"acquired","port":"COM3","opened":bool,"config":{...},"holders":n}  # open 的直接回复（区分首开/附加）
 //!     {"type":"holders","port":"COM3","holders":n}                                 # 持有者数量变化
-//!     {"type":"version","version":"0.1.0"}                                         # version 的直接回复
+//!     {"type":"script_result","name":"...","success":bool,"message":"..."}         # run_script 的结果
+//!     {"type":"version","version":"0.1.0","enable_scripting":false}                # version 的直接回复
 //!     {"type":"ok","message":"..."}
 //!     {"type":"error","message":"..."}
 //!
@@ -52,8 +54,10 @@ enum ServerMsg {
     Error { message: String },
     Ok { message: String },
     MacroResult { name: String, success: bool, message: String },
-    /// version 的直接回复：服务端编译版本（远程/Web 关于页展示）。
-    Version { version: String },
+    /// run_script 的结果（与 MacroResult 同构）。
+    ScriptResult { name: String, success: bool, message: String },
+    /// version 的直接回复：服务端编译版本 + 是否启用远程脚本执行（前端据此显隐脚本 UI）。
+    Version { version: String, enable_scripting: bool },
 }
 
 /// 客户端 → 服务器 消息。
@@ -77,6 +81,12 @@ enum ClientMsg {
         name: String,
         port: String,
         r#macro: ss_core::Macro,
+    },
+    /// 运行 JS 脚本（受 settings.enable_scripting 限制，默认 false）。
+    RunScript {
+        name: String,
+        port: String,
+        script: ss_core::Script,
     },
     /// 设置端口别名（""/null = 清除）。别名写入 ports.json，跟随端口所在机器。
     SetAlias {
@@ -347,6 +357,61 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 let _ = out_tx2.send(to_json(msg)).await;
             });
         }
+        ClientMsg::RunScript { name, port, script } => {
+            // 远程路径强制闸门:服务器默认 0.0.0.0 无认证,脚本执行须显式开启
+            if !state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = out_tx
+                    .send(to_json(ServerMsg::Error {
+                        message: "远程脚本执行未启用(settings.json 的 enable_scripting=false)".into(),
+                    }))
+                    .await;
+                return;
+            }
+            // 并发上限:防远程同时起大量脚本线程(每脚本一个 OS 线程 + QuickJS runtime)DoS。
+            // permit 随下方 spawn 闭包结束自动释放。
+            let permit = match state.script_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Error {
+                            message: "脚本执行并发已满,稍后再试".into(),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+            // 端口预检:未打开则脚本内 send 全静默失败却显示"完成",误导——提前拒。
+            if !state.manager.is_open(&port).await {
+                let _ = out_tx
+                    .send(to_json(ServerMsg::Error {
+                        message: format!("端口 {} 未打开,请先连接", port),
+                    }))
+                    .await;
+                return;
+            }
+            let manager = state.manager.clone();
+            let out_tx2 = out_tx.clone();
+            let _ = out_tx
+                .send(to_json(ServerMsg::Ok { message: format!("运行脚本 {}", name) }))
+                .await;
+            tokio::spawn(async move {
+                let _permit = permit; // 持有到脚本结束
+                let result = ss_core::run_script(&port, &script, manager).await;
+                let msg = match result {
+                    Ok(()) => ServerMsg::ScriptResult {
+                        name,
+                        success: true,
+                        message: "完成".into(),
+                    },
+                    Err(e) => ServerMsg::ScriptResult {
+                        name,
+                        success: false,
+                        message: e.display_message(),
+                    },
+                };
+                let _ = out_tx2.send(to_json(msg)).await;
+            });
+        }
         ClientMsg::SetAlias { port, alias } => {
             match crate::set_alias_and_notify(state, &port, alias) {
                 Ok(()) => {
@@ -358,9 +423,13 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
             }
         }
         ClientMsg::Version => {
+            let enable_scripting = state
+                .enable_scripting
+                .load(std::sync::atomic::Ordering::Relaxed);
             let _ = out_tx
                 .send(to_json(ServerMsg::Version {
                     version: env!("CARGO_PKG_VERSION").into(),
+                    enable_scripting,
                 }))
                 .await;
         }

@@ -10,6 +10,7 @@ import type {
   Macro,
   MacroStep,
   PortInfo,
+  Script,
   SerialConfig,
   ShortcutMap,
   SrvSettings,
@@ -33,6 +34,7 @@ import {
 import {
   IconAlert,
   IconBolt,
+  IconCode,
   IconChevronDown,
   IconChevronUp,
   IconClose,
@@ -695,6 +697,80 @@ export function ExportMacrosDialog({
   );
 }
 
+/** 多选导出脚本：勾选若干（或全选）→ 导出单个 JSON（{名: 脚本}，可再导入闭环）。
+ *  镜像 ExportMacrosDialog。Enter 导出 / Esc 取消。 */
+export function ExportScriptsDialog({
+  scripts,
+  onConfirm,
+  onCancel,
+}: {
+  scripts: Record<string, Script>;
+  onConfirm: (selected: string[]) => void;
+  onCancel: () => void;
+}) {
+  const names = Object.keys(scripts);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const all = names.length > 0 && selected.size === names.length;
+  const toggle = (name: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const toggleAll = () => setSelected(all ? new Set() : new Set(names));
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      } else if (e.key === "Enter" && selected.size > 0) {
+        e.preventDefault();
+        onConfirm([...selected]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, onConfirm, onCancel]);
+  return (
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconExport /> EXPORT SCRIPTS
+        </h3>
+        <div className="dialog__sub">勾选要导出的脚本，导出为单个 JSON（可再导入）</div>
+        <div className="export-list">
+          <label className="export-list__all">
+            <input type="checkbox" checked={all} onChange={toggleAll} />
+            <span>{all ? "取消全选" : "全选"}</span>
+            <span className="export-list__count">
+              {selected.size}/{names.length}
+            </span>
+          </label>
+          {names.map((name) => (
+            <label key={name} className="export-list__item">
+              <input type="checkbox" checked={selected.has(name)} onChange={() => toggle(name)} />
+              <span className="export-list__name">{name}</span>
+            </label>
+          ))}
+        </div>
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button
+            className="btn btn--primary"
+            disabled={selected.size === 0}
+            onClick={() => onConfirm([...selected])}
+          >
+            导出{selected.size > 0 ? ` ${selected.size} 个` : ""}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== 设置面板 =====
 
 export function SettingsPanel({
@@ -787,6 +863,19 @@ export function SettingsPanel({
                 <ConfigRow label="Telnet 端口">
                   <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" />
                 </ConfigRow>
+                <ConfigRow label="远程脚本">
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={srv.enable_scripting}
+                      onChange={(e) => setSrv({ ...srv, enable_scripting: e.target.checked })}
+                    />
+                    <span>允许远程(WS/MCP)执行 JS 脚本</span>
+                  </label>
+                  <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
+                    ⚠ 默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本(沙箱仅限串口原语,无文件/网络访问)。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。
+                  </div>
+                </ConfigRow>
                 {shortcutEntry}
                 <div className="btn-row">
                   {saved && <span className="btn--save-pulse">已应用</span>}
@@ -813,10 +902,14 @@ export function SettingsPanel({
 
 // ===== 快捷键改键对话框 =====
 
-/** 列表展示顺序（global 在前、terminal 在后，常用动作靠上）。 */
+/** 列表展示顺序（global 在前、terminal 在后，常用动作靠上）。
+ *  注意:新增 ActionId 时除了同步 types.ts 的 ActionId 联合与 shortcuts.ts 的
+ *  DEFAULT_BINDINGS/ACTION_LABELS,也要加到这里——改键对话框只渲染此列表,
+ *  漏加则该动作在改键页不可见(快捷键仍生效,只是无法在此改键)。 */
 const SHORTCUT_ORDER: ActionId[] = [
   "search.open",
   "macro.palette",
+  "script.palette",
   "port.palette",
   "theme.toggle",
   "port.refresh",
@@ -825,6 +918,7 @@ const SHORTCUT_ORDER: ActionId[] = [
   "tab.prev",
   "activity.toggle-ports",
   "activity.toggle-macros",
+  "activity.toggle-scripts",
   "settings.open",
   "about.open",
   "remote.open",
@@ -1076,7 +1170,116 @@ export function MacroPalette({
   );
 }
 
-// ===== 串口选择面板（Ctrl+B）=====
+// ===== 脚本选择面板（Ctrl+B）=====
+/** 脚本选择面板：模糊搜索脚本，方向键选择，回车运行。镜像 MacroPalette。 */
+export function ScriptPalette({
+  scripts,
+  activePort,
+  onRun,
+  onClose,
+}: {
+  scripts: Record<string, Script>;
+  activePort: string;
+  onRun: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const [hint, setHint] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const filtered = useMemo(() => {
+    const matched: { name: string; score: number; first: number }[] = [];
+    for (const name of Object.keys(scripts)) {
+      const m = fuzzyMatch(query, name);
+      if (m) matched.push({ name, score: m.score, first: m.first });
+    }
+    matched.sort(
+      (a, b) => a.score - b.score || a.first - b.first || a.name.localeCompare(b.name)
+    );
+    return matched.map((x) => x.name);
+  }, [scripts, query]);
+
+  // 查询变化 → 回到首项、清提示
+  useEffect(() => {
+    setSelected(0);
+    setHint("");
+  }, [query]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const commit = (name: string) => {
+    if (!activePort) {
+      setHint("先打开一个端口再运行脚本");
+      return;
+    }
+    onRun(name);
+    onClose();
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i + 1) % filtered.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (filtered.length) setSelected((i) => (i - 1 + filtered.length) % filtered.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const name = filtered[selected] ?? filtered[0];
+      if (name) commit(name);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="palette-overlay" onClick={onClose}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="palette__input"
+          placeholder={`搜索脚本…（${Object.keys(scripts).length} 个）`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKey}
+        />
+        <div className="palette__list">
+          {filtered.length === 0 && <div className="palette__empty">无匹配脚本</div>}
+          {filtered.map((name, i) => (
+            <button
+              type="button"
+              key={name}
+              className={"palette__item" + (i === selected ? " palette__item--selected" : "")}
+              onMouseEnter={() => setSelected(i)}
+              onClick={() => commit(name)}
+            >
+              <span className="palette__name">{name}</span>
+              {scripts[name].description && (
+                <span className="palette__desc">{scripts[name].description}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="palette__footer">
+          {hint ? (
+            <span className="palette__hint">{hint}</span>
+          ) : activePort ? (
+            <span>↑↓ 选择 · 回车运行</span>
+          ) : (
+            <span className="palette__hint palette__hint--faint">未打开端口</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== 串口选择面板（Ctrl+I）=====
 
 /** 串口选择面板：模糊搜索端口，方向键选择，回车打开（onSelect 走与点端口行同一流程）。 */
 export function PortPalette({
@@ -1413,6 +1616,115 @@ export function MacroEditor({
                 const n = name.trim() || "macro";
                 try {
                   await downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: macro });
+                } catch (e) {
+                  console.error("导出失败", e);
+                }
+              }}
+              title="导出为 JSON 文件（可分享 / 导入）"
+            >
+              <IconExport />
+            </button>
+            {!isNew && (
+              <button className="btn btn--danger btn--icon" onClick={onDelete} title="删除">
+                <IconTrash />
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn--ghost" onClick={onCancel}>
+              取消
+            </button>
+            <button className="btn btn--primary" onClick={onSave}>
+              保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 脚本编辑器：JS 代码编辑（textarea），结构/样式镜像 MacroEditor。 */
+export function ScriptEditor({
+  name,
+  script,
+  error,
+  isNew,
+  onName,
+  onScriptChange,
+  onSave,
+  onDelete,
+  onCancel,
+}: {
+  name: string;
+  script: Script;
+  error: string | null;
+  isNew: boolean;
+  onName: (v: string) => void;
+  onScriptChange: (s: Script) => void;
+  onSave: () => void;
+  onDelete: () => void;
+  onCancel: () => void;
+}) {
+  useEscClose(onCancel);
+  const setDesc = (description: string) => onScriptChange({ ...script, description });
+  const setCode = (code: string) => onScriptChange({ ...script, code });
+
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+        <div className="macro-editor__head">
+          <h3 className="dialog__title">
+            <IconCode /> SCRIPT
+          </h3>
+          <div className="dialog__sub">{isNew ? "新增脚本" : name}</div>
+          <ConfigRow label="名称">
+            <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
+          </ConfigRow>
+          <ConfigRow label="描述">
+            <input value={script.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+          </ConfigRow>
+        </div>
+
+        <div className="macro-editor__scroll">
+          <div className="dialog__group-label" style={{ marginTop: 6 }}>
+            代码
+          </div>
+          <div className="script-editor__hint">await send(data) · await expect(pattern, ms) · await clear() · await sleep(ms)</div>
+          <textarea
+            value={script.code}
+            onChange={(e) => setCode(e.target.value)}
+            className="field script-editor__code"
+            spellCheck={false}
+            placeholder="// 在此编写 JS 脚本…"
+            style={{
+              fontFamily: "var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)",
+              minHeight: 300,
+              resize: "vertical",
+              width: "100%",
+            }}
+          />
+
+        {error && (
+          <div className="editor-error">
+            <IconAlert /> {error}
+          </div>
+        )}
+
+        <details>
+          <summary className="json-summary">JSON 预览（只读）</summary>
+          <pre className="json-preview">{JSON.stringify(script, null, 2)}</pre>
+        </details>
+        </div>
+
+        <div className="btn-row" style={{ justifyContent: "space-between" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="btn btn--ghost btn--icon"
+              onClick={async () => {
+                const n = name.trim() || "script";
+                try {
+                  await downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: script });
                 } catch (e) {
                   console.error("导出失败", e);
                 }

@@ -26,12 +26,14 @@ export const DEFAULT_BINDINGS: ShortcutMap = {
   "settings.open": { combo: "mod+alt+s", scope: "global" },
   "activity.toggle-ports": { combo: "mod+shift+i", scope: "global" },
   "activity.toggle-macros": { combo: "mod+shift+o", scope: "global" },
+  "activity.toggle-scripts": { combo: "mod+shift+b", scope: "global" },
   // Ctrl+. 同理被吞,改 mod+alt+a
   "about.open": { combo: "mod+alt+a", scope: "global" },
   "remote.open": { combo: "mod+t", scope: "global" },
   // Ctrl+W 是浏览器保留键(web 会关掉页面标签),改 mod+alt+w 避免冲突
   "port.close-active": { combo: "mod+alt+w", scope: "global" },
   "macro.palette": { combo: "mod+o", scope: "global" },
+  "script.palette": { combo: "mod+b", scope: "global" },
   "port.palette": { combo: "mod+i", scope: "global" },
   // 标签页切换：tab.select 是一族键（Ctrl+Alt+1..9，0→末个），用 pattern 捕获数字，不可改键；
   // tab.next/prev 是普通可改键动作，左右循环 wrap。mod+alt+* 是干净命名空间（无默认占用、非浏览器保留）。
@@ -53,8 +55,10 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   "remote.open": "打开远程窗口",
   "activity.toggle-ports": "切到端口侧栏",
   "activity.toggle-macros": "切到宏侧栏",
+  "activity.toggle-scripts": "切到脚本侧栏",
   "port.close-active": "关闭当前端口",
   "macro.palette": "宏命令面板",
+  "script.palette": "脚本选择面板",
   "port.palette": "串口选择面板",
   "tab.select": "切换到第 N 个标签页",
   "tab.next": "下一个标签页",

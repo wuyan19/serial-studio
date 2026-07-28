@@ -30,6 +30,19 @@ export interface MacroResult {
   message: string;
 }
 
+/** 一个 JS 脚本定义(与后端 ss_core::Script 对齐)。code 为 JS 源码。 */
+export interface Script {
+  description?: string;
+  code: string;
+}
+
+/** 脚本执行结果(与 MacroResult 同构)。 */
+export interface ScriptResult {
+  name: string;
+  success: boolean;
+  message: string;
+}
+
 export interface TermInstance {
   term: Terminal;
   fit: FitAddon;
@@ -55,6 +68,8 @@ export interface SrvSettings {
   ws_host: string;
   ws_port: number;
   telnet_port: number;
+  /** 是否允许远程(WS/MCP)执行脚本。远程客户端经 version 握手拿到。 */
+  enable_scripting: boolean;
 }
 
 // ===== 快捷键（可改键；唯一真相源在 shortcuts.ts） =====
@@ -72,8 +87,10 @@ export type ActionId =
   | "remote.open"
   | "activity.toggle-ports"
   | "activity.toggle-macros"
+  | "activity.toggle-scripts"
   | "port.close-active"
   | "macro.palette"
+  | "script.palette"
   | "port.palette"
   | "tab.select"
   | "tab.next"

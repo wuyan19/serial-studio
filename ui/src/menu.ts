@@ -33,7 +33,7 @@ export type Dispatch = (action: ActionId, arg?: string) => void;
 
 /** 菜单分组与顺序：[分组名, 动作列表]。仅 global 作用域子集。 */
 const GROUPS: [string, ActionId[]][] = [
-  ["视图", ["activity.toggle-ports", "activity.toggle-macros", "theme.toggle", "search.open"]],
+  ["视图", ["activity.toggle-ports", "activity.toggle-macros", "activity.toggle-scripts", "theme.toggle", "search.open"]],
   ["端口", ["port.refresh", "port.close-active"]],
   ["帮助", ["settings.open", "about.open"]],
 ];

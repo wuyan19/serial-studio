@@ -1,4 +1,4 @@
-import type { Macro, PortInfo, SerialConfig } from "./types";
+import type { Macro, PortInfo, Script, SerialConfig } from "./types";
 import { Channel } from "@tauri-apps/api/core";
 import { getRemoteFromUrl, isTauri, loadConn, tauriInvoke } from "./lib";
 
@@ -28,6 +28,7 @@ export interface Transport {
   forceClose(port: string): Promise<void>;
   write(port: string, data: string): Promise<void>;
   runMacro(name: string, port: string, macro: Macro): Promise<void>;
+  runScript(name: string, port: string, script: Script): Promise<void>;
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
   onPortOpened(cb: (port: string) => void): () => void;
   onPortClosed(cb: (port: string) => void): () => void;
@@ -37,9 +38,10 @@ export interface Transport {
   onMetaChanged(cb: () => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
+  onScriptResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
   onConnectedChange(cb: (connected: boolean) => void): () => void;
-  /** 服务版本号（关于页展示）。本地取 Tauri app 版本，远程取服务端 CARGO_PKG_VERSION。 */
-  getVersion(): Promise<string>;
+  /** 服务版本号 + 是否启用远程脚本执行（关于页 + 脚本 UI 显隐）。本地恒 enableScripting=true。 */
+  getVersion(): Promise<{ version: string; enableScripting: boolean }>;
   dispose(): void;
 }
 
@@ -56,7 +58,7 @@ function decodeDataFrame(buf: ArrayBuffer): { port: string; data: Uint8Array } {
 export class RemoteTransport implements Transport {
   private ws: WebSocket;
   private openResolver: ((r: AcquiredResult) => void) | null = null;
-  private versionResolver: ((v: string) => void) | null = null;
+  private versionResolver: ((v: { version: string; enableScripting: boolean }) => void) | null = null;
   /** WS 连接就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。 */
   private openPromise: Promise<void>;
   private handlers = {
@@ -68,6 +70,7 @@ export class RemoteTransport implements Transport {
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    scriptResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -127,9 +130,12 @@ export class RemoteTransport implements Transport {
           break;
         case "version":
           if (this.versionResolver) {
-            this.versionResolver(msg.version);
+            this.versionResolver({ version: msg.version, enableScripting: !!msg.enable_scripting });
             this.versionResolver = null;
           }
+          break;
+        case "script_result":
+          this.handlers.scriptResult.forEach((cb) => cb(msg.name, msg.success, msg.message));
           break;
       }
     };
@@ -172,8 +178,11 @@ export class RemoteTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await this.send(JSON.stringify({ action: "run_macro", name, port, macro }));
   }
+  async runScript(name: string, port: string, script: Script) {
+    await this.send(JSON.stringify({ action: "run_script", name, port, script }));
+  }
   async getVersion() {
-    const result = new Promise<string>((resolve) => {
+    const result = new Promise<{ version: string; enableScripting: boolean }>((resolve) => {
       this.versionResolver = resolve;
     });
     await this.send(JSON.stringify({ action: "version" }));
@@ -208,6 +217,10 @@ export class RemoteTransport implements Transport {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
   }
+  onScriptResult(cb: (name: string, success: boolean, msg: string) => void) {
+    this.handlers.scriptResult.add(cb);
+    return () => { this.handlers.scriptResult.delete(cb); };
+  }
   onConnectedChange(cb: (connected: boolean) => void) {
     this.handlers.connected.add(cb);
     if (this.ws.readyState === WebSocket.OPEN) cb(true);
@@ -233,6 +246,7 @@ export class LocalTransport implements Transport {
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    scriptResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -266,6 +280,15 @@ export class LocalTransport implements Transport {
           "macro-result",
           (e) =>
             this.handlers.macroResult.forEach((cb) =>
+              cb(e.payload.name, e.payload.success, e.payload.message)
+            )
+        )
+      );
+      this.unlisten.push(
+        await listen<{ name: string; success: boolean; message: string }>(
+          "script-result",
+          (e) =>
+            this.handlers.scriptResult.forEach((cb) =>
               cb(e.payload.name, e.payload.success, e.payload.message)
             )
         )
@@ -325,9 +348,13 @@ export class LocalTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await tauriInvoke("run_macro", { name, port, macro });
   }
+  async runScript(name: string, port: string, script: Script) {
+    await tauriInvoke("run_script", { name, port, script });
+  }
   async getVersion() {
     const { getVersion } = await import("@tauri-apps/api/app");
-    return getVersion();
+    const version = await getVersion();
+    return { version, enableScripting: true }; // 本地主权:脚本恒可用
   }
 
   onData(cb: (port: string, data: Uint8Array) => void) {
@@ -357,6 +384,10 @@ export class LocalTransport implements Transport {
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
+  }
+  onScriptResult(cb: (name: string, success: boolean, msg: string) => void) {
+    this.handlers.scriptResult.add(cb);
+    return () => { this.handlers.scriptResult.delete(cb); };
   }
   onConnectedChange(cb: (connected: boolean) => void) {
     this.handlers.connected.add(cb);

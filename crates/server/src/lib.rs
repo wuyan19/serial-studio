@@ -6,6 +6,7 @@
 mod mcp;
 pub mod macros_store;
 pub mod port_meta_store;
+pub mod scripts_store;
 pub mod settings;
 pub mod supervisor;
 pub mod telnet;
@@ -31,14 +32,31 @@ pub struct AppState {
     /// 否则别的客户端要等下一个串口事件才看到新别名。与串口 EventBus 分离——
     /// 这是用户配置变更，不是串口硬件事件，不进 core 的 SerialEvent。
     pub meta_bus: Arc<broadcast::Sender<()>>,
+    /// 远程脚本执行开关（缓存自 settings.json,WS/MCP 每次检查读内存而非读盘）。
+    /// `save_settings`/`apply_settings` 时同步刷新。
+    pub enable_scripting: Arc<std::sync::atomic::AtomicBool>,
+    /// 脚本并发上限信号量:远程 DoS 防护,限制同时执行的脚本数。
+    pub script_semaphore: Arc<tokio::sync::Semaphore>,
 }
+
+/// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
+const SCRIPT_MAX_CONCURRENCY: usize = 4;
 
 /// 构造默认状态。宏定义存前端本地，服务端无状态（只执行 run_macro）。
 pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(RealPortOpener)));
     let (meta_tx, _) = broadcast::channel(16);
-    AppState { manager, event_bus, meta_bus: Arc::new(meta_tx) }
+    let enable_scripting = Arc::new(std::sync::atomic::AtomicBool::new(
+        settings::load().enable_scripting,
+    ));
+    AppState {
+        manager,
+        event_bus,
+        meta_bus: Arc::new(meta_tx),
+        enable_scripting,
+        script_semaphore: Arc::new(tokio::sync::Semaphore::new(SCRIPT_MAX_CONCURRENCY)),
+    }
 }
 
 /// 面向客户端的端口视图：core 的运行时事实(`PortInfo`) + server 层用户元数据(alias)。

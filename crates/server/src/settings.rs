@@ -14,6 +14,10 @@ pub struct Settings {
     pub ws_port: u16,
     #[serde(default = "default_telnet_port")]
     pub telnet_port: u16,
+    /// 是否允许远程(WS/MCP)执行 JS 脚本。默认 false:服务器默认 0.0.0.0 无认证,
+    /// 远程能跑脚本 = 潜在 RCE 面,须显式开启。本地 Tauri 不受此开关限制。
+    #[serde(default = "default_enable_scripting")]
+    pub enable_scripting: bool,
 }
 
 fn default_ws_host() -> String {
@@ -25,6 +29,9 @@ fn default_ws_port() -> u16 {
 fn default_telnet_port() -> u16 {
     18701
 }
+fn default_enable_scripting() -> bool {
+    false
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +39,7 @@ impl Default for Settings {
             ws_host: default_ws_host(),
             ws_port: default_ws_port(),
             telnet_port: default_telnet_port(),
+            enable_scripting: default_enable_scripting(),
         }
     }
 }

@@ -45,6 +45,17 @@ export function IconBolt({ className }: IconProps) {
   );
 }
 
+/** Scripts (code). */
+export function IconCode({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M8 9l-3 3 3 3" />
+      <path d="M16 9l3 3-3 3" />
+      <path d="M13.5 6l-3 12" />
+    </Svg>
+  );
+}
+
 /** Remote window. */
 export function IconGlobe({ className }: IconProps) {
   return (

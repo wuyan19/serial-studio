@@ -58,8 +58,15 @@ async fn get_settings() -> Result<Settings, String> {
 }
 
 #[tauri::command]
-async fn save_settings(settings: Settings) -> Result<(), String> {
-    ss_server::settings::save(&settings)
+async fn save_settings(
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<(), String> {
+    ss_server::settings::save(&settings)?;
+    state
+        .enable_scripting
+        .store(settings.enable_scripting, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 /// 应用配置：写 settings.json + 重启服务使新监听地址/端口生效。
@@ -67,10 +74,14 @@ async fn save_settings(settings: Settings) -> Result<(), String> {
 #[tauri::command]
 async fn apply_settings(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     settings: Settings,
     supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
 ) -> Result<(), String> {
     ss_server::settings::save(&settings)?;
+    state
+        .enable_scripting
+        .store(settings.enable_scripting, std::sync::atomic::Ordering::Relaxed);
     match supervisor.restart(&settings).await {
         Ok(()) => {
             let _ = app.emit("service-status", serde_json::json!({ "running": true }));
@@ -105,6 +116,20 @@ async fn save_macros(
     macros: std::collections::BTreeMap<String, ss_core::Macro>,
 ) -> Result<(), String> {
     ss_server::macros_store::save(&macros)
+}
+
+/// 加载用户脚本(exe 同目录 scripts.json)。与宏一样是用户配置,跟着用户走。
+#[tauri::command]
+async fn load_scripts() -> Result<std::collections::BTreeMap<String, ss_core::Script>, String> {
+    Ok(ss_server::scripts_store::load())
+}
+
+/// 保存用户脚本到 scripts.json。
+#[tauri::command]
+async fn save_scripts(
+    scripts: std::collections::BTreeMap<String, ss_core::Script>,
+) -> Result<(), String> {
+    ss_server::scripts_store::save(&scripts)
 }
 
 /// 打开远程窗口（VS Code 风）：新 WebviewWindow 连接指定远程服务。
@@ -336,6 +361,32 @@ async fn run_macro(
     Ok(())
 }
 
+/// 运行 JS 脚本(本地主权路径,不查 enable_scripting——那是远程 WS/MCP 的闸门)。
+/// state.manager 是 Arc<SerialManager>,run_script 正好收 Arc,直接 move。
+#[tauri::command]
+async fn run_script(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    port: String,
+    script: ss_core::Script,
+) -> Result<(), String> {
+    let manager = state.manager.clone();
+    let app = app.clone();
+    tokio::spawn(async move {
+        let result = ss_core::run_script(&port, &script, manager).await;
+        let (success, message) = match result {
+            Ok(()) => (true, "完成".to_string()),
+            Err(e) => (false, e.to_string()),
+        };
+        let _ = app.emit(
+            "script-result",
+            serde_json::json!({ "name": name, "success": success, "message": message }),
+        );
+    });
+    Ok(())
+}
+
 /// 本地模式数据流：订阅 EventBus，把 SerialEvent 转成 Tauri event 推给前端。
 /// 与 axum ws.rs 的事件转发是同一 EventBus 的两个出口（一个走 WS，一个走 IPC）。
 /// 另订阅 meta_bus：别名等元数据变更时 emit "ports-meta-changed"，让本地 UI 刷新列表
@@ -490,6 +541,8 @@ fn run_gui() {
             service_status,
             load_macros,
             save_macros,
+            load_scripts,
+            save_scripts,
             open_remote_window,
             list_ports,
             open_port_stream,
@@ -498,6 +551,7 @@ fn run_gui() {
             set_port_alias,
             write_port,
             run_macro,
+            run_script,
             save_json_file,
         ])
         .run(tauri::generate_context!())
