@@ -14,3 +14,7 @@ tracing = { workspace = true }
 serialport = { workspace = true }
 bytes = { workspace = true }
 regex = "1"
+
+# 脚本引擎(spike):rquickjs 绑定 QuickJS,futures feature 启用 AsyncRuntime/promise-as-future。
+# rquickjs 无 tokio feature——async 由 Rust futures 驱动,在 tokio runtime 上 await 时 tokio 原语才生效。
+rquickjs = { version = "0.12.2", features = ["futures"] }
