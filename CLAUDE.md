@@ -62,7 +62,7 @@ cargo check                      # 快速类型检查
 
 - `acquire`:首持有者真正打开端口(其 config 生效);后续持有者**附加**(请求的 config 被忽略)。慢路径打开后有 **TOCTOU 重检**,避免并发 acquire 泄漏 OS 句柄或互相覆盖 handle。
 - `release`:非末位保持端口(发 `HoldersChanged`),末位才拆毁。断连/关窗走 `release_all`。
-- `force_close`:仅本地 UI 特权,无视持有者直接拆毁(远程 WS 不可用)。
+- `force_close_others`:仅本地 UI 特权,踢掉非本地持有者(远程 WS)并经 Kicked 事件断开其连接,本地窗口保留;全远程或末位时拆毁端口。
 
 详见 `manager.rs` 单测(`concurrent_acquire_one_opens_one_attaches_no_leak` 守住"并发不产生重复端口任务"不变量)。
 

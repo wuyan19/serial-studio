@@ -19,7 +19,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use rust_embed::RustEmbed;
 use serde::Serialize;
-use ss_core::{EventBus, RealPortOpener, SerialManager};
+use ss_core::{EventBus, RealPortOpener, SerialManager, SessionId};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -37,6 +38,9 @@ pub struct AppState {
     pub enable_scripting: Arc<std::sync::atomic::AtomicBool>,
     /// 脚本并发上限信号量:远程 DoS 防护,限制同时执行的脚本数。
     pub script_semaphore: Arc<tokio::sync::Semaphore>,
+    /// WS 连接的关闭信号:session → oneshot sender。force_close 经此点对点断开被踢的连接
+    /// (不靠 EventBus 广播——广播 Lagged 会丢,踢人须必送达)。
+    pub closers: Arc<std::sync::Mutex<HashMap<SessionId, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -56,6 +60,7 @@ pub fn create_state() -> AppState {
         meta_bus: Arc::new(meta_tx),
         enable_scripting,
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(SCRIPT_MAX_CONCURRENCY)),
+        closers: Arc::new(std::sync::Mutex::new(HashMap::new())),
     }
 }
 

@@ -2,7 +2,6 @@
 //!
 //! 一个串口数据源 → 多个订阅者（WS 客户端、Tauri 前端、日志）各取所需。
 
-use crate::types::SessionId;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -23,9 +22,6 @@ pub enum SerialEvent {
     HoldersChanged { port: String, holders: usize },
     /// 串口错误
     Error { port: String, message: String },
-    /// 强制踢出:某 session 被从端口持有者中移除(如本地 force_close 远程)。
-    /// WS handler 收到若 session 匹配自身则断开连接。内部信号,不转发给客户端。
-    Kicked { port: String, session: SessionId },
 }
 
 pub struct EventBus {

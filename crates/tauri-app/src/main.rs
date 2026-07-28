@@ -301,11 +301,18 @@ async fn force_close_port(
     port: String,
 ) -> Result<(), String> {
     let local = sessions.all();
-    state
+    let kicked = state
         .manager
         .force_close_others(&port, &local)
         .await
         .map_err(|e| e.to_string())?;
+    // 点对点断开被踢的 WS 连接(经 AppState.closers,必送达)
+    let mut closers = state.closers.lock().unwrap();
+    for s in &kicked {
+        if let Some(tx) = closers.remove(s) {
+            let _ = tx.send(());
+        }
+    }
     Ok(())
 }
 
@@ -443,9 +450,6 @@ fn spawn_event_emitter(
                         "serial-error",
                         serde_json::json!({ "message": format!("{}: {}", port, message) }),
                     );
-                }
-                ss_core::SerialEvent::Kicked { .. } => {
-                    // 远程踢出信号(WS handler 断开用),本地无 WS handler,忽略
                 }
             }
         }
