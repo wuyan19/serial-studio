@@ -225,6 +225,46 @@ impl SerialManager {
         Ok(())
     }
 
+    /// 踢掉非本地持有者(远程 WS/MCP 客户端),保留 `keep`(本地窗口)。用于"强制关闭"
+    /// 按钮只关远程、不关本地。踢完后若仍有本地持有者,端口保持(发 HoldersChanged);
+    /// 全踢完则拆毁(发 PortClosed);无远程可踢则 no-op。返回剩余本地持有者数。
+    pub async fn force_close_others(
+        &self,
+        port: &str,
+        keep: &HashSet<SessionId>,
+    ) -> Result<usize, SerialError> {
+        let (before, remaining, kicked, teardown) = {
+            let mut ports = self.ports.lock().await;
+            let handle = ports
+                .get_mut(port)
+                .ok_or_else(|| SerialError::NotOpen(port.to_string()))?;
+            let before = handle.holders.len();
+            // 收集被踢的 session(retain 前非 keep 的),用于发 Kicked 通知 WS 断开连接
+            let kicked: Vec<SessionId> =
+                handle.holders.iter().filter(|s| !keep.contains(s)).copied().collect();
+            handle.holders.retain(|s| keep.contains(s));
+            let remaining = handle.holders.len();
+            let teardown = if remaining == 0 { ports.remove(port) } else { None };
+            (before, remaining, kicked, teardown)
+        };
+        // 通知被踢的 session:对应 WS handler 收到 Kicked 后断开连接
+        for s in &kicked {
+            self.event_bus
+                .publish(SerialEvent::Kicked { port: port.to_string(), session: *s });
+        }
+        if let Some(handle) = teardown {
+            Self::teardown(handle).await;
+            self.event_bus
+                .publish(SerialEvent::PortClosed { port: port.to_string() });
+        } else if remaining < before {
+            self.event_bus.publish(SerialEvent::HoldersChanged {
+                port: port.to_string(),
+                holders: remaining,
+            });
+        }
+        Ok(remaining)
+    }
+
     /// 端口的当前持有者数量（给 UI/status 用）。
     pub async fn holder_count(&self, port: &str) -> Option<usize> {
         self.ports.lock().await.get(port).map(|h| h.holders.len())
@@ -578,6 +618,35 @@ mod tests {
         let m = mgr();
         let err = m.force_close("COM7").await.unwrap_err();
         assert!(matches!(err, SerialError::NotOpen(_)));
+    }
+
+    #[tokio::test]
+    async fn force_close_others_keeps_local_kicks_remote() {
+        let m = mgr();
+        let local = SessionId::next();
+        let remote1 = SessionId::next();
+        let remote2 = SessionId::next();
+        m.acquire("COM7".into(), cfg(115200), local).await.unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote1).await.unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote2).await.unwrap();
+        let keep = HashSet::from([local]);
+        let remaining = m.force_close_others("COM7", &keep).await.unwrap();
+        assert_eq!(remaining, 1, "踢远程后只剩本地 1 个");
+        assert_eq!(m.holder_count("COM7").await, Some(1));
+        assert!(m.is_open("COM7").await, "本地还在,端口应保持");
+    }
+
+    #[tokio::test]
+    async fn force_close_others_all_remote_teardown() {
+        let m = mgr();
+        let remote1 = SessionId::next();
+        let remote2 = SessionId::next();
+        m.acquire("COM7".into(), cfg(115200), remote1).await.unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote2).await.unwrap();
+        let keep = HashSet::new(); // 无本地持有者
+        let remaining = m.force_close_others("COM7", &keep).await.unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!m.is_open("COM7").await, "全远程,踢完应拆毁");
     }
 
     #[tokio::test]

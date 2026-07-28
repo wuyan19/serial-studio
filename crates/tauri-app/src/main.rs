@@ -18,7 +18,7 @@ use tauri::{ipc::{Channel, InvokeResponseBody}, Emitter, Manager};
 use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
 use ss_server::create_state;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
@@ -171,6 +171,10 @@ impl SessionRegistry {
     fn take(&self, label: &str) -> Option<SessionId> {
         self.map.lock().unwrap().remove(label)
     }
+    /// 当前所有本地窗口的会话(用于 force_close_others 的 keep 集合)。
+    fn all(&self) -> HashSet<SessionId> {
+        self.map.lock().unwrap().values().cloned().collect()
+    }
 }
 
 /// 本地模式字节直传通道注册表：(窗口 label, 端口) → Channel。
@@ -289,10 +293,20 @@ async fn close_port_stream(
     Ok(outcome)
 }
 
-/// 强制关闭：无视持有者直接拆毁。仅本地 UI 提供（不暴露给 WS）。
+/// 强制关闭:只踢远程持有者(线上),保留本地窗口的持有。仅本地 UI 提供(不暴露给 WS)。
 #[tauri::command]
-async fn force_close_port(state: tauri::State<'_, AppState>, port: String) -> Result<(), String> {
-    state.manager.force_close(&port).await.map_err(|e| e.to_string())
+async fn force_close_port(
+    sessions: tauri::State<'_, SessionRegistry>,
+    state: tauri::State<'_, AppState>,
+    port: String,
+) -> Result<(), String> {
+    let local = sessions.all();
+    state
+        .manager
+        .force_close_others(&port, &local)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 设置端口别名（""/None = 清除）。写 exe 同目录 ports.json 并广播元数据变更，
@@ -429,6 +443,9 @@ fn spawn_event_emitter(
                         "serial-error",
                         serde_json::json!({ "message": format!("{}: {}", port, message) }),
                     );
+                }
+                ss_core::SerialEvent::Kicked { .. } => {
+                    // 远程踢出信号(WS handler 断开用),本地无 WS handler,忽略
                 }
             }
         }

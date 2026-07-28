@@ -24,7 +24,7 @@ export interface Transport {
    *  open 命令不碰磁盘——rename / 首开带别名都走此入口。 */
   setAlias(port: string, alias: string): Promise<void>;
   close(port: string): Promise<void>;
-  /** 强制关闭：无视持有者直接拆毁。仅本地有意义，远程会 reject。 */
+  /** 强制关闭:踢掉远程客户端(WS/MCP)。仅本地可用。 */
   forceClose(port: string): Promise<void>;
   write(port: string, data: string): Promise<void>;
   runMacro(name: string, port: string, macro: Macro): Promise<void>;

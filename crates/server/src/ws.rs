@@ -130,6 +130,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let event_task = tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
+                // 被本地强制踢出:发 Close 让主循环断开本连接
+                Ok(SerialEvent::Kicked { session: kicked, .. }) if kicked == session => {
+                    let _ = out_tx_evt.send(OutFrame::Close).await;
+                }
                 Ok(event) => {
                     if let Some(msg) = event_to_msg(&event) {
                         if out_tx_evt.send(msg).await.is_err() {
@@ -185,12 +189,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             Some(out) = out_rx.recv() => {
-                let msg = match out {
-                    OutFrame::Text(s) => Message::Text(s),
-                    OutFrame::Binary(v) => Message::Binary(v),
-                };
-                if ws_tx.send(msg).await.is_err() {
-                    break;
+                match out {
+                    OutFrame::Text(s) => {
+                        if ws_tx.send(Message::Text(s)).await.is_err() {
+                            break;
+                        }
+                    }
+                    OutFrame::Binary(v) => {
+                        if ws_tx.send(Message::Binary(v)).await.is_err() {
+                            break;
+                        }
+                    }
+                    OutFrame::Close => {
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        break;
+                    }
                 }
             }
         }
@@ -206,10 +219,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     tracing::info!("WS 客户端断开 (session={:?})", session);
 }
 
-/// 输出帧：控制消息走 Text(JSON)，串口数据走 Binary(帧头+原始字节)。
+/// 输出帧：控制消息走 Text(JSON)，串口数据走 Binary(帧头+原始字节)，Close 断开连接。
 enum OutFrame {
     Text(String),
     Binary(Vec<u8>),
+    /// 关闭连接(被踢出等),主循环发 Close frame 后断开。
+    Close,
 }
 
 /// 构造数据 Binary 帧：`[port_len:u8][port UTF-8][data]`。
@@ -229,19 +244,21 @@ fn to_json(msg: ServerMsg) -> OutFrame {
 }
 
 fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
-    Some(match event {
+    match event {
+        // Kicked 是内部信号(通知 WS handler 断开),不转发给客户端
+        SerialEvent::Kicked { .. } => None,
         // 数据走 Binary 帧直传字节（[port_len][port][data]），前端零解码
-        SerialEvent::DataReceived { port, data } => OutFrame::Binary(data_frame(port, data)),
-        SerialEvent::PortOpened { port } => to_json(ServerMsg::Opened { port: port.clone() }),
-        SerialEvent::PortClosed { port } => to_json(ServerMsg::Closed { port: port.clone() }),
-        SerialEvent::HoldersChanged { port, holders } => to_json(ServerMsg::Holders {
+        SerialEvent::DataReceived { port, data } => Some(OutFrame::Binary(data_frame(port, data))),
+        SerialEvent::PortOpened { port } => Some(to_json(ServerMsg::Opened { port: port.clone() })),
+        SerialEvent::PortClosed { port } => Some(to_json(ServerMsg::Closed { port: port.clone() })),
+        SerialEvent::HoldersChanged { port, holders } => Some(to_json(ServerMsg::Holders {
             port: port.clone(),
             holders: *holders,
-        }),
-        SerialEvent::Error { port, message } => to_json(ServerMsg::Error {
+        })),
+        SerialEvent::Error { port, message } => Some(to_json(ServerMsg::Error {
             message: format!("{}: {}", port, message),
-        }),
-    })
+        })),
+    }
 }
 
 async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<OutFrame>, session: SessionId) {

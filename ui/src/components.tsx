@@ -864,17 +864,20 @@ export function SettingsPanel({
                   <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" />
                 </ConfigRow>
                 <ConfigRow label="远程脚本">
-                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
                     <input
                       type="checkbox"
                       checked={srv.enable_scripting}
                       onChange={(e) => setSrv({ ...srv, enable_scripting: e.target.checked })}
                     />
-                    <span>允许远程(WS/MCP)执行 JS 脚本</span>
+                    <span>允许远程执行 JS 脚本</span>
+                    <span
+                      title="默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本(沙箱仅限串口原语,无文件/网络访问)。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。"
+                      style={{ cursor: "help" }}
+                    >
+                      ⚠
+                    </span>
                   </label>
-                  <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
-                    ⚠ 默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本(沙箱仅限串口原语,无文件/网络访问)。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。
-                  </div>
                 </ConfigRow>
                 {shortcutEntry}
                 <div className="btn-row">

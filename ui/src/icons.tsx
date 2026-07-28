@@ -214,7 +214,7 @@ export function IconMoon({ className }: IconProps) {
   );
 }
 
-/** 强制断电——强制关闭端口（踢掉所有持有者）。 */
+/** 强制断电——强制关闭:踢掉远程客户端。 */
 export function IconPower({ className }: IconProps) {
   return (
     <Svg className={className}>

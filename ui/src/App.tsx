@@ -504,7 +504,7 @@ export default function App() {
     setConfirmState({
       title: "强制关闭端口",
       icon: <IconPower />,
-      message: `强制关闭 ${port}？这将立即断开所有持有者（含其它窗口/会话），且不可恢复。`,
+      message: `强制关闭 ${port}？将断开所有远程客户端（WS/MCP）的连接。`,
       confirmText: "强制关闭",
       tone: "danger",
       onConfirm: () => {
@@ -898,7 +898,7 @@ export default function App() {
                     {isLocal && p.opened && (
                       <button
                         className="port-item__force"
-                        title={`强制关闭 ${p.name}（踢掉所有持有者）`}
+                        title={`强制关闭 ${p.name}（断开远程）`}
                         onClick={() => forceClosePort(p.name)}
                       >
                         <IconPower />
