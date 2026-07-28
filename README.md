@@ -105,9 +105,21 @@ Runtime config lives next to the binary:
 
 ## 🤖 MCP
 
-`POST /mcp` speaks JSON-RPC. Six tools: `serial_list`, `serial_send`, `serial_read`,
-`serial_status`, `serial_grep`, `serial_clear`. The `port` argument accepts a real port name
-**or** an alias.
+`POST /mcp` speaks JSON-RPC. Seven tools: `serial_list`, `serial_send`, `serial_read`,
+`serial_status`, `serial_grep`, `serial_clear`, and `serial_run_script` (JS scripting,
+gated by `enable_scripting`). The `port` argument accepts a real port name **or** an alias.
+A `serial_script_guide` prompt documents the scripting API and constraints.
+
+### Connect from Claude Code
+
+```bash
+claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mcp
+```
+
+Replace `<host>` with the machine running Serial Studio (`127.0.0.1` for the local app).
+Other MCP clients (Claude Desktop, etc.): add an HTTP MCP server pointing at the same URL.
+
+### Raw JSON-RPC
 
 ```jsonc
 {

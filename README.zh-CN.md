@@ -103,8 +103,21 @@ release 产物为 `serial-studio.exe`。
 
 ## 🤖 MCP
 
-`POST /mcp`，JSON-RPC 协议。六个工具：`serial_list`、`serial_send`、`serial_read`、
-`serial_status`、`serial_grep`、`serial_clear`。`port` 参数可用真实端口名 **或别名**。
+`POST /mcp`,JSON-RPC 协议。七个工具:`serial_list`、`serial_send`、`serial_read`、
+`serial_status`、`serial_grep`、`serial_clear`,以及 `serial_run_script`(JS 脚本,
+受 `enable_scripting` 开关控制)。`port` 参数可用真实端口名 **或别名**。
+`serial_script_guide` prompt 记录了脚本 API 与约束。
+
+### 从 Claude Code 接入
+
+```bash
+claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mcp
+```
+
+把 `<host>` 换成运行 Serial Studio 的机器(`127.0.0.1` 为本地桌面应用)。其他 MCP 客户端
+(Claude Desktop 等):添加指向同一 URL 的 HTTP MCP server。
+
+### 原始 JSON-RPC
 
 ```jsonc
 {
