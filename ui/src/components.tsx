@@ -7,8 +7,10 @@ import type { ISearchDecorationOptions } from "@xterm/addon-search";
 import type {
   ActionId,
   ConnConfig,
+  Group,
   Macro,
   MacroStep,
+  PaneHalf,
   PortInfo,
   Script,
   SerialConfig,
@@ -168,12 +170,14 @@ function termThemeFor(t: Theme): ITheme {
 
 export function TermView({
   port,
-  active,
+  visible,
+  focused,
   onWrite,
   onReady,
 }: {
   port: string;
-  active: boolean;
+  visible: boolean;
+  focused: boolean;
   onWrite: (port: string, data: string) => void;
   onReady: (inst: TermInstance | null) => void;
 }) {
@@ -230,7 +234,7 @@ export function TermView({
     const timer = setTimeout(() => {
       try {
         fit.fit();
-        term.focus();
+        if (focused) term.focus();
       } catch {
         /* 容器未可见 */
       }
@@ -267,13 +271,12 @@ export function TermView({
     });
   }, []);
 
+  // 聚焦本终端（聚焦 group 的活动 tab）：fit 重排列 + 抢焦点
   useEffect(() => {
-    if (active && fitRef.current) {
+    if (focused && fitRef.current) {
       const timer = setTimeout(() => {
         try {
           fitRef.current?.fit();
-          // 切到本标签即聚焦终端，免得用户还得点一下才能键入。
-          // display 已在渲染时切回 block，setTimeout(0) 推到下一 tick 确保可见后再 focus。
           termRef.current?.focus();
         } catch {
           /* ignore */
@@ -281,22 +284,210 @@ export function TermView({
       }, 0);
       return () => clearTimeout(timer);
     }
-  }, [active]);
+  }, [focused]);
 
+  // 容器尺寸变化（窗口缩放、分栏拖动、兄弟 group 坍缩）→ 重排可见终端。
+  // 替代原「仅 active 挂 window resize」：分栏下多个终端同时可见，window resize 抓不到分栏尺寸变化。
   useEffect(() => {
-    if (!active) return;
-    const onResize = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (!visible) return; // display:none 时尺寸为 0，fit 会算错/抛
       try {
         fitRef.current?.fit();
       } catch {
         /* ignore */
       }
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [active]);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [visible]);
 
-  return <div ref={containerRef} style={{ position: "absolute", inset: "0 0 0 4px", display: active ? "block" : "none" }} />;
+  return <div ref={containerRef} style={{ position: "absolute", inset: 0, display: visible ? "block" : "none" }} />;
+}
+
+// ===== editor group（一个「标签栏 + 终端区」分栏格子） =====
+
+/** 计算拖拽落点相对容器的四半区（扩宏 DnD rect 中点到二维：|dx|/w vs |dy|/h 判主方向）。 */
+function dropHalfOf(clientX: number, clientY: number, el: HTMLElement): PaneHalf {
+  const r = el.getBoundingClientRect();
+  const dx = (clientX - r.left) - r.width / 2;
+  const dy = (clientY - r.top) - r.height / 2;
+  return Math.abs(dx) / r.width > Math.abs(dy) / r.height
+    ? (dx > 0 ? "right" : "left")
+    : (dy > 0 ? "down" : "up");
+}
+
+/** 一个分栏格子：自己的标签栏 + 终端区（模型 = VS Code 的 editor group）。
+ *  受控视图——端口数据与生命周期在 App，本组件不持有。
+ *  TermView 在此直接渲染（Phase 2）；跨 group 搬 tab 的 scrollback 保留见 Phase 4（改 portal）。 */
+export function GroupView({
+  group,
+  focused,
+  aliasEditTab,
+  aliasOf,
+  onSwitchTab,
+  onCloseTab,
+  onRenameTab,
+  onCommitAlias,
+  onCancelAlias,
+  onFocusGroup,
+  onWrite,
+  onReady,
+  searchOpen,
+  activeTerm,
+  onCloseSearch,
+  onDragOverHalf,
+  onDragLeave,
+  onDropHalf,
+  onDropOnTabs,
+  dropHint,
+}: {
+  group: Group;
+  focused: boolean;
+  aliasEditTab: { port: string } | null;
+  aliasOf: (port: string) => string | undefined;
+  onSwitchTab: (port: string) => void;
+  onCloseTab: (port: string) => void;
+  onRenameTab: (port: string) => void;
+  onCommitAlias: (port: string, alias: string) => void;
+  onCancelAlias: () => void;
+  onFocusGroup: () => void;
+  onWrite: (port: string, data: string) => void;
+  onReady: (port: string, inst: TermInstance | null) => void;
+  searchOpen: boolean;
+  activeTerm: TermInstance | undefined;
+  onCloseSearch: () => void;
+  /** 拖拽悬停在 group 终端区：上报 groupId + 半区（高亮）。 */
+  onDragOverHalf: (groupId: string, half: PaneHalf) => void;
+  /** 拖拽离开 / 结束：清高亮。 */
+  onDragLeave: () => void;
+  /** 拖拽落到 group 终端区半区：创建新 group 并分裂。 */
+  onDropHalf: (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => void;
+  /** 当前拖拽高亮提示（{overGroupId, overHalf} | null）。 */
+  dropHint: { overGroupId: string; overHalf: PaneHalf } | null;
+  /** 拖 tab 到本 group 标签栏：迁移 port 归属到本 group。 */
+  onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string) => void;
+}) {
+  return (
+    <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
+      <div
+        className="group__tabs tab-bar"
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("text/x-port")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+          }
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          const raw = e.dataTransfer.getData("text/x-port");
+          if (raw) {
+            try {
+              const { port, src } = JSON.parse(raw) as { port: string; src: string };
+              onDropOnTabs(port, src, group.id);
+            } catch {
+              /* ignore */
+            }
+          }
+        }}
+      >
+        {group.ports.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
+        {group.ports.map((port) => {
+          const isActive = port === group.activePort;
+          const editingThis = aliasEditTab?.port === port;
+          return (
+            <div
+              key={port}
+              className="tab"
+              data-active={isActive}
+              data-editing={editingThis ? "true" : undefined}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/x-port", JSON.stringify({ port, src: group.id }));
+                e.dataTransfer.setData("text/plain", port); // 部分 webview 需 text/plain 才进 drop
+              }}
+              onDragEnd={onDragLeave}
+              onClick={() => {
+                if (!editingThis) onSwitchTab(port);
+              }}
+              onDoubleClick={() => onRenameTab(port)}
+              title={`切换 ${port}（双击改名）`}
+            >
+              <span className="tab__dot" />
+              <span className="tab__name">
+                {editingThis ? (
+                  <InlineAliasInput
+                    initial={aliasOf(port) ?? ""}
+                    placeholder={`为 ${port} 设置别名`}
+                    onCommit={(alias) => onCommitAlias(port, alias)}
+                    onCancel={onCancelAlias}
+                  />
+                ) : (
+                  <PortLabel name={port} alias={aliasOf(port)} />
+                )}
+              </span>
+              <span
+                className="tab__btn tab__btn--close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCloseTab(port);
+                }}
+                title={`关闭 ${port}`}
+              >
+                <IconClose />
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div
+        className="group__term term-area"
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          onDragOverHalf(group.id, dropHalfOf(e.clientX, e.clientY, e.currentTarget as HTMLElement));
+        }}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => {
+          e.preventDefault();
+          const raw = e.dataTransfer.getData("text/x-port");
+          if (raw) {
+            try {
+              const { port, src } = JSON.parse(raw) as { port: string; src: string };
+              onDropHalf(port, src, group.id, dropHalfOf(e.clientX, e.clientY, e.currentTarget as HTMLElement));
+            } catch {
+              /* ignore */
+            }
+          }
+          onDragLeave();
+        }}
+      >
+        {group.ports.map((port) => (
+          <TermView
+            key={port}
+            port={port}
+            visible={port === group.activePort}
+            focused={focused && port === group.activePort}
+            onWrite={onWrite}
+            onReady={(inst) => onReady(port, inst)}
+          />
+        ))}
+        {group.ports.length === 0 && (
+          <div className="term-empty">
+            <IconPlug className="term-empty__icon" />
+            <div>从左侧 PORTS 打开一个串口开始收发</div>
+          </div>
+        )}
+        {focused && searchOpen && activeTerm?.search && (
+          <SearchBar searchAddon={activeTerm.search} term={activeTerm.term} onClose={onCloseSearch} />
+        )}
+        {/* 拖拽落点四半区高亮 */}
+        {dropHint?.overGroupId === group.id && <div className="group__dropzone" data-half={dropHint.overHalf} />}
+      </div>
+    </div>
+  );
 }
 
 // ===== 终端内搜索（Ctrl+F）=====

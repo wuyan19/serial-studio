@@ -125,3 +125,27 @@ export interface KeyBinding {
 
 /** action → 绑定。 */
 export type ShortcutMap = Record<ActionId, KeyBinding>;
+
+// ===== 窗口分栏（editor group + 布局树） =====
+
+/** editor group：一个「标签栏 + 终端区」格子（模型 = VS Code 的 editor group）。
+ *  端口全局唯一归属一个 group（不扇出）：一个 port 只在一个 group 的 ports 里。 */
+export interface Group {
+  id: string;
+  /** 该 group 内的 tab（串口名），有序；端口全局唯一归属。 */
+  ports: string[];
+  /** 本 group 当前显示的端口（空串 = 无 tab）。 */
+  activePort: string;
+}
+
+/** 分栏方向：row=左右排列（主轴 X），col=上下排列（主轴 Y）。 */
+export type PaneDir = "row" | "col";
+
+/** 拖拽落点半区（决定分裂方向与侧）：left/right→row，up/down→col。 */
+export type PaneHalf = "up" | "down" | "left" | "right";
+
+/** 布局树节点（纯数据，可序列化、可单测）：叶子=一个 group，分裂=两子树 + 比例。
+ *  ratio ∈ (0,1)：children[0] 占比；分栏拖动（后续 Phase）只改 ratio。 */
+export type PaneNode =
+  | { type: "leaf"; groupId: string }
+  | { type: "split"; dir: PaneDir; ratio: number; children: [PaneNode, PaneNode] };

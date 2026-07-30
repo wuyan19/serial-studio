@@ -799,6 +799,62 @@ button {
   position: relative;
   min-height: 0;
 }
+
+/* ===== 分栏（editor group + 布局树） =====
+   每个 .group = 一个「标签栏(.group__tabs 复用 .tab-bar) + 终端区(.group__term 复用 .term-area)」格子。
+   .pane-split 递归拼成网格；.pane-split__child 用 inline flex 比例分配空间。 */
+.group {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid transparent;
+}
+.group[data-focused="true"] {
+  border-color: var(--rx);
+}
+/* 拖拽落点四半区高亮：半透明青色覆盖对应半区 */
+.group__dropzone {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: rgba(79, 214, 194, 0.18);
+  box-shadow: inset 0 0 0 2px var(--rx);
+}
+.group__dropzone[data-half="left"] {
+  right: 50%;
+}
+.group__dropzone[data-half="right"] {
+  left: 50%;
+}
+.group__dropzone[data-half="up"] {
+  bottom: 50%;
+}
+.group__dropzone[data-half="down"] {
+  top: 50%;
+}
+.group__tabs {
+  flex-shrink: 0; /* 标签栏不被压缩，终端区占剩余 */
+}
+.pane-split {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+.pane-split--row {
+  flex-direction: row;
+}
+.pane-split--col {
+  flex-direction: column;
+}
+.pane-split__child {
+  display: flex; /* 让子 .group / .pane-split 撑满本格 */
+  min-width: 0;
+  min-height: 0;
+}
 .term-empty {
   position: absolute;
   inset: 0;

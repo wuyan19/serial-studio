@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ActionId,
   ConnConfig,
+  Group,
   Macro,
   MacroResult,
+  PaneHalf,
+  PaneNode,
   PortInfo,
   Script,
   ScriptResult,
@@ -11,6 +14,7 @@ import type {
   SrvSettings,
   TermInstance,
 } from "./types";
+import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
 import {
   downloadJson,
   getRemoteFromUrl,
@@ -32,6 +36,7 @@ import {
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
+  GroupView,
   InlineAliasInput,
   MacroEditor,
   MacroPalette,
@@ -45,7 +50,6 @@ import {
   SerialConfigDialog,
   SettingsPanel,
   ShortcutsDialog,
-  TermView,
   validateMacro,
 } from "./components";
 import {
@@ -178,8 +182,15 @@ export default function App() {
   const [macroResult, setMacroResult] = useState<MacroResult | null>(null);
   const [connected, setConnected] = useState(false);
   const [openPorts, setOpenPorts] = useState<string[]>([]);
-  const [activePort, setActivePort] = useState("");
   const [portConfigs, setPortConfigs] = useState<Record<string, SerialConfig>>({});
+  /** editor-group 分栏：每个 group = 标签栏 + 终端区。端口唯一归属一个 group（不扇出）。
+   *  单 group（layout 单叶）时 openPorts == groups[g1].ports，行为同单视图。多 group 见后续 Phase。 */
+  const groupIdSeq = useRef(1);
+  const [groups, setGroups] = useState<Record<string, Group>>(() => ({ g1: { id: "g1", ports: [], activePort: "" } }));
+  const [layout, setLayout] = useState<PaneNode>(() => createRoot("g1"));
+  const [focusedGroupId, setFocusedGroupId] = useState("g1");
+  /** 拖拽分栏时的落点高亮（{overGroupId, overHalf} | null；onDragEnd/Leave 清）。 */
+  const [dropHint, setDropHint] = useState<{ overGroupId: string; overHalf: PaneHalf } | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingPort, setPendingPort] = useState<string | null>(null);
@@ -235,8 +246,35 @@ export default function App() {
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const importInputRef = useRef<HTMLInputElement>(null);
   const scriptImportInputRef = useRef<HTMLInputElement>(null);
+  const focusedGroupIdRef = useRef("g1");
+  focusedGroupIdRef.current = focusedGroupId;
+  /** 端口 → 所属 group 反查（每 render 重建；端口唯一归属一个 group）。 */
+  const groupOfPort: Map<string, string> = new Map();
+  for (const g of Object.values(groups)) for (const p of g.ports) groupOfPort.set(p, g.id);
+  /** 全局活动端口 = 聚焦 group 的活动端口（派生）。channel-strip / macro / 搜索等消费者零改动。 */
+  const activePort = groups[focusedGroupId]?.activePort ?? "";
   const activeRef = useRef("");
   activeRef.current = activePort;
+
+  // 焦点 group 被删（坍缩）→ 自愈回退到首个 leaf，保 channel-strip/macro 上下文不指向死 group
+  useEffect(() => {
+    const leaves = leafGroupIds(layout);
+    if (leaves.length && !leaves.includes(focusedGroupId)) setFocusedGroupId(leaves[0]);
+  }, [layout, focusedGroupId]);
+  // dev 不变量校验：INV-1 端口唯一归属、INV-3 layout 叶子集 == groups 键集
+  useEffect(() => {
+    if (!(import.meta as any).env?.DEV) return;
+    const seen = new Set<string>();
+    for (const g of Object.values(groups)) for (const p of g.ports) {
+      if (seen.has(p)) console.error("[INV-1] 端口同时在多个 group:", p);
+      seen.add(p);
+    }
+    const leaves = leafGroupIds(layout);
+    const gkeys = Object.keys(groups);
+    if (leaves.length !== gkeys.length || leaves.some((k) => !groups[k])) {
+      console.error("[INV-3] layout 叶子 != groups:", leaves, gkeys);
+    }
+  }, [groups, layout]);
   /** 快捷键处理器表：每 render 用最新闭包刷新；dispatch 经 ref 读，菜单/action 闭包不陈旧。
    *  Partial：terminal 作用域（zoom）不经此 dispatch（在 xterm handler 内自处理）。 */
   const handlersRef = useRef<Partial<Record<ActionId, (arg?: string) => void>>>({});
@@ -280,20 +318,8 @@ export default function App() {
         t.list();
       }),
       t.onPortClosed((port) => {
-        // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签和终端
-        setOpenPorts((prev) => {
-          const rest = prev.filter((p) => p !== port);
-          if (activeRef.current === port) setActivePort(rest[rest.length - 1] ?? "");
-          return rest;
-        });
-        setPortConfigs((prev) => {
-          if (!prev[port]) return prev;
-          const next = { ...prev };
-          delete next[port];
-          return next;
-        });
-        terminalsRef.current.delete(port);
-        activityRef.current.delete(port);
+        // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
+        prunePort(port);
         t.list();
       }),
       t.onHolders(() => {
@@ -445,7 +471,14 @@ export default function App() {
       if (!res) return undefined;
       // 成功占有（首开或附加）：创建本会话的终端标签，并记录端口实际配置供通道条展示
       setOpenPorts((prev) => (prev.includes(port) ? prev : [...prev, port]));
-      setActivePort(port);
+      // 进聚焦 group 并设为活动端口（端口唯一归属：openPort 是新开，此前不在任何 group）
+      const fg = focusedGroupIdRef.current;
+      setGroups((g) => {
+        const cur = g[fg];
+        if (!cur) return g;
+        const ports = cur.ports.includes(port) ? cur.ports : [...cur.ports, port];
+        return { ...g, [fg]: { ...cur, ports, activePort: port } };
+      });
       setPortConfigs((prev) => ({ ...prev, [port]: res.config }));
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置
@@ -486,23 +519,40 @@ export default function App() {
     }
   };
 
-  const closePort = (port: string) => {
-    // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
-    if (aliasEdit?.port === port) setAliasEdit(null);
-    transportRef.current?.close(port);
-    terminalsRef.current.delete(port);
-    setOpenPorts((prev) => {
-      const rest = prev.filter((p) => p !== port);
-      if (activeRef.current === port) setActivePort(rest[rest.length - 1] ?? "");
-      return rest;
-    });
+  /** 从分栏与端口清单移除端口（关端口共用：用户主动关 closePort + 远端被关 onPortClosed）。
+   *  所属 group 的 ports 移除 + activePort 回退；group 空（且非唯一根）→ 删 group + removeLeaf 坍缩，
+   *  focused 回退交给 effect 自愈。全用函数式 setState，transport effect 的 stale 闭包调用也安全。 */
+  const prunePort = (port: string) => {
+    const gid = groupOfPort.get(port);
+    setOpenPorts((prev) => prev.filter((p) => p !== port));
     setPortConfigs((prev) => {
       if (!prev[port]) return prev;
       const next = { ...prev };
       delete next[port];
       return next;
     });
+    terminalsRef.current.delete(port);
     activityRef.current.delete(port);
+    if (!gid) return; // 不在任何 group（异常）——上面已清端口清单/实例
+    setGroups((g) => {
+      const cur = g[gid];
+      if (!cur) return g;
+      const ports = cur.ports.filter((p) => p !== port);
+      if (ports.length > 0) return { ...g, [gid]: { ...cur, ports, activePort: cur.activePort === port ? ports[ports.length - 1] : cur.activePort } };
+      const next = { ...g };
+      delete next[gid]; // group 空 → 删 group（layout 坍缩见下）
+      return next;
+    });
+    // group 空（关的是该 group 唯一/末个端口）且非唯一根 → layout 坍缩
+    if ((groups[gid]?.ports.length ?? 0) <= 1) {
+      setLayout((tree) => (leafGroupIds(tree).length <= 1 ? tree : removeLeaf(tree, gid) ?? tree));
+    }
+  };
+  const closePort = (port: string) => {
+    // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
+    if (aliasEdit?.port === port) setAliasEdit(null);
+    transportRef.current?.close(port);
+    prunePort(port);
   };
 
   const forceClosePort = (port: string) => {
@@ -519,13 +569,21 @@ export default function App() {
     });
   };
 
-  const switchPort = (port: string) => setActivePort(port);
+  const switchPort = (port: string) => {
+    // 在聚焦 group 内切活动端口（activePort 由 groups[focused].activePort 派生）
+    const fg = focusedGroupIdRef.current;
+    setGroups((g) => {
+      const cur = g[fg];
+      if (!cur || !cur.ports.includes(port)) return g;
+      return { ...g, [fg]: { ...cur, activePort: port } };
+    });
+  };
 
   // 标签页切换快捷键：Ctrl+Alt+1..9 直达、Ctrl+Alt+←/→ 循环。复用 switchPort +
   // 聚焦新终端（TermView display 切换不销毁，term 实例常驻 terminalsRef，可立即 focus）。
   const focusTab = (name: string) => terminalsRef.current.get(name)?.term.focus();
   const cycleTab = (dir: 1 | -1) => {
-    const tabs = openPorts;
+    const tabs = groups[focusedGroupId]?.ports ?? [];
     if (tabs.length < 2) return;
     const i = tabs.indexOf(activePort);
     const next = tabs[((i < 0 ? 0 : i) + dir + tabs.length) % tabs.length]; // 循环 wrap
@@ -533,7 +591,7 @@ export default function App() {
     focusTab(next);
   };
   const selectTab = (n: number) => {
-    const tabs = openPorts;
+    const tabs = groups[focusedGroupId]?.ports ?? [];
     if (!tabs.length) return;
     const idx = n === 0 ? tabs.length - 1 : n - 1; // 1..9→第 n 个，0→末个（浏览器惯例）
     const t = tabs[idx]; // 越界 → undefined → no-op
@@ -541,6 +599,122 @@ export default function App() {
       switchPort(t);
       focusTab(t);
     }
+  };
+
+  /** 在指定 group 内切活动端口 + 聚焦该 group（点 group 内 tab 触发）。
+   *  与 switchPort（快捷键用，作用于聚焦 group）的区别：本函数接受 groupId 并聚焦它。 */
+  const switchTabInGroup = (groupId: string, port: string) => {
+    setGroups((g) => {
+      const cur = g[groupId];
+      if (!cur || !cur.ports.includes(port)) return g;
+      return { ...g, [groupId]: { ...cur, activePort: port } };
+    });
+    setFocusedGroupId(groupId);
+  };
+
+  /** 拖 tab 到某 group 终端区半区：新建 group（装该 port）并在目标 group 处分裂。
+   *  half=left/right→row，up/down→col；right/down→新 group 在后（side=end）。
+   *  port 从源 group 迁出；源 group 空（且非自分裂）→ removeLeaf 坍缩移除。
+   *  newId 在 updater 外生成（单次 ++，避 strict mode double-invoke updater 重复 ++）。 */
+  const dropHalf = (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => {
+    const src = groups[srcGroupId];
+    if (!src || !src.ports.includes(port)) return;
+    const newId = "g" + ++groupIdSeq.current;
+    const srcPorts = src.ports.filter((p) => p !== port);
+    const srcEmpty = srcPorts.length === 0;
+    setGroups((g) => {
+      const cur = g[srcGroupId];
+      if (!cur) return g;
+      const next: Record<string, Group> = { ...g, [newId]: { id: newId, ports: [port], activePort: port } };
+      if (srcEmpty && srcGroupId !== dstGroupId) delete next[srcGroupId];
+      else next[srcGroupId] = { ...cur, ports: srcPorts, activePort: cur.activePort === port ? srcPorts[srcPorts.length - 1] : cur.activePort };
+      return next;
+    });
+    setLayout((tree) => {
+      const dir = half === "left" || half === "right" ? "row" : "col";
+      const side = half === "right" || half === "down" ? "end" : "start";
+      let t: PaneNode = splitLeaf(tree, dstGroupId, { type: "leaf", groupId: newId }, dir, side);
+      if (srcEmpty && srcGroupId !== dstGroupId) t = removeLeaf(t, srcGroupId) ?? t;
+      return t;
+    });
+    setFocusedGroupId(newId);
+  };
+  const onDragOverHalf = (groupId: string, half: PaneHalf) => setDropHint({ overGroupId: groupId, overHalf: half });
+  const onPaneDragLeave = () => setDropHint(null);
+
+  /** 拖 tab 到另一 group 的标签栏：迁移 port 归属（源移除、目标追加 + 设其 activePort）。
+   *  源 group 空 → removeLeaf 坍缩。TermView 经 portal 不 remount → scrollback 保留。 */
+  const movePort = (port: string, srcGroupId: string, dstGroupId: string) => {
+    if (srcGroupId === dstGroupId) return;
+    const src = groups[srcGroupId];
+    const dst = groups[dstGroupId];
+    if (!src || !dst || !src.ports.includes(port) || dst.ports.includes(port)) return;
+    const srcEmpty = src.ports.length === 1; // 只有这一个 → 迁出后空
+    setGroups((g) => {
+      const s = g[srcGroupId];
+      const d = g[dstGroupId];
+      if (!s || !d || d.ports.includes(port)) return g;
+      const sp = s.ports.filter((p) => p !== port);
+      const next: Record<string, Group> = { ...g, [dstGroupId]: { ...d, ports: [...d.ports, port], activePort: port } };
+      if (sp.length === 0) delete next[srcGroupId];
+      else next[srcGroupId] = { ...s, ports: sp, activePort: s.activePort === port ? sp[sp.length - 1] : s.activePort };
+      return next;
+    });
+    if (srcEmpty) setLayout((tree) => removeLeaf(tree, srcGroupId) ?? tree);
+    setFocusedGroupId(dstGroupId);
+  };
+
+  /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例)，leaf→GroupView(标签栏+终端区)。 */
+  const renderPane = (node: PaneNode) => {
+    if (node.type === "split") {
+      return (
+        <div className={`pane-split pane-split--${node.dir}`}>
+          <div className="pane-split__child" style={{ flex: node.ratio }}>
+            {renderPane(node.children[0])}
+          </div>
+          <div className="pane-split__child" style={{ flex: 1 - node.ratio }}>
+            {renderPane(node.children[1])}
+          </div>
+        </div>
+      );
+    }
+    const g = groups[node.groupId];
+    if (!g) return null;
+    const isFocused = node.groupId === focusedGroupId;
+    return (
+      <GroupView
+        key={g.id}
+        group={g}
+        focused={isFocused}
+        aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
+        aliasOf={aliasOf}
+        onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
+        onCloseTab={closePort}
+        onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
+        onCommitAlias={commitAlias}
+        onCancelAlias={() => setAliasEdit(null)}
+        onFocusGroup={() => setFocusedGroupId(node.groupId)}
+        onWrite={(p, data) => {
+          touch(p, "tx");
+          transportRef.current?.write(p, data);
+        }}
+        onReady={(p, inst) => {
+          if (inst) terminalsRef.current.set(p, inst);
+          else terminalsRef.current.delete(p);
+        }}
+        searchOpen={searchOpen}
+        activeTerm={isFocused ? activeTerm : undefined}
+        onCloseSearch={() => {
+          setSearchOpen(false);
+          activeTerm?.term.focus();
+        }}
+        onDragOverHalf={onDragOverHalf}
+        onDragLeave={onPaneDragLeave}
+        onDropHalf={dropHalf}
+        dropHint={dropHint}
+        onDropOnTabs={movePort}
+      />
+    );
   };
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
@@ -1046,42 +1220,6 @@ export default function App() {
       )}
 
       <main className="main">
-        {/* Tab 栏 */}
-        <div className="tab-bar">
-          {openPorts.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
-          {openPorts.map((port) => {
-            const isActive = port === activePort;
-            const editingThis = aliasEdit?.port === port && aliasEdit?.where === "tab";
-            return (
-              <div key={port} className="tab" data-active={isActive} data-editing={editingThis ? "true" : undefined} onClick={() => { if (!editingThis) switchPort(port); }} onDoubleClick={() => setAliasEdit({ port, where: "tab" })} title={`切换 ${port}（双击改名）`}>
-                <span className="tab__dot" />
-                <span className="tab__name">
-                  {editingThis ? (
-                    <InlineAliasInput
-                      initial={aliasOf(port) ?? ""}
-                      placeholder={`为 ${port} 设置别名`}
-                      onCommit={(alias) => commitAlias(port, alias)}
-                      onCancel={() => setAliasEdit(null)}
-                    />
-                  ) : (
-                    <PortLabel name={port} alias={aliasOf(port)} />
-                  )}
-                </span>
-                <span
-                  className="tab__btn tab__btn--close"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closePort(port);
-                  }}
-                  title={`关闭 ${port}`}
-                >
-                  <IconClose />
-                </span>
-              </div>
-            );
-          })}
-        </div>
-
         {errorMsg && (
           <div className="banner banner--err">
             <IconAlert /> {errorMsg}
@@ -1101,40 +1239,8 @@ export default function App() {
           </div>
         )}
 
-        {/* 终端区：每个 openPort 一个 TermView，display 切换可见（不销毁） */}
-        <div className="term-area">
-          {openPorts.map((port) => (
-            <TermView
-              key={port}
-              port={port}
-              active={port === activePort}
-              onWrite={(p, data) => {
-                touch(p, "tx"); // 签名：发出字节 → TX 亮
-                transportRef.current?.write(p, data);
-              }}
-              onReady={(inst) => {
-                if (inst) terminalsRef.current.set(port, inst);
-                else terminalsRef.current.delete(port);
-              }}
-            />
-          ))}
-          {openPorts.length === 0 && (
-            <div className="term-empty">
-              <IconPlug className="term-empty__icon" />
-              <div>从左侧 PORTS 打开一个串口开始收发</div>
-            </div>
-          )}
-          {searchOpen && activeTerm?.search && (
-            <SearchBar
-              searchAddon={activeTerm.search}
-              term={activeTerm.term}
-              onClose={() => {
-                setSearchOpen(false);
-                activeTerm?.term.focus();
-              }}
-            />
-          )}
-        </div>
+        {/* 分栏布局：递归渲染 layout（split→flex，leaf→GroupView 含标签栏+终端区） */}
+        {renderPane(layout)}
 
         {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名）。置底 */}
         {activePort && activeConfig && (
