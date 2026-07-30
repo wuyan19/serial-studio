@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一引入
 import { FitAddon } from "@xterm/addon-fit";
@@ -172,18 +172,31 @@ export function TermView({
   port,
   visible,
   focused,
+  targetContainer,
   onWrite,
   onReady,
 }: {
   port: string;
   visible: boolean;
   focused: boolean;
+  /** 所属 group 的终端容器：本组件根 div 用 appendChild 挪进去（DOM reparent）。
+   *  跨 group 搬 tab 只换此目标、组件不重建、xterm 实例不动 → 保 scrollback。 */
+  targetContainer: HTMLElement | null;
   onWrite: (port: string, data: string) => void;
   onReady: (inst: TermInstance | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const termRef = useRef<Terminal | null>(null);
+
+  // DOM reparent：把本根 div 挪到所属 group 的终端容器。targetContainer 变（跨 group 搬）→ 重挪。
+  // 用 useLayoutEffect：在 paint 前挪，避免 term-pool 闪现；xterm 实例不重建，canvas 跟随根 div 移动。
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (el && targetContainer && el.parentNode !== targetContainer) {
+      targetContainer.appendChild(el);
+    }
+  }, [targetContainer]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -320,7 +333,8 @@ function dropHalfOf(clientX: number, clientY: number, el: HTMLElement): PaneHalf
 
 /** 一个分栏格子：自己的标签栏 + 终端区（模型 = VS Code 的 editor group）。
  *  受控视图——端口数据与生命周期在 App，本组件不持有。
- *  TermView 在此直接渲染（Phase 2）；跨 group 搬 tab 的 scrollback 保留见 Phase 4（改 portal）。 */
+ *  TermView 由 App 经 DOM reparent 挪入终端容器（不在此直渲染），跨 group 搬 tab 不重建、保 scrollback。
+ *  终端区拖拽用原生事件（reparent 后合成事件不冒泡到此容器）。 */
 export function GroupView({
   group,
   focused,
@@ -342,6 +356,7 @@ export function GroupView({
   onDropHalf,
   onDropOnTabs,
   dropHint,
+  termContainerRef,
 }: {
   group: Group;
   focused: boolean;
@@ -368,7 +383,48 @@ export function GroupView({
   dropHint: { overGroupId: string; overHalf: PaneHalf } | null;
   /** 拖 tab 到本 group 标签栏：迁移 port 归属到本 group。 */
   onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string) => void;
+  /** 终端容器 DOM 就绪/卸载上报（App 把 TermView 经 DOM reparent 挪入，跨 group 搬 tab 保 scrollback）。 */
+  termContainerRef: (el: HTMLDivElement | null) => void;
 }) {
+  const termRef = useRef<HTMLDivElement>(null);
+  // 拖拽回调走 ref：listener 只挂一次（[group.id]），避 prop 每渲染变化导致 stale
+  const dndRef = useRef({ onDragOverHalf, onDragLeave, onDropHalf });
+  dndRef.current = { onDragOverHalf, onDragLeave, onDropHalf };
+  useLayoutEffect(() => {
+    const el = termRef.current;
+    if (!el) return;
+    termContainerRef(el); // 容器就绪上报（卸载清），App 据此 reparent TermView
+    // 原生 DnD：reparent 后 TermView DOM 在此容器，但合成事件不冒泡到此（React 树父是 App/池），必须原生监听
+    const onOver = (ev: DragEvent) => {
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+      dndRef.current.onDragOverHalf(group.id, dropHalfOf(ev.clientX, ev.clientY, el));
+    };
+    const onLeave = () => dndRef.current.onDragLeave();
+    const onDropEv = (ev: DragEvent) => {
+      ev.preventDefault();
+      const raw = ev.dataTransfer?.getData("text/x-port") ?? "";
+      if (raw) {
+        try {
+          const { port, src } = JSON.parse(raw) as { port: string; src: string };
+          dndRef.current.onDropHalf(port, src, group.id, dropHalfOf(ev.clientX, ev.clientY, el));
+        } catch {
+          /* ignore */
+        }
+      }
+      dndRef.current.onDragLeave();
+    };
+    el.addEventListener("dragover", onOver);
+    el.addEventListener("dragleave", onLeave);
+    el.addEventListener("drop", onDropEv);
+    return () => {
+      termContainerRef(null);
+      el.removeEventListener("dragover", onOver);
+      el.removeEventListener("dragleave", onLeave);
+      el.removeEventListener("drop", onDropEv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.id]);
   return (
     <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
       <div
@@ -442,38 +498,9 @@ export function GroupView({
           );
         })}
       </div>
-      <div
-        className="group__term term-area"
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "move";
-          onDragOverHalf(group.id, dropHalfOf(e.clientX, e.clientY, e.currentTarget as HTMLElement));
-        }}
-        onDragLeave={onDragLeave}
-        onDrop={(e) => {
-          e.preventDefault();
-          const raw = e.dataTransfer.getData("text/x-port");
-          if (raw) {
-            try {
-              const { port, src } = JSON.parse(raw) as { port: string; src: string };
-              onDropHalf(port, src, group.id, dropHalfOf(e.clientX, e.clientY, e.currentTarget as HTMLElement));
-            } catch {
-              /* ignore */
-            }
-          }
-          onDragLeave();
-        }}
-      >
-        {group.ports.map((port) => (
-          <TermView
-            key={port}
-            port={port}
-            visible={port === group.activePort}
-            focused={focused && port === group.activePort}
-            onWrite={onWrite}
-            onReady={(inst) => onReady(port, inst)}
-          />
-        ))}
+      <div ref={termRef} className="group__term term-area">
+        {/* TermView 由 App 经 DOM reparent(appendChild)挪入此容器（不在本组件渲染），
+            跨 group 搬 tab 不重建、保 scrollback。拖拽用原生事件（见 useLayoutEffect）。 */}
         {group.ports.length === 0 && (
           <div className="term-empty">
             <IconPlug className="term-empty__icon" />

@@ -50,6 +50,7 @@ import {
   SerialConfigDialog,
   SettingsPanel,
   ShortcutsDialog,
+  TermView,
   validateMacro,
 } from "./components";
 import {
@@ -191,6 +192,17 @@ export default function App() {
   const [focusedGroupId, setFocusedGroupId] = useState("g1");
   /** 拖拽分栏时的落点高亮（{overGroupId, overHalf} | null；onDragEnd/Leave 清）。 */
   const [dropHint, setDropHint] = useState<{ overGroupId: string; overHalf: PaneHalf } | null>(null);
+  /** group 终端容器 DOM 集合（GroupView 上报）。TermView 经 DOM reparent 挪入对应容器，
+   *  跨 group 搬 tab 只换容器、组件不重建 → 保 scrollback。 */
+  const [groupContainers, setGroupContainers] = useState<Map<string, HTMLDivElement>>(new Map());
+  const setGroupContainer = useCallback((groupId: string, el: HTMLDivElement | null) => {
+    setGroupContainers((prev) => {
+      const m = new Map(prev);
+      if (el) m.set(groupId, el);
+      else m.delete(groupId);
+      return m;
+    });
+  }, []);
   const [errorMsg, setErrorMsg] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingPort, setPendingPort] = useState<string | null>(null);
@@ -713,6 +725,7 @@ export default function App() {
         onDropHalf={dropHalf}
         dropHint={dropHint}
         onDropOnTabs={movePort}
+        termContainerRef={(el) => setGroupContainer(node.groupId, el)}
       />
     );
   };
@@ -1241,6 +1254,31 @@ export default function App() {
 
         {/* 分栏布局：递归渲染 layout（split→flex，leaf→GroupView 含标签栏+终端区） */}
         {renderPane(layout)}
+        {/* TermView 实例池：固定渲染于此（offscreen 隐藏），DOM 由 TermView 经 appendChild
+            挪入所属 group 的终端容器（DOM reparent）。跨 group 搬 tab 只换容器、组件不重建 → 保 scrollback。 */}
+        <div className="term-pool" aria-hidden>
+          {openPorts.map((port) => {
+            const gid = groupOfPort.get(port);
+            const g = gid ? groups[gid] : undefined;
+            return (
+              <TermView
+                key={port}
+                port={port}
+                targetContainer={gid ? groupContainers.get(gid) ?? null : null}
+                visible={!!g && g.activePort === port}
+                focused={!!g && gid === focusedGroupId && g.activePort === port}
+                onWrite={(p, data) => {
+                  touch(p, "tx");
+                  transportRef.current?.write(p, data);
+                }}
+                onReady={(inst) => {
+                  if (inst) terminalsRef.current.set(port, inst);
+                  else terminalsRef.current.delete(port);
+                }}
+              />
+            );
+          })}
+        </div>
 
         {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名）。置底 */}
         {activePort && activeConfig && (

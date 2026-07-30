@@ -803,6 +803,20 @@ button {
 /* ===== 分栏（editor group + 布局树） =====
    每个 .group = 一个「标签栏(.group__tabs 复用 .tab-bar) + 终端区(.group__term 复用 .term-area)」格子。
    .pane-split 递归拼成网格；.pane-split__child 用 inline flex 比例分配空间。 */
+/* TermView 实例池：固定渲染于此（offscreen 隐藏），DOM 由 TermView appendChild 挪入所属 group 终端容器。
+   有尺寸（xterm open 需容器有尺寸），offscreen 不可见；TermView 挪走后此池空。 */
+.term-pool {
+  position: absolute;
+  left: -99999px;
+  top: 0;
+  width: 100px;
+  height: 30px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
 .group {
   display: flex;
   flex-direction: column;
