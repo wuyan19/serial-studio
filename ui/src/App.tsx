@@ -551,8 +551,11 @@ export default function App() {
       if (!cur) return g;
       const ports = cur.ports.filter((p) => p !== port);
       if (ports.length > 0) return { ...g, [gid]: { ...cur, ports, activePort: cur.activePort === port ? ports[ports.length - 1] : cur.activePort } };
+      // group 空：唯一根保留为空 group（承接下次 openPort，否则 layout 仍指向它、focused 也指向它，
+      // 重开端口进不去 → 端口在线却不显示）；多 group 才删（layout 坍缩见下）
+      if (Object.keys(g).length <= 1) return { ...g, [gid]: { ...cur, ports: [], activePort: "" } };
       const next = { ...g };
-      delete next[gid]; // group 空 → 删 group（layout 坍缩见下）
+      delete next[gid];
       return next;
     });
     // group 空（关的是该 group 唯一/末个端口）且非唯一根 → layout 坍缩
@@ -631,6 +634,8 @@ export default function App() {
   const dropHalf = (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => {
     const src = groups[srcGroupId];
     if (!src || !src.ports.includes(port)) return;
+    // 拖自己唯一 tab 到自己半区：结果只是空 group + 单 tab group，无分栏意义，跳过（也避免产生空格子）
+    if (srcGroupId === dstGroupId && src.ports.length === 1) return;
     const newId = "g" + ++groupIdSeq.current;
     const srcPorts = src.ports.filter((p) => p !== port);
     const srcEmpty = srcPorts.length === 0;

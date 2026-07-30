@@ -196,6 +196,13 @@ export function TermView({
     if (el && targetContainer && el.parentNode !== targetContainer) {
       targetContainer.appendChild(el);
     }
+    return () => {
+      // 卸载（或换 target 重 reparent）前把根 div 移回 term-pool：React 按 fiber 记忆的位置
+      // (term-pool) removeChild，若此时 DOM 在 group 容器里会找不到节点 → 崩溃白屏。先归位再删。
+      const el2 = containerRef.current;
+      const pool = document.querySelector(".term-pool");
+      if (el2 && pool && el2.parentNode !== pool) pool.appendChild(el2);
+    };
   }, [targetContainer]);
 
   useEffect(() => {
@@ -316,7 +323,7 @@ export function TermView({
     return () => ro.disconnect();
   }, [visible]);
 
-  return <div ref={containerRef} style={{ position: "absolute", inset: 0, display: visible ? "block" : "none" }} />;
+  return <div ref={containerRef} className="termview-root" style={{ position: "absolute", inset: 0, display: visible ? "block" : "none" }} />;
 }
 
 // ===== editor group（一个「标签栏 + 终端区」分栏格子） =====
@@ -388,12 +395,15 @@ export function GroupView({
 }) {
   const termRef = useRef<HTMLDivElement>(null);
   // 拖拽回调走 ref：listener 只挂一次（[group.id]），避 prop 每渲染变化导致 stale
-  const dndRef = useRef({ onDragOverHalf, onDragLeave, onDropHalf });
-  dndRef.current = { onDragOverHalf, onDragLeave, onDropHalf };
+  const dndRef = useRef({ onDragOverHalf, onDragLeave, onDropHalf, onFocusGroup });
+  dndRef.current = { onDragOverHalf, onDragLeave, onDropHalf, onFocusGroup };
   useLayoutEffect(() => {
     const el = termRef.current;
     if (!el) return;
     termContainerRef(el); // 容器就绪上报（卸载清），App 据此 reparent TermView
+    // 点终端区聚焦本 group：reparent 后 TermView 的合成 mousedown 不冒泡到此（同 DnD），用原生监听
+    const onDown = () => dndRef.current.onFocusGroup();
+    el.addEventListener("mousedown", onDown);
     // 原生 DnD：reparent 后 TermView DOM 在此容器，但合成事件不冒泡到此（React 树父是 App/池），必须原生监听
     const onOver = (ev: DragEvent) => {
       ev.preventDefault();
@@ -419,6 +429,11 @@ export function GroupView({
     el.addEventListener("drop", onDropEv);
     return () => {
       termContainerRef(null);
+      // 卸载前把 reparent 进来的 TermView 根 div 移回 term-pool：否则本容器删除会带走它们，
+      // React 随后卸载 TermView 时 DOM 已不在预期父节点 → 崩溃白屏
+      const pool = document.querySelector(".term-pool");
+      if (pool) el.querySelectorAll<HTMLElement>(".termview-root").forEach((t) => pool.appendChild(t));
+      el.removeEventListener("mousedown", onDown);
       el.removeEventListener("dragover", onOver);
       el.removeEventListener("dragleave", onLeave);
       el.removeEventListener("drop", onDropEv);

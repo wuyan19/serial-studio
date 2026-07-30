@@ -146,10 +146,10 @@ async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> R
     let title = format!("Serial Studio · 远程 {}:{}", host, port);
     let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
         .title(title)
-        .inner_size(900.0, 640.0);
-    // drag_and_drop 仅 Windows 提供；macOS/Linux 无此方法，cfg 限到 Windows 保留原行为。
-    #[cfg(target_os = "windows")]
-    let builder = builder.drag_and_drop(false);
+        .inner_size(900.0, 640.0)
+        // 关掉 webview 的 drag-drop 拦截：否则 Tauri 吃掉 drag 事件，网页里的 HTML5 拖拽
+        // （分栏拖 tab）不工作。等效主窗口 tauri.conf 的 dragDropEnabled:false。
+        .disable_drag_drop_handler();
     builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }
