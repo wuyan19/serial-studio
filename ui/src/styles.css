@@ -373,7 +373,7 @@ button {
   width: 14px;
   height: 14px;
 }
-/* 别名编辑（铅笔）overlay：所有端口都有，hover 才显现。
+/* 别名编辑（铅笔）overlay：所有端口长显（默认淡色，悬停强调），不再依赖行 hover。
    与强制关闭同区——有 force 时左移让位（force 在最右，edit 在其左）。 */
 .port-item__edit {
   position: absolute;
@@ -392,13 +392,7 @@ button {
   color: var(--ink-faint);
   cursor: pointer;
   z-index: 1;
-  opacity: 0;
-  pointer-events: none;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
-}
-.port-item-row:hover .port-item__edit {
-  opacity: 1;
-  pointer-events: auto;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .port-item-row[data-force="true"] .port-item__edit {
   right: 30px;
@@ -410,6 +404,47 @@ button {
 .port-item__edit svg {
   width: 14px;
   height: 14px;
+}
+
+/* inline 别名输入（端口行铅笔 / tab 双击触发，原地替换 PortLabel）。
+   轻量、融入容器：仅 rx 描边提示「正在编辑」。 */
+.alias-inline {
+  width: 100%;
+  min-width: 0;
+  background: var(--term-bg);
+  color: var(--ink);
+  border: 1px solid var(--rx);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: inherit;
+  line-height: 1.2;
+  outline: none;
+}
+/* 端口行编辑态：放开 name 的裁剪，否则输入框被 overflow:hidden 切掉。 */
+.port-item-row[data-editing="true"] .port-item__name {
+  overflow: visible;
+}
+/* 编辑态：隐藏右侧铅笔/在线人数/强制关闭，让 input 独占整行。 */
+.port-item-row[data-editing="true"] .port-item__edit,
+.port-item-row[data-editing="true"] .port-item__holders,
+.port-item-row[data-editing="true"] .port-item__force {
+  display: none;
+}
+/* 编辑态：收回为 badge/force 预留的右内边距，input 占满整行。 */
+.port-item-row[data-editing="true"] .port-item {
+  padding-right: 9px;
+}
+/* tab 编辑态：name 撑开容纳 input（默认按内容宽，input 无宽度依据）。 */
+.tab[data-editing="true"] .tab__name {
+  flex: 1;
+  min-width: 120px;
+}
+/* .port-item 由 button 改 div（为容纳 input）：补键盘聚焦反馈。 */
+.port-item:focus-visible {
+  background: var(--surface-2);
+  color: var(--ink);
+  outline: none;
 }
 .port-item__dot {
   width: 7px;

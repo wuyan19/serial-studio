@@ -29,10 +29,10 @@ import { LocalTransport, RemoteTransport, type Transport } from "./transport";
 import {
   AboutDialog,
   ActivityIcon,
-  AliasDialog,
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
+  InlineAliasInput,
   MacroEditor,
   MacroPalette,
   ScriptPalette,
@@ -218,8 +218,11 @@ export default function App() {
     tone?: "primary" | "danger";
     onConfirm: () => void;
   } | null>(null);
-  /** 正在编辑别名的端口（null = 关闭别名对话框）。 */
-  const [aliasEditPort, setAliasEditPort] = useState<string | null>(null);
+  /** 正在编辑别名的端口 + 触发位置（null = 未编辑）。
+   *  where 必要：打开端口同时在「端口列表」和「tab 栏」两处出现，若都只按 port 判定，
+   *  两处会各挂一个 InlineAliasInput 互抢焦点、随即互触 blur 全部关闭（表现为进不去编辑态）。
+   *  where 把编辑态钉在触发处，杜绝两个 input 并存。 */
+  const [aliasEdit, setAliasEdit] = useState<{ port: string; where: "list" | "tab" } | null>(null);
   /** 宏批量导出对话框是否打开。 */
   const [exportMacrosOpen, setExportMacrosOpen] = useState(false);
   const [exportScriptsOpen, setExportScriptsOpen] = useState(false);
@@ -484,6 +487,8 @@ export default function App() {
   };
 
   const closePort = (port: string) => {
+    // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
+    if (aliasEdit?.port === port) setAliasEdit(null);
     transportRef.current?.close(port);
     terminalsRef.current.delete(port);
     setOpenPorts((prev) => {
@@ -755,7 +760,7 @@ export default function App() {
 
   /** 提交别名：写 ports.json + 刷新列表使别名立即显示。空串 = 清除。 */
   const commitAlias = async (port: string, alias: string) => {
-    setAliasEditPort(null);
+    setAliasEdit(null);
     try {
       await transportRef.current?.setAlias(port, alias);
       refreshPorts();
@@ -799,7 +804,7 @@ export default function App() {
     aboutOpen ||
     remoteOpen ||
     pendingPort ||
-    aliasEditPort ||
+    aliasEdit ||
     exportMacrosOpen ||
     confirmState ||
     editing ||
@@ -876,22 +881,44 @@ export default function App() {
               {ports.length === 0 && <p className="sidebar__empty">无可用端口</p>}
               {ports.map((p) => {
                 const isActive = p.name === activePort;
+                const editingThis = aliasEdit?.port === p.name && aliasEdit?.where === "list";
                 return (
-                  <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={isLocal && p.opened ? "true" : undefined}>
-                    <button
+                  <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={isLocal && p.opened ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
+                    <div
                       className="port-item"
-                      onClick={() => triggerPort(p.name)}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        if (!editingThis) triggerPort(p.name);
+                      }}
+                      onKeyDown={(e) => {
+                        if (editingThis) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          triggerPort(p.name);
+                        }
+                      }}
                     >
                       <span className={`port-item__dot${p.opened ? " open" : ""}`} />
                       <span className="port-item__name">
-                        <PortLabel name={p.name} alias={p.alias} />
+                        {editingThis ? (
+                          <InlineAliasInput
+                            initial={p.alias ?? ""}
+                            placeholder={`为 ${p.name} 设置别名`}
+                            onCommit={(alias) => commitAlias(p.name, alias)}
+                            onCancel={() => setAliasEdit(null)}
+                          />
+                        ) : (
+                          <PortLabel name={p.name} alias={p.alias} />
+                        )}
                       </span>
                       {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
-                    </button>
+                    </div>
                     <button
                       className="port-item__edit"
                       title={`设置 ${p.name} 别名`}
-                      onClick={() => setAliasEditPort(p.name)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => setAliasEdit({ port: p.name, where: "list" })}
                     >
                       <IconEdit />
                     </button>
@@ -1024,11 +1051,21 @@ export default function App() {
           {openPorts.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
           {openPorts.map((port) => {
             const isActive = port === activePort;
+            const editingThis = aliasEdit?.port === port && aliasEdit?.where === "tab";
             return (
-              <div key={port} className="tab" data-active={isActive} onClick={() => switchPort(port)}>
+              <div key={port} className="tab" data-active={isActive} data-editing={editingThis ? "true" : undefined} onClick={() => { if (!editingThis) switchPort(port); }} onDoubleClick={() => setAliasEdit({ port, where: "tab" })} title={`切换 ${port}（双击改名）`}>
                 <span className="tab__dot" />
                 <span className="tab__name">
-                  <PortLabel name={port} alias={aliasOf(port)} />
+                  {editingThis ? (
+                    <InlineAliasInput
+                      initial={aliasOf(port) ?? ""}
+                      placeholder={`为 ${port} 设置别名`}
+                      onCommit={(alias) => commitAlias(port, alias)}
+                      onCancel={() => setAliasEdit(null)}
+                    />
+                  ) : (
+                    <PortLabel name={port} alias={aliasOf(port)} />
+                  )}
                 </span>
                 <span
                   className="tab__btn tab__btn--close"
@@ -1129,16 +1166,6 @@ export default function App() {
           onChange={setSerialConfig}
           onConfirm={confirmOpen}
           onCancel={() => setPendingPort(null)}
-        />
-      )}
-
-      {/* 别名编辑对话框 */}
-      {aliasEditPort && (
-        <AliasDialog
-          port={aliasEditPort}
-          initial={aliasOf(aliasEditPort) ?? ""}
-          onConfirm={(alias) => commitAlias(aliasEditPort, alias)}
-          onCancel={() => setAliasEditPort(null)}
         />
       )}
 

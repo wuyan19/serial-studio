@@ -39,7 +39,6 @@ import {
   IconChevronUp,
   IconClose,
   IconCopy,
-  IconEdit,
   IconExport,
   IconGear,
   IconGlobe,
@@ -557,67 +556,75 @@ export function SerialConfigDialog({
   );
 }
 
-// ===== 别名编辑对话框 =====
+// ===== 别名 inline 编辑 =====
 
-/** 设置端口别名的小对话框（复用 ConfirmDialog 风格）。空串提交 = 清除别名。
- *  Enter 确定 / Esc 取消；遮罩不关闭（同其它对话框，防误触）。 */
-export function AliasDialog({
-  port,
-  initial = "",
-  onConfirm,
+/** 原地（inline）编辑端口别名：替换 PortLabel 显示，不弹模态。
+ *  挂载即聚焦 + 全选；Enter / blur 提交，Esc 取消。值未变则仅关闭、不写盘。
+ *  与旧 AliasDialog 同语义（空串=清除别名），键盘逻辑搬自其 keydown。
+ *  调用方做「编辑态」条件渲染：editing ? <InlineAliasInput/> : <PortLabel/>。 */
+export function InlineAliasInput({
+  initial,
+  placeholder,
+  onCommit,
   onCancel,
 }: {
-  port: string;
-  initial?: string;
-  onConfirm: (alias: string) => void;
+  initial: string;
+  placeholder?: string;
+  onCommit: (alias: string) => void;
   onCancel: () => void;
 }) {
-  const [alias, setAlias] = useState(initial);
+  const [value, setValue] = useState(initial);
   const inputRef = useRef<HTMLInputElement>(null);
+  const doneRef = useRef(false); // 防 Enter/Esc 与 blur 重复收尾
+  const armedRef = useRef(false); // 聚焦稳定后才响应 blur，跳过挂载/事件链里的误 blur
+
   useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
+    const el = inputRef.current;
+    if (!el) return;
+    // 下一帧再聚焦：点铅笔/双击的事件链未走完时立即 focus() 易被随后的焦点归位打断
+    const id = requestAnimationFrame(() => {
+      el.focus();
+      el.select();
+      armedRef.current = true;
+    });
+    return () => cancelAnimationFrame(id);
   }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        onConfirm(alias);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [alias, onConfirm, onCancel]);
+
+  const finish = (mode: "commit" | "cancel") => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    if (mode === "cancel") {
+      onCancel();
+      return;
+    }
+    const trimmed = value.trim();
+    // 未改值：仅关闭，不写盘 / 不触发 meta 广播
+    if (trimmed === initial.trim()) onCancel();
+    else onCommit(trimmed);
+  };
+
   return (
-    <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
-        <h3 className="dialog__title">
-          <IconEdit /> ALIAS
-        </h3>
-        <div className="dialog__sub">{port}</div>
-        <ConfigRow label="别名">
-          <input
-            ref={inputRef}
-            value={alias}
-            onChange={(e) => setAlias(e.target.value)}
-            placeholder="可选，描述此端口连接的设备"
-            className="field"
-          />
-        </ConfigRow>
-        <p className="dialog__hint">留空清除别名。同名别名会从其它端口转移到此端口。</p>
-        <div className="btn-row">
-          <button className="btn btn--ghost" onClick={onCancel}>
-            取消
-          </button>
-          <button className="btn btn--primary" onClick={() => onConfirm(alias)}>
-            确定
-          </button>
-        </div>
-      </div>
-    </div>
+    <input
+      ref={inputRef}
+      className="alias-inline"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      placeholder={placeholder}
+      // 点击不冒泡到 .port-item / .tab，避免编辑中触发切换端口
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          finish("commit");
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          finish("cancel");
+        }
+      }}
+      onBlur={() => {
+        if (armedRef.current) finish("commit");
+      }}
+    />
   );
 }
 
