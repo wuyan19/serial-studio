@@ -227,6 +227,12 @@ export default function App() {
   const [editorScriptError, setEditorScriptError] = useState("");
   type ActivityView = "ports" | "macros" | "scripts" | null;
   const [activity, setActivity] = useState<ActivityView>(null);
+  /** 侧栏宽度(可拖动调整,localStorage 持久化,clamp 180–480)。 */
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = Number(localStorage.getItem("sidebar-width"));
+    return saved >= 180 && saved <= 480 ? saved : 240;
+  });
+  const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
@@ -408,6 +414,11 @@ export default function App() {
       setScriptEnabled(enableScripting);
     }).catch(() => {});
   }, []);
+
+  // 侧栏宽度持久化(随用户走,localStorage)
+  useEffect(() => {
+    localStorage.setItem("sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
 
   // 服务状态：本地服务启动失败（端口被占用等）时显示持久横幅。远程/Web 无本地服务。
   // start 是异步的：监听 service-status 事件 + 2s 后兜底查一次（避免“还在启动中”误报）。
@@ -1085,7 +1096,8 @@ export default function App() {
 
       {/* 次侧栏：当前活动项内容，收起时不占位 */}
       {activity && (
-        <aside className="sidebar">
+        <>
+        <aside className="sidebar" style={{ width: sidebarWidth }}>
           {(!isTauri() || isRemote) && (
             <div className="sidebar__conn">
               <span className={`dot ${connected ? "on" : "off"}`} />
@@ -1278,6 +1290,32 @@ export default function App() {
             </>
           )}
         </aside>
+        <div
+          className="sidebar-resizer"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            sidebarDrag.current = { x: e.clientX, w: sidebarWidth };
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            const onMove = (ev: MouseEvent) => {
+              const ds = sidebarDrag.current;
+              if (!ds) return;
+              setSidebarWidth(Math.max(180, Math.min(480, ds.w + (ev.clientX - ds.x))));
+            };
+            const onUp = () => {
+              sidebarDrag.current = null;
+              document.body.style.cursor = "";
+              document.body.style.userSelect = "";
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+            };
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+          }}
+          onDoubleClick={() => setSidebarWidth(240)}
+          title="拖动调整宽度(双击重置)"
+        />
+        </>
       )}
 
       <main className="main">

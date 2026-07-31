@@ -216,6 +216,18 @@ button {
   display: flex;
   flex-direction: column;
 }
+/* 侧栏拖动调宽条(贴 sidebar 右缘;width 由 inline style 驱动) */
+.sidebar-resizer {
+  flex-shrink: 0;
+  width: 4px;
+  margin-left: -1px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 5;
+}
+.sidebar-resizer:hover {
+  background: var(--rx, var(--hairline));
+}
 .sidebar__conn {
   display: flex;
   align-items: center;
