@@ -116,7 +116,7 @@ export function PortLabel({ name, alias }: { name: string; alias?: string }) {
 /** xterm 主题：仪器风——teal(RX) 光标、graphite 画布，ANSI 色映射到信号调色板。 */
 const TERM_THEME: ITheme = {
   background: "#0e1014",
-  foreground: "#c9d2e0",
+  foreground: "#dde5ef",
   cursor: "#4fd6c2",
   cursorAccent: "#0e1014",
   selectionBackground: "rgba(79,214,194,0.22)",
@@ -144,7 +144,7 @@ const MONO_STACK =
 /** 亮色 xterm 配色：象牙底 + 深石墨字 + 深青光标。canvas 不吃 CSS 变量，故单独定义。 */
 const TERM_THEME_LIGHT: ITheme = {
   background: "#fbfaf5",
-  foreground: "#3a3d44",
+  foreground: "#2c2f36",
   cursor: "#0c7f73",
   cursorAccent: "#fbfaf5",
   selectionBackground: "rgba(12,127,115,0.18)",
@@ -162,7 +162,7 @@ const TERM_THEME_LIGHT: ITheme = {
   brightMagenta: "#a85aa6",
   cyan: "#0c7f73",
   brightCyan: "#0d9b8a",
-  white: "#3a3d44",
+  white: "#2c2f36",
   brightWhite: "#23262b",
 };
 
@@ -222,6 +222,7 @@ export function TermView({
       // 向上滚动(离开底部)后输入不再自动跳回底部：xterm 默认 scrollOnUserInput=true，
       // 会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新。看最新输出用滚轮滚到底 / ⌘+End。
       scrollOnUserInput: false,
+      minimumContrastRatio: 4.5, // WCAG AA：兜底所有 ANSI 着色文本对比度（提纯前景之外的第二道闸）
     });
     const fit = new FitAddon();
     const search = new SearchAddon();
