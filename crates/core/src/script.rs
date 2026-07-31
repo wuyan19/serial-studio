@@ -9,7 +9,7 @@
 //! - 内层:[`run_script_inner`] 的 `tokio::time::timeout` + QuickJS interrupt handler(在脚本线程)。
 //! - 外层:[`run_script_with_timeout`] 的 `oneshot` 超时(主线程,兜底防脚本线程卡死)。
 //!
-//! 暴露的全局 async 函数:send / expect / clear / sleep。脚本被包成 `(async () => { ... })()` 求值。
+//! 暴露的全局 async 函数:send / expect / clear / sleep。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
 //!
 //! v1 限制(后续完善):
 //! - 串口原语失败用 tracing 记录、不抛 JS 异常(rquickjs `Async` 闭包的 `Ctx<'js>` 生命周期短于
@@ -140,15 +140,15 @@ async fn run_script_inner(
             .async_with(async |ctx| {
                 let globals = ctx.globals();
 
-                // send(data):text + 按端口 line_ending 自动追加换行
+                // send(data, [port]):text + 按端口 line_ending 自动追加换行。port 缺省=脚本绑定端口。
                 {
                     let mgr = manager.clone();
-                    let p = port.clone();
+                    let dp = port.clone();
                     globals.set(
                         "send",
-                        Func::from(Async(move |data: String| {
+                        Func::from(Async(move |data: String, port: Option<String>| {
                             let mgr = mgr.clone();
-                            let p = p.clone();
+                            let p = port.unwrap_or_else(|| dp.clone());
                             async move {
                                 if let Err(e) = mgr.send(&p, &data, "text", true).await {
                                     tracing::error!("脚本 send 失败: {}", e);
@@ -159,15 +159,15 @@ async fn run_script_inner(
                     ).map_err(|e| e.to_string())?;
                 }
 
-                // expect(pattern, timeout_ms):返回首条正则匹配行(无匹配返回空串)
+                // expect(pattern, timeout_ms, [port]):返回首条正则匹配行(无匹配返回空串)。port 缺省=脚本绑定端口。
                 {
                     let mgr = manager.clone();
-                    let p = port.clone();
+                    let dp = port.clone();
                     globals.set(
                         "expect",
-                        Func::from(Async(move |pattern: String, timeout_ms: u64| {
+                        Func::from(Async(move |pattern: String, timeout_ms: u64, port: Option<String>| {
                             let mgr = mgr.clone();
-                            let p = p.clone();
+                            let p = port.unwrap_or_else(|| dp.clone());
                             async move {
                                 match mgr.grep_buffer(&p, &pattern, timeout_ms).await {
                                     Ok(lines) => Ok::<_, rquickjs::Error>(
@@ -183,15 +183,15 @@ async fn run_script_inner(
                     ).map_err(|e| e.to_string())?;
                 }
 
-                // clear():清空接收缓冲区
+                // clear([port]):清空接收缓冲区。port 缺省=脚本绑定端口。
                 {
                     let mgr = manager.clone();
-                    let p = port.clone();
+                    let dp = port.clone();
                     globals.set(
                         "clear",
-                        Func::from(Async(move || {
+                        Func::from(Async(move |port: Option<String>| {
                             let mgr = mgr.clone();
-                            let p = p.clone();
+                            let p = port.unwrap_or_else(|| dp.clone());
                             async move {
                                 if let Err(e) = mgr.clear_buffer(&p).await {
                                     tracing::error!("脚本 clear 失败: {}", e);
@@ -210,6 +210,15 @@ async fn run_script_inner(
                         Ok::<_, rquickjs::Error>(())
                     })),
                 ).map_err(|e| e.to_string())?;
+
+                // 可选 port 的 JS 适配:rquickjs 元组 arity 严格——JS 调 send("x") 少传参数时报
+                // "1 argument(s) while 2 where expected",不会把缺失参数填 undefined→None。
+                // 故在 JS 层把缺省 port 补成 null(Rust Option<String> 把 null→None),
+                // 让 send/expect/clear 支持缺省 port。sleep 无 port 参数,不包装。
+                ctx.eval::<(), _>(r#"const __send=globalThis.send;globalThis.send=async(d,p)=>__send(d,typeof p==="undefined"?null:p);
+const __expect=globalThis.expect;globalThis.expect=async(t,m,p)=>__expect(t,m,typeof p==="undefined"?null:p);
+const __clear=globalThis.clear;globalThis.clear=async(p)=>__clear(typeof p==="undefined"?null:p);"#)
+                    .map_err(|e| e.to_string())?;
 
                 // JS 异常 → 可读消息:必须在 ctx 还活着时用 .catch(&ctx) 捕获并提取 message。
                 // 否则异常对象跨 async_with 边界带不出,e.to_string() 只剩 "Exception generated
@@ -325,5 +334,24 @@ mod tests {
             Err(ScriptError::Script(msg)) => assert_eq!(msg, "test 123"),
             other => panic!("期望 Script(\"test 123\"),得到 {:?}", other),
         }
+    }
+
+    /// 可选 port 尾参:rquickjs 对 `Option<String>` 缺省/显式均不抛 arity 异常(防行为回退)。
+    /// 端口未开时 send/expect 失败被 tracing 吞、不影响 Ok,故仅断言脚本正常完成。
+    #[tokio::test]
+    async fn optional_port_param_arity() {
+        // send 缺省 port(默认=绑定端口 COM0,未开则 send 失败被吞,仍 Ok)
+        let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Duration::from_secs(5)).await;
+        assert!(r.is_ok(), "send(data) 缺省 port 应 Ok: {:?}", r);
+        // send 显式 port
+        let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Duration::from_secs(5)).await;
+        assert!(r2.is_ok(), "send(data, port) 显式 port 应 Ok: {:?}", r2);
+        // expect 三参(端口未开 → grep_buffer 报错被吞 → 返回空串 → 不 throw)
+        let code = r#"const v = await expect("OK", 50, "COM9"); if (v !== "") throw new Error("未开端口应返回空串,得到: " + v);"#;
+        let r3 = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5)).await;
+        assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
+        // clear 显式 port
+        let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Duration::from_secs(5)).await;
+        assert!(r4.is_ok(), "clear(port) 应 Ok: {:?}", r4);
     }
 }

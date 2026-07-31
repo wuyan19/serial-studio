@@ -15,10 +15,12 @@ Serial Studio 支持用 **JavaScript** 写串口自动化脚本。脚本嵌入 Q
 
 | 调用 | 作用 | 返回 |
 |---|---|---|
-| `await send(data)` | 发送文本 `data`,自动按端口配置追加换行(`\n`/`\r\n`) | 无(总是成功) |
-| `await expect(pattern, timeout_ms)` | 在接收缓冲里用正则 `pattern` 匹配**整行**,返回**首条匹配行** | 匹配到的字符串;**超时无匹配返回空串 `""`** |
-| `await clear()` | 清空接收缓冲(丢弃历史数据) | 无 |
+| `await send(data, [port])` | 发送文本 `data`,自动按端口配置追加换行(`\n`/`\r\n`) | 无(总是成功) |
+| `await expect(pattern, timeout_ms, [port])` | 在接收缓冲里用正则 `pattern` 匹配**整行**,返回**首条匹配行** | 匹配到的字符串;**超时无匹配返回空串 `""`** |
+| `await clear([port])` | 清空接收缓冲(丢弃历史数据) | 无 |
 | `await sleep(ms)` | 睡眠 `ms` 毫秒 | 无 |
+
+`[port]` 可选,缺省 = 脚本运行的当前端口。传一个端口名(如 `"COM5"`)则操作该端口——**这样一个脚本就能跨多个串口**:在 A 口查数据、解析后到 B 口下发。指定端口必须**已打开**(脚本没有 open 原语),未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。各端口接收缓冲相互隔离,对 A 口的 `expect` 只读 A 口的回显。
 
 ## 必须遵守的约束(脚本能不能跑通的关键)
 
@@ -92,6 +94,23 @@ for (let i = 0; i < 10; i++) {
 ```
 > 注:循环里 `throw` 会立刻中断。要采集多轮再一起输出,把结果攒进数组,循环结束后 `throw new Error(arr.join("\n"))`。
 
+### 跨多个串口(查一个口、配置另一个口)
+给 `send`/`expect`/`clear` 传可选 port 参数指定端口。下例在 COM3 查 MAC、解析后到 COM5 下发(两个端口都要先打开):
+```js
+await clear("COM3");
+await send("AT+MAC?", "COM3");
+const line = await expect("MAC:\\s*([0-9A-Fa-f:]+)", 2000, "COM3");
+if (!line) throw new Error("COM3 未返回 MAC");
+const m = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/);  // 提取 MAC
+const mac = m ? m[0] : "";
+if (!mac) throw new Error("无法解析 MAC: " + line);
+
+await clear("COM5");
+await send("AT+SETMAC=" + mac, "COM5");
+if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
+throw new Error("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
+```
+
 ### 调试技巧
 想看某个变量:`throw new Error("debug: line=[" + line + "] len=" + line.length)`。看到后删掉。
 
@@ -122,7 +141,7 @@ throw new Error("✅ 自检通过,信号: " + csq);
 
 ## 如何在 Serial Studio 里运行(告诉用户)
 
-1. 打开一个串口(脚本跑在**当前活动端口**上,必须先连一个)
+1. 打开串口(脚本默认跑在**当前活动端口**上;若脚本要操作多个口,把它们都先打开)
 2. 按 `Ctrl+Shift+B` 打开脚本侧栏 → 点"+"新建 → 起名、粘贴脚本 → 保存
 3. 点行前的 ▶ 运行(或 `Ctrl+B` 打开选择面板回车运行)
 4. 看结果栏:✓ + "完成" 表示跑完;✗ + 消息是脚本 `throw` 出的内容(含你的调试/汇总信息)

@@ -160,7 +160,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_run_script",
-                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data)/expect(pattern,ms)/clear()/sleep(ms)。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms);[port] 缺省=脚本运行端口,可指定其它已打开端口以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -509,14 +509,15 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 /// 后者服务装了技能的 Claude Code。改约束时两处同步。
 const SERIAL_SCRIPT_GUIDE: &str = r#"# Serial Studio 脚本编写指南
 
-serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。
+serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。send/expect/clear 的可选 port 参数可指定其它已打开端口,从而在一个脚本里跨多串口操作。
 
 ## 可用全局 async 函数(只有这 4 个 + 标准 JS;无 fetch/require/fs,沙箱)
-- await send(data)          发文本,自动追加换行。总成功,无返回。
-- await expect(pattern, ms) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
-                            超时无匹配返回空串 ""(不报错)——必须判断返回值。
-- await clear()             清空接收缓冲。
-- await sleep(ms)           睡眠。
+- await send(data, [port])          发文本,自动追加换行。总成功,无返回。
+- await expect(pattern, ms, [port]) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
+                                    超时无匹配返回空串 ""(不报错)——必须判断返回值。
+- await clear([port])               清空接收缓冲。
+- await sleep(ms)                   睡眠(与端口无关)。
+[port] 可选,缺省=脚本运行端口;传端口名则操作该端口(须已打开)。
 
 ## 必须遵守的约束
 1. 判断 expect 返回值:expect 超时返回 "" 不报错。不判断会把"没收到"当"收到"。用 if (line === "") 识别。
@@ -524,6 +525,21 @@ serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串
 3. expect 的 pattern 是正则字符串:写 expect("OK", 1000),不要 expect(/OK/, 1000)(字面量转 "/OK/" 会让正则编译失败)。
 4. 30 秒超时:脚本总执行上限 30s,死循环会被强杀。expect 的 ms 通常 500~3000。
 5. 用户 throw 正常传播:expect 没等到 → throw new Error("原因") 是中止报错的正道。
+
+## 多端口:一个脚本操作多个串口
+send/expect/clear 的可选 port 参数指定目标端口(须已打开),缺省=脚本运行端口。各端口接收缓冲相互隔离——对 COM3 的 expect 只读 COM3 的回显。
+未打开的端口:send 静默失败、expect 返回空串(须判空)。脚本无 open 原语,需先手动打开涉及的端口。
+例:COM3 查 MAC → COM5 配该 MAC:
+  await clear("COM3");
+  await send("AT+MAC?", "COM3");
+  const line = await expect("MAC:\\s*([0-9A-Fa-f:]+)", 2000, "COM3");
+  if (!line) throw new Error("COM3 未返回 MAC");
+  const m = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/);
+  const mac = m ? m[0] : "";
+  if (!mac) throw new Error("无法解析 MAC: " + line);
+  await clear("COM5");
+  await send("AT+SETMAC=" + mac, "COM5");
+  if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
 
 ## 模式:失败重试(脚本的核心价值)
 await clear();
