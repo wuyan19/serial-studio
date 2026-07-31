@@ -46,6 +46,7 @@ import {
   PortLabel,
   RemoteDialog,
   ScriptEditor,
+  ScriptRunParamsDialog,
   ScriptSkillDialog,
   SearchBar,
   SerialConfigDialog,
@@ -231,6 +232,8 @@ export default function App() {
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
   const [skillOpen, setSkillOpen] = useState(false);
   const [skillText, setSkillText] = useState<string | null>(null);
+  /** 待收集参数的脚本名(非 null=弹参数收集框);null=关闭。 */
+  const [pendingRun, setPendingRun] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
@@ -822,13 +825,21 @@ export default function App() {
     });
   };
 
-  const runScript = (name: string) => {
+  const doRun = (name: string, args: Record<string, string>) => {
     if (!activePort) {
       setScriptResult({ name, success: false, message: "请先选择并打开一个串口" });
       return;
     }
     setScriptResult({ name, success: true, message: "运行中..." });
-    transportRef.current?.runScript(name, activePort, scripts[name]);
+    transportRef.current?.runScript(name, activePort, scripts[name], args);
+  };
+  const runScript = (name: string) => {
+    // 脚本声明了参数 → 弹收集框;否则直接跑。
+    if (scripts[name]?.params?.length) {
+      setPendingRun(name);
+      return;
+    }
+    doRun(name, {});
   };
 
   const openScriptEditor = (name: string | null) => {
@@ -1013,6 +1024,7 @@ export default function App() {
     settingsOpen ||
     aboutOpen ||
     skillOpen ||
+    pendingRun ||
     remoteOpen ||
     pendingPort ||
     aliasEdit ||
@@ -1417,6 +1429,14 @@ export default function App() {
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
       {skillOpen && (
         <ScriptSkillDialog text={skillText ?? "加载中…"} onClose={() => setSkillOpen(false)} />
+      )}
+      {pendingRun && scripts[pendingRun]?.params?.length && (
+        <ScriptRunParamsDialog
+          scriptName={pendingRun}
+          params={scripts[pendingRun]!.params!}
+          onConfirm={(args) => { doRun(pendingRun, args); setPendingRun(null); }}
+          onCancel={() => setPendingRun(null)}
+        />
       )}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {macroPaletteOpen && (

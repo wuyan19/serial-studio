@@ -28,7 +28,7 @@ export interface Transport {
   forceClose(port: string): Promise<void>;
   write(port: string, data: string): Promise<void>;
   runMacro(name: string, port: string, macro: Macro): Promise<void>;
-  runScript(name: string, port: string, script: Script): Promise<void>;
+  runScript(name: string, port: string, script: Script, args: Record<string, string>): Promise<void>;
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
   onPortOpened(cb: (port: string) => void): () => void;
   onPortClosed(cb: (port: string) => void): () => void;
@@ -187,8 +187,8 @@ export class RemoteTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await this.send(JSON.stringify({ action: "run_macro", name, port, macro }));
   }
-  async runScript(name: string, port: string, script: Script) {
-    await this.send(JSON.stringify({ action: "run_script", name, port, script }));
+  async runScript(name: string, port: string, script: Script, args: Record<string, string>) {
+    await this.send(JSON.stringify({ action: "run_script", name, port, script, args }));
   }
   async getVersion() {
     const result = new Promise<{ version: string; enableScripting: boolean }>((resolve) => {
@@ -364,8 +364,8 @@ export class LocalTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await tauriInvoke("run_macro", { name, port, macro });
   }
-  async runScript(name: string, port: string, script: Script) {
-    await tauriInvoke("run_script", { name, port, script });
+  async runScript(name: string, port: string, script: Script, args: Record<string, string>) {
+    await tauriInvoke("run_script", { name, port, script, args });
   }
   async getVersion() {
     const { getVersion } = await import("@tauri-apps/api/app");

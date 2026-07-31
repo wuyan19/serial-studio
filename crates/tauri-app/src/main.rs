@@ -397,11 +397,12 @@ async fn run_script(
     name: String,
     port: String,
     script: ss_core::Script,
+    args: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let manager = state.manager.clone();
     let app = app.clone();
     tokio::spawn(async move {
-        let result = ss_core::run_script(&port, &script, manager).await;
+        let result = ss_core::run_script(&port, &script, manager, args).await;
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
             Err(e) => (false, e.to_string()),

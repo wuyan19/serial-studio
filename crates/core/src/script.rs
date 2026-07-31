@@ -20,6 +20,7 @@
 use crate::manager::SerialManager;
 use rquickjs::prelude::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Promise};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,25 +52,49 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 外层 oneshot 兜底超时相对内层的额外宽限(内层 timeout 先生效;此处仅兜底脚本线程卡死)。
 const OUTER_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 
+/// 一个脚本参数定义(string / select)。运行时收集值注入 QuickJS 的 `args.<name>`。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScriptParam {
+    /// 脚本里 `args.<name>` 取值的键名。
+    pub name: String,
+    /// UI 显示标签;缺省用 name。
+    #[serde(default)]
+    pub label: Option<String>,
+    /// "string" | "select"(`#[serde(rename)]` 因 type 是 Rust 关键字)。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 缺省值(运行收集时预填)。
+    #[serde(default)]
+    pub default: Option<String>,
+    /// select 的可选项;string 类型留空。
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
 /// 一个脚本定义(对齐 [`crate::Macro`])。
 ///
 /// `code` 为 JS 源码,被包成 `(async () => { ... })()` 求值,顶层可直接 `await`。
-/// 超时由执行入口默认 30s 或显式传入(见 [`run_script_with_timeout`]),不入库——
-/// 与宏不在 `Macro` 顶层存 timeout 一致。
+/// `params` 为声明的运行时参数(持久化进 scripts.json);运行收集的值经 `run_script` 的
+/// `args` 参数注入,不入库。超时由执行入口默认 30s 或显式传入(见 [`run_script_with_timeout`]),
+/// 不入库——与宏不在 `Macro` 顶层存 timeout 一致。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Script {
     #[serde(default)]
     pub description: Option<String>,
+    /// 声明的运行时参数(string/select),持久化进 scripts.json。旧脚本缺省为空。
+    #[serde(default)]
+    pub params: Vec<ScriptParam>,
     pub code: String,
 }
 
-/// 执行一段 JS 脚本(默认超时)。
+/// 执行一段 JS 脚本(默认超时)。`args` 为运行时参数值,注入 `args.<name>`。
 pub async fn run_script(
     port: &str,
     script: &Script,
     manager: Arc<SerialManager>,
+    args: HashMap<String, String>,
 ) -> Result<(), ScriptError> {
-    run_script_with_timeout(port, &script.code, manager, DEFAULT_TIMEOUT).await
+    run_script_with_timeout(port, &script.code, manager, DEFAULT_TIMEOUT, args).await
 }
 
 /// 执行一段 JS 脚本,注入串口原语,带显式超时。
@@ -81,6 +106,7 @@ pub async fn run_script_with_timeout(
     code: &str,
     manager: Arc<SerialManager>,
     timeout: Duration,
+    args: HashMap<String, String>,
 ) -> Result<(), ScriptError> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
@@ -94,7 +120,7 @@ pub async fn run_script_with_timeout(
                 .enable_all()
                 .build()
                 .map_err(|e| ScriptError::Engine(format!("创建脚本线程 runtime 失败: {e}")))?;
-            rt.block_on(run_script_inner(port, code, manager, timeout))
+            rt.block_on(run_script_inner(port, code, manager, timeout, args))
         });
         let result = match std::panic::catch_unwind(run) {
             Ok(r) => r,
@@ -118,6 +144,7 @@ async fn run_script_inner(
     code: String,
     manager: Arc<SerialManager>,
     timeout: Duration,
+    args: HashMap<String, String>,
 ) -> Result<(), ScriptError> {
     let deadline = Instant::now() + timeout;
 
@@ -211,6 +238,17 @@ async fn run_script_inner(
                     })),
                 ).map_err(|e| e.to_string())?;
 
+                // 注入运行时参数 args(运行收集的值):globalThis.args = { name: value, ... }。
+                // 脚本里 args.<name> 直接读。Object::new 取 ctx,后续 ctx.eval 还要用,故 clone。
+                {
+                    let args_obj = rquickjs::Object::new(ctx.clone())
+                        .map_err(|e| e.to_string())?;
+                    for (k, v) in &args {
+                        args_obj.set(k.as_str(), v.as_str()).map_err(|e| e.to_string())?;
+                    }
+                    globals.set("args", args_obj).map_err(|e| e.to_string())?;
+                }
+
                 // 可选 port 的 JS 适配:rquickjs 元组 arity 严格——JS 调 send("x") 少传参数时报
                 // "1 argument(s) while 2 where expected",不会把缺失参数填 undefined→None。
                 // 故在 JS 层把缺省 port 补成 null(Rust Option<String> 把 null→None),
@@ -283,7 +321,7 @@ mod tests {
             if (x !== 1) { throw new Error("控制流失败"); }
         "#;
         let start = Instant::now();
-        let result = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5)).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5), HashMap::new()).await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
         // 三个 sleep(20) 真的 await 过(累计 ~60ms);若同步阻塞则不可能达成。
         assert!(
@@ -299,7 +337,7 @@ mod tests {
         let code = r#"while (true) { await sleep(10); }"#;
         let start = Instant::now();
         let result =
-            run_script_with_timeout("COM0", code, mgr(), Duration::from_millis(200)).await;
+            run_script_with_timeout("COM0", code, mgr(), Duration::from_millis(200), HashMap::new()).await;
         assert!(
             matches!(result, Err(ScriptError::Timeout)),
             "死循环应被超时中断: {:?}",
@@ -323,13 +361,24 @@ mod tests {
         // 缺省 description:serde default 生效
         let s2: Script = serde_json::from_str(r#"{"code":"x"}"#).unwrap();
         assert!(s2.description.is_none());
+
+        // params 往返(type→kind rename);旧脚本无 params → default 空
+        assert!(s.params.is_empty());
+        let json3 = r#"{"params":[{"name":"mac","type":"string","default":"AA"},{"name":"tgt","type":"select","options":["COM5","COM7"]}],"code":"c"}"#;
+        let s3: Script = serde_json::from_str(json3).unwrap();
+        assert_eq!(s3.params.len(), 2);
+        assert_eq!(s3.params[0].name, "mac");
+        assert_eq!(s3.params[0].kind, "string");
+        assert_eq!(s3.params[0].default.as_deref(), Some("AA"));
+        assert_eq!(s3.params[1].kind, "select");
+        assert_eq!(s3.params[1].options, vec!["COM5".to_string(), "COM7".to_string()]);
     }
 
     /// throw new Error("msg") 的 message 必须被提取(不能只剩 "Exception generated by QuickJS")。
     #[tokio::test]
     async fn thrown_error_message_is_extracted() {
         let code = r#"throw new Error("test 123");"#;
-        let result = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5)).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5), HashMap::new()).await;
         match result {
             Err(ScriptError::Script(msg)) => assert_eq!(msg, "test 123"),
             other => panic!("期望 Script(\"test 123\"),得到 {:?}", other),
@@ -341,17 +390,31 @@ mod tests {
     #[tokio::test]
     async fn optional_port_param_arity() {
         // send 缺省 port(默认=绑定端口 COM0,未开则 send 失败被吞,仍 Ok)
-        let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Duration::from_secs(5)).await;
+        let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Duration::from_secs(5), HashMap::new()).await;
         assert!(r.is_ok(), "send(data) 缺省 port 应 Ok: {:?}", r);
         // send 显式 port
-        let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Duration::from_secs(5)).await;
+        let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Duration::from_secs(5), HashMap::new()).await;
         assert!(r2.is_ok(), "send(data, port) 显式 port 应 Ok: {:?}", r2);
         // expect 三参(端口未开 → grep_buffer 报错被吞 → 返回空串 → 不 throw)
         let code = r#"const v = await expect("OK", 50, "COM9"); if (v !== "") throw new Error("未开端口应返回空串,得到: " + v);"#;
-        let r3 = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5)).await;
+        let r3 = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5), HashMap::new()).await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
         // clear 显式 port
-        let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Duration::from_secs(5)).await;
+        let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Duration::from_secs(5), HashMap::new()).await;
         assert!(r4.is_ok(), "clear(port) 应 Ok: {:?}", r4);
+    }
+
+    /// 运行时参数 args 注入:脚本读 args.<name> 拿到传入值(验证 Object 注入 + ctx 所有权写法)。
+    #[tokio::test]
+    async fn args_injected_readable() {
+        let code = r#"throw new Error("mac=" + args.mac + " tgt=" + args.tgt);"#;
+        let mut args = HashMap::new();
+        args.insert("mac".to_string(), "AA:BB:CC".to_string());
+        args.insert("tgt".to_string(), "COM7".to_string());
+        let result = run_script_with_timeout("COM0", code, mgr(), Duration::from_secs(5), args).await;
+        match result {
+            Err(ScriptError::Script(msg)) => assert_eq!(msg, "mac=AA:BB:CC tgt=COM7"),
+            other => panic!("期望 Script(\"mac=AA:BB:CC tgt=COM7\"),得到 {:?}", other),
+        }
     }
 }

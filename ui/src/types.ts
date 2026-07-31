@@ -31,8 +31,24 @@ export interface MacroResult {
 }
 
 /** 一个 JS 脚本定义(与后端 ss_core::Script 对齐)。code 为 JS 源码。 */
+/** 脚本运行时参数定义(string / select),与后端 ss_core::ScriptParam 对齐。 */
+export interface ScriptParam {
+  /** 脚本里 args.<name> 取值的键名。 */
+  name: string;
+  /** UI 标签;缺省用 name。 */
+  label?: string;
+  /** "string" | "select"。 */
+  type: "string" | "select";
+  /** 缺省值(运行收集时预填)。 */
+  default?: string;
+  /** select 的可选项;string 留空。 */
+  options?: string[];
+}
+
 export interface Script {
   description?: string;
+  /** 声明的运行时参数(持久化);运行收集的值经 runScript 的 args 参数注入,不入库。 */
+  params?: ScriptParam[];
   code: string;
 }
 

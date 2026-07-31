@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, Script, SerialConfig } from "./types";
+import type { ConnConfig, Macro, Script, ScriptParam, SerialConfig } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -17,6 +17,33 @@ export function hexToBytes(hex: string): Uint8Array {
     arr[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
   }
   return arr;
+}
+
+/**
+ * 从脚本 code 解析 `// @param` 声明:让 AI 生成的脚本自包含(一段 code 含参数声明,
+ * 粘贴即用,自动填入参数区)。格式:
+ *   // @param <name> string [default=值]
+ *   // @param <name> select 选项1|选项2|... [default=选项]
+ * 返回解析出的参数数组;code 无任何 @param 行时返回 null(调用方据此不覆盖现有 params)。
+ */
+export function parseParamsFromCode(code: string): ScriptParam[] | null {
+  const params: ScriptParam[] = [];
+  for (const line of code.split("\n")) {
+    const m = line.match(/^\s*\/\/\s*@param\s+(\w+)\s+(string|select)\s*(.*)$/);
+    if (!m) continue;
+    const name = m[1];
+    const type = m[2] as "string" | "select";
+    const rest = m[3] ?? "";
+    const defaultMatch = rest.match(/\bdefault=(\S+)/);
+    const def = defaultMatch ? defaultMatch[1] : undefined;
+    let options: string[] | undefined;
+    if (type === "select") {
+      const optsStr = rest.replace(/\bdefault=\S+/, "").trim();
+      options = optsStr ? optsStr.split("|").map((s) => s.trim()).filter((s) => s.length > 0) : undefined;
+    }
+    params.push({ name, type, default: def, options });
+  }
+  return params.length > 0 ? params : null;
 }
 
 // ===== localStorage 持久化（跟着用户走的配置） =====

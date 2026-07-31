@@ -89,6 +89,8 @@ enum ClientMsg {
         name: String,
         port: String,
         script: ss_core::Script,
+        #[serde(default)]
+        args: std::collections::HashMap<String, String>,
     },
     /// 设置端口别名（""/null = 清除）。别名写入 ports.json，跟随端口所在机器。
     SetAlias {
@@ -376,7 +378,7 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 let _ = out_tx2.send(to_json(msg)).await;
             });
         }
-        ClientMsg::RunScript { name, port, script } => {
+        ClientMsg::RunScript { name, port, script, args } => {
             // 远程路径强制闸门:服务器默认 0.0.0.0 无认证,脚本执行须显式开启
             if !state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = out_tx
@@ -415,7 +417,7 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 .await;
             tokio::spawn(async move {
                 let _permit = permit; // 持有到脚本结束
-                let result = ss_core::run_script(&port, &script, manager).await;
+                let result = ss_core::run_script(&port, &script, manager, args).await;
                 let msg = match result {
                     Ok(()) => ServerMsg::ScriptResult {
                         name,

@@ -13,13 +13,14 @@ import type {
   PaneHalf,
   PortInfo,
   Script,
+  ScriptParam,
   SerialConfig,
   ShortcutMap,
   SrvSettings,
   StepType,
   TermInstance,
 } from "./types";
-import { BAUD_RATES, downloadJson, isTauri } from "./lib";
+import { BAUD_RATES, downloadJson, isTauri, parseParamsFromCode } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
 import {
@@ -1911,7 +1912,19 @@ export function ScriptEditor({
 }) {
   useEscClose(onCancel);
   const setDesc = (description: string) => onScriptChange({ ...script, description });
-  const setCode = (code: string) => onScriptChange({ ...script, code });
+  const setCode = (code: string) => {
+    // code 含 // @param 声明 → 自动解析填参数区(AI 生成自包含脚本,粘贴即用)。无声明则不动 params。
+    const parsed = parseParamsFromCode(code);
+    onScriptChange(parsed ? { ...script, code, params: parsed } : { ...script, code });
+  };
+  const setParams = (params: ScriptParam[]) => onScriptChange({ ...script, params });
+  const setParam = (i: number, p: ScriptParam) => {
+    const params = (script.params ?? []).slice();
+    params[i] = p;
+    setParams(params);
+  };
+  const addParam = () => setParams([...(script.params ?? []), { name: "", type: "string" }]);
+  const removeParam = (i: number) => setParams((script.params ?? []).filter((_, j) => j !== i));
 
   return (
     <div className="dialog-overlay">
@@ -1948,6 +1961,17 @@ export function ScriptEditor({
               width: "100%",
             }}
           />
+
+          <div className="dialog__group-label" style={{ marginTop: 12 }}>
+            参数(运行时收集,脚本用 args.键名 读取)
+          </div>
+          <div className="script-editor__hint">string=文本框;select=下拉(options 每行一个)。无参数则直接运行不弹窗。</div>
+          {(script.params ?? []).map((p, i) => (
+            <ParamEditor key={i} param={p} onChange={(np) => setParam(i, np)} onRemove={() => removeParam(i)} />
+          ))}
+          <button className="btn btn--ghost macro-editor__add" onClick={addParam} title="新增参数">
+            <IconPlus /> 新增参数
+          </button>
 
         {error && (
           <div className="editor-error">
@@ -1993,6 +2017,37 @@ export function ScriptEditor({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** 脚本参数编辑行:name / 标签 / 类型(string|select) / 缺省 / select 选项。 */
+function ParamEditor({ param, onChange, onRemove }: {
+  param: ScriptParam;
+  onChange: (p: ScriptParam) => void;
+  onRemove: () => void;
+}) {
+  const isSelect = param.type === "select";
+  return (
+    <div className="param-editor">
+      <input className="field param-editor__name" value={param.name}
+        onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="name(args 取此键)" />
+      <input className="field param-editor__label" value={param.label ?? ""}
+        onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" />
+      <select className="field param-editor__type" value={param.type}
+        onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
+        <option value="string">string</option>
+        <option value="select">select</option>
+      </select>
+      <input className="field param-editor__default" value={param.default ?? ""}
+        onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省值(可选)" />
+      <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数"><IconTrash /></button>
+      {isSelect && (
+        <textarea className="field param-editor__options" rows={2}
+          value={(param.options ?? []).join("\n")}
+          onChange={(e) => onChange({ ...param, options: e.target.value.split("\n") })}
+          placeholder="选项(每行一个)" />
+      )}
     </div>
   );
 }
@@ -2242,6 +2297,46 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
           <button className="btn btn--primary" onClick={onConfirm}>
             连接
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 运行时参数收集:按脚本声明 params 渲染表单(string→输入框、select→下拉),确认回调 args。 */
+export function ScriptRunParamsDialog({ scriptName, params, onConfirm, onCancel }: {
+  scriptName: string;
+  params: ScriptParam[];
+  onConfirm: (args: Record<string, string>) => void;
+  onCancel: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const p of params) init[p.name] = p.default ?? (p.options?.find((o) => o) ?? "");
+    return init;
+  });
+  useDialogKeys({ onClose: onCancel, onEnter: () => onConfirm(values) });
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title"><IconCode /> 运行参数</h3>
+        <div className="dialog__sub">{scriptName}</div>
+        {params.map((p) => (
+          <ConfigRow key={p.name} label={p.label || p.name}>
+            {p.type === "select" ? (
+              <select className="field" value={values[p.name] ?? ""}
+                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })}>
+                {(p.options ?? []).filter((o) => o).map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            ) : (
+              <input className="field" value={values[p.name] ?? ""}
+                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} />
+            )}
+          </ConfigRow>
+        ))}
+        <div className="btn-row">
+          <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+          <button className="btn btn--primary" onClick={() => onConfirm(values)}>运行</button>
         </div>
       </div>
     </div>

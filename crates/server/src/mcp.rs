@@ -165,7 +165,8 @@ fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "port": { "type": "string", "description": "串口名或别名。缺省时使用唯一打开的串口" },
-                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" }
+                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" },
+                        "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string。可选", "additionalProperties": { "type": "string" } }
                     },
                     "required": ["code"]
                 }
@@ -411,11 +412,22 @@ async fn tool_serial_run_script(
         Some(c) => c,
         None => return error_text("Missing required parameter: code".into()),
     };
+    // 运行时参数 args(注入脚本 args.<name>);缺省空。值非 string 的条目跳过。
+    let run_args: std::collections::HashMap<String, String> = args
+        .get("args")
+        .and_then(|a| a.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     let script = ss_core::Script {
         description: None,
+        params: Vec::new(),
         code: code.to_string(),
     };
-    match ss_core::run_script(&port, &script, manager.clone()).await {
+    match ss_core::run_script(&port, &script, manager.clone(), run_args).await {
         Ok(()) => ok_text("脚本执行完成".into()),
         Err(e) => error_text(format!("脚本失败: {}", e.display_message())),
     }
@@ -540,6 +552,12 @@ send/expect/clear 的可选 port 参数指定目标端口(须已打开),缺省=�
   await clear("COM5");
   await send("AT+SETMAC=" + mac, "COM5");
   if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
+
+## 运行时参数(args)
+serial_run_script 的 args 入参(object,键值均 string)注入为脚本全局对象 args,字段名自定。把易变值从 code 抽出,换参重跑不改脚本。
+  const mac = args.mac;                       // 调用方在 args 里传
+  await send("AT+SETMAC=" + mac, args.target);
+桌面/Web 端则在脚本编辑器「参数」区声明(string/select),或在 code 顶部用 // @param <name> <type> ... 注释声明(粘贴即用),运行时弹窗收集注入 args.<name>。
 
 ## 模式:失败重试(脚本的核心价值)
 await clear();

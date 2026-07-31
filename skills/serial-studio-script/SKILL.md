@@ -22,6 +22,28 @@ Serial Studio 支持用 **JavaScript** 写串口自动化脚本。脚本嵌入 Q
 
 `[port]` 可选,缺省 = 脚本运行的当前端口。传一个端口名(如 `"COM5"`)则操作该端口——**这样一个脚本就能跨多个串口**:在 A 口查数据、解析后到 B 口下发。指定端口必须**已打开**(脚本没有 open 原语),未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。各端口接收缓冲相互隔离,对 A 口的 `expect` 只读 A 口的回显。
 
+脚本运行时还有一个全局对象 **`args`**:它的字段在脚本编辑器的「参数」区声明(`string`=文本框 / `select`=下拉),用户每次运行时在弹窗里填/选,值注入成 `args.<参数名>`。把易变的值(MAC、目标端口、次数……)从 code 抽出来,**换参数重跑不用改脚本**。MCP/远程调用则由调用方在 `serial_run_script` 的 `args` 入参里直接给。
+
+```js
+// 编辑器「参数」区声明:name=mac(string)、name=target(select: COM5/COM7)
+await clear(args.target);
+await send("AT+SETMAC=" + args.mac, args.target);
+if (await expect("OK", 1000, args.target) === "") throw new Error("配置失败");
+```
+
+**参数也可写进 code(让脚本自包含、AI 一段代码搞定)**:在 code 顶部用 `// @param` 注释声明,粘贴代码时自动填入参数区,无需再 separately 配「参数」区。格式:
+```js
+// @param port1 select COM5|COM7
+// @param port2 select COM5|COM7 default=COM5
+// @param file   string default=mac.txt
+await clear(args.port1);
+await send("ifconfig br-lan", args.port1);
+// ... 用 args.port1 / args.port2 / args.file
+```
+- string:`// @param <name> string [default=值]`
+- select:`// @param <name> select 选项1|选项2|... [default=选项]`(选项用 `|` 分隔,`default=` 给缺省)
+- 声明后 code 里用 `args.<name>` 取值;无 `@param` 的脚本照旧在「参数」区手填。
+
 ## 必须遵守的约束(脚本能不能跑通的关键)
 
 这些是当前 v1 的硬约束,**违背任何一条脚本就会出错或表现诡异**。理解背后的原因,而不是死记:
