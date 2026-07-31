@@ -866,6 +866,7 @@ button {
 }
 .pane-split__child {
   display: flex; /* 让子 .group / .pane-split 撑满本格 */
+  flex: 1 1 0; /* 兜底；实际占比由 renderPane 的 inline style 覆盖，缺 inline 时不至于塌成 content 宽 */
   min-width: 0;
   min-height: 0;
 }

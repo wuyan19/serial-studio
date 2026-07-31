@@ -263,6 +263,12 @@ export default function App() {
   /** 端口 → 所属 group 反查（每 render 重建；端口唯一归属一个 group）。 */
   const groupOfPort: Map<string, string> = new Map();
   for (const g of Object.values(groups)) for (const p of g.ports) groupOfPort.set(p, g.id);
+  // 镜像到 ref：prunePort 经 onPortClosed 调用是 stale 闭包（transport effect 只绑一次），
+  // 必须读 ref.current 拿最新值，否则用挂载时的空 Map → gid 永远 undefined → 远端关端口留僵尸 tab
+  const groupOfPortRef = useRef(groupOfPort);
+  groupOfPortRef.current = groupOfPort;
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   /** 全局活动端口 = 聚焦 group 的活动端口（派生）。channel-strip / macro / 搜索等消费者零改动。 */
   const activePort = groups[focusedGroupId]?.activePort ?? "";
   const activeRef = useRef("");
@@ -535,7 +541,7 @@ export default function App() {
    *  所属 group 的 ports 移除 + activePort 回退；group 空（且非唯一根）→ 删 group + removeLeaf 坍缩，
    *  focused 回退交给 effect 自愈。全用函数式 setState，transport effect 的 stale 闭包调用也安全。 */
   const prunePort = (port: string) => {
-    const gid = groupOfPort.get(port);
+    const gid = groupOfPortRef.current.get(port);
     setOpenPorts((prev) => prev.filter((p) => p !== port));
     setPortConfigs((prev) => {
       if (!prev[port]) return prev;
@@ -558,8 +564,8 @@ export default function App() {
       delete next[gid];
       return next;
     });
-    // group 空（关的是该 group 唯一/末个端口）且非唯一根 → layout 坍缩
-    if ((groups[gid]?.ports.length ?? 0) <= 1) {
+    // group 空（关的是该 group 唯一/末个端口）且非唯一根 → layout 坍缩。读 groupsRef（最新，避 stale）
+    if ((groupsRef.current[gid]?.ports.length ?? 0) <= 1) {
       setLayout((tree) => (leafGroupIds(tree).length <= 1 ? tree : removeLeaf(tree, gid) ?? tree));
     }
   };
@@ -634,6 +640,11 @@ export default function App() {
   const dropHalf = (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => {
     const src = groups[srcGroupId];
     if (!src || !src.ports.includes(port)) return;
+    // 落到空 group：直接搬进去，不分裂（否则空格子累积、永不坍缩）
+    if ((groups[dstGroupId]?.ports.length ?? 0) === 0) {
+      movePort(port, srcGroupId, dstGroupId);
+      return;
+    }
     // 拖自己唯一 tab 到自己半区：结果只是空 group + 单 tab group，无分栏意义，跳过（也避免产生空格子）
     if (srcGroupId === dstGroupId && src.ports.length === 1) return;
     const newId = "g" + ++groupIdSeq.current;
@@ -739,7 +750,10 @@ export default function App() {
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
   const triggerPort = (name: string) => {
     if (openPorts.includes(name)) {
-      switchPort(name);
+      // 已开：聚焦到端口所属 group 并切其 tab（端口可能不在当前聚焦 group，纯 switchPort 会 no-op）
+      const gid = groupOfPort.get(name);
+      if (gid) switchTabInGroup(gid, name);
+      else switchPort(name);
     } else if (ports.find((p) => p.name === name)?.opened) {
       void openPort(name, serialConfig);
     } else {

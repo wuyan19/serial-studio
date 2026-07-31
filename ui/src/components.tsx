@@ -473,7 +473,7 @@ export function GroupView({
               className="tab"
               data-active={isActive}
               data-editing={editingThis ? "true" : undefined}
-              draggable
+              draggable={!editingThis}
               onDragStart={(e) => {
                 e.dataTransfer.effectAllowed = "move";
                 e.dataTransfer.setData("text/x-port", JSON.stringify({ port, src: group.id }));
