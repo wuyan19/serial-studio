@@ -1,179 +1,114 @@
 ---
 name: serial-studio-script
-description: 为 Serial Studio 编写串口自动化 JS 脚本(嵌入 QuickJS,顶层 await,跑在已打开的串口上)。每当用户想给串口设备写自动化逻辑——发命令等响应、AT 指令、重试直到收到某回复、按设备返回的内容分支、循环采集传感器、与 modem/蓝牙模块/ESP/单片机/GPS/传感器等串口设备做有控制流的交互——就用这个技能生成可直接粘进 Serial Studio 运行的脚本。即使用户没点名"Serial Studio",只要描述的是"写一段串口自动化流程/脚本/逻辑"就应使用;简单的发-收用宏即可,凡涉及重试、条件、循环、解析的都用脚本。
+description: 为 Serial Studio 写串口自动化 JS 脚本(嵌入 QuickJS,顶层 await)。凡涉及重试/条件/循环/解析的串口交互(AT 指令、modem/ESP/单片机/GPS/传感器等)都用脚本生成可粘贴运行的代码;简单顺序发收用宏。
 ---
 
 # Serial Studio 脚本编写
 
-Serial Studio 支持用 **JavaScript** 写串口自动化脚本。脚本嵌入 QuickJS 引擎,被包成 `(async () => { ... })()` 执行,因此顶层可以直接 `await`。脚本能做自定义宏做不到的事:**任意 if/for/重试/解析** 控制流。
+Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(async () => {})()`,可顶层 `await`),跑在**已打开的串口**上。它补足宏的短板:支持任意 if/for/重试/解析控制流。
 
-你的任务:根据用户描述的设备交互流程,产出一段**自包含、可直接粘贴运行**的 JS 脚本,并简短说明如何在 Serial Studio 里跑它。
+产出目标:一段**自包含、可直接粘贴运行**的 JS,加一两句运行说明。
 
-## 可用的全局函数(只有这 4 个 + 标准 JS)
+## 全局 API(只有这 4 个 + 标准 JS)
 
-脚本里只能用下面 4 个注入的 `async` 函数,以及 QuickJS 自带的标准 JS(`Math`/`Date`/`JSON`/正则/字符串等)。**没有** `fetch`/`require`/`fs`/`process`/`setTimeout`——这是沙箱,只能通过这 4 个函数碰串口。
+脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面 4 个注入的 `async` 函数,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`。
 
 | 调用 | 作用 | 返回 |
 |---|---|---|
-| `await send(data, [port])` | 发送文本 `data`,自动按端口配置追加换行(`\n`/`\r\n`) | 无(总是成功) |
-| `await expect(pattern, timeout_ms, [port])` | 在接收缓冲里用正则 `pattern` 匹配**整行**,返回**首条匹配行** | 匹配到的字符串;**超时无匹配返回空串 `""`** |
-| `await clear([port])` | 清空接收缓冲(丢弃历史数据) | 无 |
-| `await sleep(ms)` | 睡眠 `ms` 毫秒 | 无 |
+| `await send(data, [port])` | 发送文本,按端口配置自动追加换行 | 无 |
+| `await expect(pattern, timeout_ms, [port])` | 用正则 `pattern` 匹配**整行**接收缓冲 | 首条匹配行;**超时无匹配返回空串 `""`** |
+| `await clear([port])` | 清空接收缓冲 | 无 |
+| `await sleep(ms)` | 睡眠 ms 毫秒 | 无 |
 
-`[port]` 可选,缺省 = 脚本运行的当前端口。传一个端口名(如 `"COM5"`)则操作该端口——**这样一个脚本就能跨多个串口**:在 A 口查数据、解析后到 B 口下发。指定端口必须**已打开**(脚本没有 open 原语),未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。各端口接收缓冲相互隔离,对 A 口的 `expect` 只读 A 口的回显。
+`[port]` 缺省 = 当前活动端口;传端口名(如 `"COM5"`)则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
 
-脚本运行时还有一个全局对象 **`args`**:它的字段在脚本编辑器的「参数」区声明(`string`=文本框 / `select`=下拉),用户每次运行时在弹窗里填/选,值注入成 `args.<参数名>`。把易变的值(MAC、目标端口、次数……)从 code 抽出来,**换参数重跑不用改脚本**。MCP/远程调用则由调用方在 `serial_run_script` 的 `args` 入参里直接给。
+## 参数(args)
 
-```js
-// 编辑器「参数」区声明:name=mac(string)、name=target(select: COM5/COM7)
-await clear(args.target);
-await send("AT+SETMAC=" + args.mac, args.target);
-if (await expect("OK", 1000, args.target) === "") throw new Error("配置失败");
-```
+把易变值(MAC、目标端口、次数……)从 code 抽出,换参重跑不改脚本。值都注入 `args.<name>`。声明方式:
 
-**参数也可写进 code(让脚本自包含、AI 一段代码搞定)**:在 code 顶部用 `// @param` 注释声明,粘贴代码时自动填入参数区,无需再 separately 配「参数」区。格式:
+**code 顶部注释**(自包含, 一段代码搞定):
+- `// @param <name> string [default=值]`
+- `// @param <name> select 选项1|选项2|... [default=选项]`(选项用 `|` 分隔)
+
 ```js
 // @param port1 select COM5|COM7
-// @param port2 select COM5|COM7 default=COM5
-// @param file   string default=mac.txt
+// @param file  string default=mac.txt
 await clear(args.port1);
 await send("ifconfig br-lan", args.port1);
-// ... 用 args.port1 / args.port2 / args.file
+// ... 用 args.port1 / args.file
 ```
-- string:`// @param <name> string [default=值]`
-- select:`// @param <name> select 选项1|选项2|... [default=选项]`(选项用 `|` 分隔,`default=` 给缺省)
-- 声明后 code 里用 `args.<name>` 取值;无 `@param` 的脚本照旧在「参数」区手填。
 
-## 必须遵守的约束(脚本能不能跑通的关键)
+## 硬约束(违背即出错)
 
-这些是当前 v1 的硬约束,**违背任何一条脚本就会出错或表现诡异**。理解背后的原因,而不是死记:
+1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`;不判就把"没收到"当"收到"继续走。
+2. **没有控制台——用 `throw` 当 print。** `console.log` 不存在。调试看变量、回报最终结果都靠 `throw new Error("...")`(消息显示在结果栏;代价是脚本以失败结束,验证完删掉调试用 throw)。
+3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
+4. **总执行上限 30s,死循环会被强杀。** `expect` 的 `timeout_ms` 别设太大(常用 500~3000ms),循环要有出口。
+5. **`throw` 正常传播。** `throw new Error("设备未响应")` 让脚本失败并把消息显示出来——这是"中止并报错"的正道(配合第 1 条:没等到就 throw)。
 
-1. **每次 `await expect(...)` 都要判断返回值。** `expect` 在超时没匹配时**不报错**,而是返回空串 `""`。如果你不判断,就会把"没收到"当成"收到了"继续往下走。原因:串口原语的失败被设计成静默(不抛 JS 异常),所以脚本必须自己用 `if (line)` 或 `if (line === "")` 来识别"没等到"。
+## 核心模式
 
-2. **没有控制台输出——用 `throw` 当 print。** `console.log` 不存在、写了也看不到。脚本正常结束只会在结果栏显示"完成"。要想看到中间值/调试信息,只能 `throw new Error("x = " + x)`——抛出的消息会显示在结果栏(代价是脚本以失败结束)。所以调试时插 `throw` 看变量,验证完删掉;要回报最终结果也用 `throw` 带出汇总信息。
-
-3. **`expect` 的 `pattern` 是正则字符串,不是 JS 正则字面量。** 写 `expect("OK", 1000)`、`expect("ERR|ERROR", 1000)`、`expect("\\d+\\.\\d+", 2000)`,**不要**写 `expect(/OK/, 1000)`。原因:字面量 `/OK/` 传进函数会被转成字符串 `"/OK/"`,里面的斜杠让正则编译失败。pattern 用的是 Rust `regex` crate 语法,常用特性(字符类、`+`/`*`/`?`、`|`、`^`/`$`、`\d`\`\w`)都支持,别用反向引用等高级特性。
-
-4. **默认 30 秒超时,死循环会被强杀。** 脚本总执行时间上限 30s,到点未完成会被中断、显示"脚本执行超时"。所以 `expect` 的 `timeout_ms` 不要设太大(通常 500~3000ms),循环要有出口。
-
-5. **用户自己 `throw` 的错误会正常传播。** `throw new Error("设备未响应")` 会让脚本以失败结束,消息显示在结果栏——这是"中止并报错给用户"的正道。配合第 1 条:`expect` 没等到 → `throw` 报清楚原因。
-
-## 写好脚本的几个模式
-
-### 发命令 → 等响应 → 判断
-最基本的两步。注意 `expect` 后**一定判断**:
+**发命令→等响应→判断**(最基本,expect 后必判):
 ```js
-await clear();                         // 清掉历史,确保 expect 等的是新响应
+await clear();                         // 清历史,确保等的是新响应
 await send("AT");
-const line = await expect("OK", 1000); // 等 1 秒内出现含 OK 的行
-if (line === "") {
-  throw new Error("未收到 OK——检查波特率/接线/设备上电");
-}
-// 收到 OK,继续
+const line = await expect("OK", 1000);
+if (line === "") throw new Error("未收到 OK——查波特率/接线/上电");
 ```
 
-### 失败重试(这是宏做不到、脚本的核心价值)
-设备偶尔漏响应,重试 N 次:
+**失败重试**(脚本核心价值,宏做不到):
 ```js
 await clear();
 let ok = "";
 for (let i = 1; i <= 3; i++) {
   await send("AT");
   ok = await expect("OK", 1000);
-  if (ok) break;                        // 收到就跳出,不再重试
-  await sleep(300);                     // 没收到,缓一下再来
+  if (ok) break;
+  await sleep(300);
 }
 if (!ok) throw new Error("重试 3 次均无响应");
 ```
 
-### 按返回内容分支
-根据设备回了什么走不同路径:
-```js
-await send("AT+CGMM");
-const model = await expect("\\S+", 1500);   // 匹配任意非空行
-if (model === "") throw new Error("未响应");
-if (model.includes("SIM800")) {
-  await send("AT+CSQ");                      // 走 SIM800 的查询
-  const sig = await expect("\\d+", 1000);
-  throw new Error("SIM800 信号: " + sig);
-} else if (model.includes("ESP")) {
-  await send("AT+GMR");
-  const ver = await expect(".+", 1500);
-  throw new Error("ESP 版本: " + ver);
-} else {
-  throw new Error("未知型号: " + model);
-}
-```
+**按返回内容分支**:`expect` 拿到行后用 `includes`/`match` 判断,走不同路径(标准 JS 的 if/else)。
 
-### 周期采集(循环 + sleep)
-```js
-for (let i = 0; i < 10; i++) {
-  await send("AT+TEMP?");
-  const v = await expect("\\d+", 1000);
-  if (v) throw new Error("第" + (i+1) + "次温度: " + v);  // 仅演示如何"打印"
-  await sleep(1000);
-}
-```
-> 注:循环里 `throw` 会立刻中断。要采集多轮再一起输出,把结果攒进数组,循环结束后 `throw new Error(arr.join("\n"))`。
-
-### 跨多个串口(查一个口、配置另一个口)
-给 `send`/`expect`/`clear` 传可选 port 参数指定端口。下例在 COM3 查 MAC、解析后到 COM5 下发(两个端口都要先打开):
+**跨多口**:给函数传可选 `port`。下例 COM3 查 MAC、解析后 COM5 下发(两端口都要先打开):
 ```js
 await clear("COM3");
 await send("AT+MAC?", "COM3");
-const line = await expect("MAC:\\s*([0-9A-Fa-f:]+)", 2000, "COM3");
-if (!line) throw new Error("COM3 未返回 MAC");
-const m = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/);  // 提取 MAC
-const mac = m ? m[0] : "";
-if (!mac) throw new Error("无法解析 MAC: " + line);
-
-await clear("COM5");
+const line = await expect("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", 2000, "COM3");
+if (line === "") throw new Error("COM3 未返回 MAC");
+const mac = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/)[0];
 await send("AT+SETMAC=" + mac, "COM5");
 if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
 throw new Error("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
 ```
 
-### 调试技巧
-想看某个变量:`throw new Error("debug: line=[" + line + "] len=" + line.length)`。看到后删掉。
+**周期采集**:循环把结果攒进数组,结束后 `throw new Error(arr.join("\n"))` 一次输出(循环里 throw 会立刻中断,故不能边采边抛)。
 
-## 完整示例:AT 设备初始化 + 自检
+## 完整示例:AT 设备自检
 
 ```js
-// 初始化一个 AT 设备:重置 → 重试等就绪 → 关回显 → 查信号
 await clear();
 await send("ATZ");                       // 软复位
 await sleep(500);
-
 let ready = "";
-for (let i = 1; i <= 5; i++) {
+for (let i = 1; i <= 5; i++) {           // 重试等就绪
   ready = await expect("OK", 800);
   if (ready) break;
   await sleep(400);
 }
-if (!ready) throw new Error("设备未就绪(复位后 5 次无 OK)");
-
-await send("ATE0");                      // 关回显,让 expect 不再匹配到自己发出的命令
+if (!ready) throw new Error("复位后 5 次无 OK");
+await send("ATE0");                      // 关回显,避免 expect 匹配到自己发的命令
 if (await expect("OK", 1000) === "") throw new Error("关回显失败");
-
-await send("AT+CSQ");                    // 查信号质量
+await send("AT+CSQ");
 const csq = await expect("CSQ:\\s*\\d+", 1500);
 if (csq === "") throw new Error("查询信号失败");
 throw new Error("✅ 自检通过,信号: " + csq);
 ```
 
-## 如何在 Serial Studio 里运行(告诉用户)
-
-1. 打开串口(脚本默认跑在**当前活动端口**上;若脚本要操作多个口,把它们都先打开)
-2. 按 `Ctrl+Shift+B` 打开脚本侧栏 → 点"+"新建 → 起名、粘贴脚本 → 保存
-3. 点行前的 ▶ 运行(或 `Ctrl+B` 打开选择面板回车运行)
-4. 看结果栏:✓ + "完成" 表示跑完;✗ + 消息是脚本 `throw` 出的内容(含你的调试/汇总信息)
-
-> 远程/Web 端默认禁用脚本(`enable_scripting`),本地桌面端可直接用。
-
 ## 输出约定
 
-- 主体是一段 JS 代码(用代码块),自包含、可整段粘贴
-- 脚本里用注释标清每一步在干什么(中文,简短)
-- 代码后用一两句话说明:这个脚本假设的设备/波特率、需要在哪个端口跑、预期看到什么结果
-- 如果用户的流程其实很简单(纯顺序发几条命令、不需要判断/重试),告诉他**用宏更合适**,别硬写脚本
-- 涉及具体设备命令时,如果用户没给,按常见 AT 设备的惯例给样例并提示"按你的设备手册调整命令"
+- 主体是一段自包含、可整段粘贴的 JS(代码块),注释标清每步在干啥(中文、简短)
+- 代码后一两句说明:假设的设备/波特率、跑在哪个口、预期结果
+- 流程很简单(纯顺序发几条命令、无需判断/重试)就建议**用宏**,别硬写脚本
+- 涉及具体设备命令而用户没给时,按常见 AT 设备惯例给样例并提示"按设备手册调整"

@@ -558,7 +558,6 @@ send/expect/clear 的可选 port 参数指定目标端口(须已打开),缺省=�
 serial_run_script 的 args 入参(object,键值均 string)注入为脚本全局对象 args,字段名自定。把易变值从 code 抽出,换参重跑不改脚本。
   const mac = args.mac;                       // 调用方在 args 里传
   await send("AT+SETMAC=" + mac, args.target);
-桌面/Web 端则在脚本编辑器「参数」区声明(string/select),或在 code 顶部用 // @param <name> <type> ... 注释声明(粘贴即用),运行时弹窗收集注入 args.<name>。
 
 ## 模式:失败重试(脚本的核心价值)
 await clear();
