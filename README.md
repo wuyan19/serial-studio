@@ -23,11 +23,12 @@ and label ports with device aliases.
 
 ## ✨ Features
 
-- **Multi-port terminal** — concurrent ports in tabs, powered by xterm.js.
+- **Multi-port terminal** — concurrent ports in tabs or split side-by-side (VS Code-style editor groups), powered by xterm.js.
 - **Port sharing** — multiple windows / clients attach to the same port. The first opener's
   config wins; later clients join read/write. Force-close kicks every holder off.
 - **Macros** — step sequences (`send` / `delay` / `expect` / `clear`), importable / exportable
   as JSON so they travel between machines.
+- **Scripting** — full JS control flow (retry / branching / loops / parsing) for what macros can't express. Runs on the open port; pass a port arg to drive several ports from one script. Declare runtime parameters and they're collected in a popup, so reruns need no code edits.
 - **Port aliases** — label a port with the device it connects, e.g. `GPS (COM7)`.
 - **Three ways in:**
   - **Local** desktop app (IPC, bypasses the network entirely).
