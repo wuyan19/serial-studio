@@ -46,6 +46,7 @@ import {
   PortLabel,
   RemoteDialog,
   ScriptEditor,
+  ScriptSkillDialog,
   SearchBar,
   SerialConfigDialog,
   SettingsPanel,
@@ -227,6 +228,9 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityView>(null);
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
+  const [skillOpen, setSkillOpen] = useState(false);
+  const [skillText, setSkillText] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
@@ -1008,6 +1012,7 @@ export default function App() {
   const modalOpen = !!(
     settingsOpen ||
     aboutOpen ||
+    skillOpen ||
     remoteOpen ||
     pendingPort ||
     aliasEdit ||
@@ -1217,6 +1222,18 @@ export default function App() {
                   <button className="icon-btn" onClick={() => openScriptEditor(null)} title="新增脚本">
                     <IconPlus />
                   </button>
+                  <button
+                    className="icon-btn"
+                    title="脚本编写指南(查看 / 复制给外部 Agent)"
+                    onClick={() => {
+                      setSkillOpen(true);
+                      if (skillText === null) {
+                        transportRef.current?.getScriptSkill().then(setSkillText).catch(() => {});
+                      }
+                    }}
+                  >
+                    <IconInfo />
+                  </button>
                 </div>
                 <input
                   ref={scriptImportInputRef}
@@ -1398,6 +1415,9 @@ export default function App() {
       )}
 
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
+      {skillOpen && (
+        <ScriptSkillDialog text={skillText ?? "加载中…"} onClose={() => setSkillOpen(false)} />
+      )}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {macroPaletteOpen && (
         <MacroPalette

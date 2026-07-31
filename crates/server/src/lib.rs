@@ -102,6 +102,10 @@ pub fn set_alias_and_notify(state: &AppState, port: &str, alias: Option<String>)
 }
 
 
+/// 脚本编写 SKILL 全文(嵌入二进制;前端「脚本指南」对话框展示 / 复制给外部 Agent 用)。
+/// skills/ 在源码树,tauri 构建整体编译,include_str! 编译期读得到(同 ui/dist 的跨目录引用)。
+pub const SCRIPT_SKILL: &str = include_str!("../../../skills/serial-studio-script/SKILL.md");
+
 /// 内嵌前端（ui/dist，编译期打入）。ss-server 单文件即"网关 + 网页"：
 /// 浏览器开 http://host:port/ 直接出界面，自动连本机 /ws。
 #[derive(RustEmbed)]

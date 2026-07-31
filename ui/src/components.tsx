@@ -2169,6 +2169,51 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
   );
 }
 
+/** 脚本编写指南(SKILL 全文):查看 + 一键复制给外部 Agent(Claude/Cursor 等)。
+ *  纯文本展示(等宽、pre-wrap);复制的是 SKILL.md 原文,粘给 Agent 即完整 skill。 */
+export function ScriptSkillDialog({
+  text,
+  onClose,
+}: {
+  text: string;
+  onClose: () => void;
+}) {
+  useEscClose(onClose);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪贴板 API 失败(罕见,如非安全上下文)静默:<pre> 仍可手动选文复制
+    }
+  };
+  return (
+    <div className="dialog-overlay">
+      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+        <div className="macro-editor__head">
+          <h3 className="dialog__title">脚本编写指南</h3>
+          <div className="dialog__sub">
+            SKILL 全文 —— 复制给外部 Agent(Claude / Cursor 等),它即可为你生成 Serial Studio 脚本
+          </div>
+        </div>
+        <div className="macro-editor__scroll">
+          <pre className="script-skill__pre">{text}</pre>
+        </div>
+        <div className="btn-row" style={{ justifyContent: "space-between" }}>
+          <button className="btn btn--primary" onClick={copy}>
+            <IconCopy /> {copied ? "已复制 ✓" : "复制给外部 Agent"}
+          </button>
+          <button className="btn" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
   input: { host: string; port: number };
   onChange: (v: { host: string; port: number }) => void;

@@ -1055,6 +1055,16 @@ button {
 .dialog--macro > .btn-row {
   flex-shrink: 0;
 }
+/* 脚本指南:SKILL 全文纯文本展示(等宽、长行折行、保留空白);颜色继承主题。 */
+.script-skill__pre {
+  margin: 0;
+  padding: 8px 4px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 /* Shortcuts 对话框：标题/按钮固定，快捷键列表超高滚动（同 macro-editor 模式） */
 .dialog--shortcuts {
   display: flex;

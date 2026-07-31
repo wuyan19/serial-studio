@@ -42,6 +42,8 @@ export interface Transport {
   onConnectedChange(cb: (connected: boolean) => void): () => void;
   /** 服务版本号 + 是否启用远程脚本执行（关于页 + 脚本 UI 显隐）。本地恒 enableScripting=true。 */
   getVersion(): Promise<{ version: string; enableScripting: boolean }>;
+  /** 脚本编写 SKILL 全文(嵌入二进制;「脚本指南」对话框展示 / 复制给外部 Agent)。 */
+  getScriptSkill(): Promise<string>;
   dispose(): void;
 }
 
@@ -59,6 +61,7 @@ export class RemoteTransport implements Transport {
   private ws: WebSocket;
   private openResolver: ((r: AcquiredResult) => void) | null = null;
   private versionResolver: ((v: { version: string; enableScripting: boolean }) => void) | null = null;
+  private scriptSkillResolver: ((text: string) => void) | null = null;
   /** WS 连接就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。 */
   private openPromise: Promise<void>;
   private handlers = {
@@ -134,6 +137,12 @@ export class RemoteTransport implements Transport {
             this.versionResolver = null;
           }
           break;
+        case "script_skill":
+          if (this.scriptSkillResolver) {
+            this.scriptSkillResolver(msg.text as string);
+            this.scriptSkillResolver = null;
+          }
+          break;
         case "script_result":
           this.handlers.scriptResult.forEach((cb) => cb(msg.name, msg.success, msg.message));
           break;
@@ -186,6 +195,13 @@ export class RemoteTransport implements Transport {
       this.versionResolver = resolve;
     });
     await this.send(JSON.stringify({ action: "version" }));
+    return result;
+  }
+  async getScriptSkill() {
+    const result = new Promise<string>((resolve) => {
+      this.scriptSkillResolver = resolve;
+    });
+    await this.send(JSON.stringify({ action: "get_script_skill" }));
     return result;
   }
 
@@ -355,6 +371,9 @@ export class LocalTransport implements Transport {
     const { getVersion } = await import("@tauri-apps/api/app");
     const version = await getVersion();
     return { version, enableScripting: true }; // 本地主权:脚本恒可用
+  }
+  async getScriptSkill() {
+    return tauriInvoke<string>("get_script_skill");
   }
 
   onData(cb: (port: string, data: Uint8Array) => void) {

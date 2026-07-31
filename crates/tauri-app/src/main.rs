@@ -124,6 +124,12 @@ async fn load_scripts() -> Result<std::collections::BTreeMap<String, ss_core::Sc
     Ok(ss_server::scripts_store::load())
 }
 
+/// 脚本编写 SKILL 全文(嵌入二进制;前端「脚本指南」对话框展示 / 复制给外部 Agent)。
+#[tauri::command]
+async fn get_script_skill() -> Result<String, String> {
+    Ok(ss_server::SCRIPT_SKILL.into())
+}
+
 /// 保存用户脚本到 scripts.json。
 #[tauri::command]
 async fn save_scripts(
@@ -564,6 +570,7 @@ fn run_gui() {
             save_macros,
             load_scripts,
             save_scripts,
+            get_script_skill,
             open_remote_window,
             list_ports,
             open_port_stream,

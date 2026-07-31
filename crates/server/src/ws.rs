@@ -58,6 +58,8 @@ enum ServerMsg {
     ScriptResult { name: String, success: bool, message: String },
     /// version 的直接回复：服务端编译版本 + 是否启用远程脚本执行（前端据此显隐脚本 UI）。
     Version { version: String, enable_scripting: bool },
+    /// get_script_skill 的直接回复：脚本编写 SKILL 全文(前端展示 / 复制给外部 Agent)。
+    ScriptSkill { text: String },
 }
 
 /// 客户端 → 服务器 消息。
@@ -96,6 +98,8 @@ enum ClientMsg {
     },
     /// 查询服务版本。
     Version,
+    /// 拉取脚本编写 SKILL 全文(展示 / 复制给外部 Agent)。
+    GetScriptSkill,
 }
 
 fn default_encoding() -> String {
@@ -445,6 +449,13 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 .send(to_json(ServerMsg::Version {
                     version: env!("CARGO_PKG_VERSION").into(),
                     enable_scripting,
+                }))
+                .await;
+        }
+        ClientMsg::GetScriptSkill => {
+            let _ = out_tx
+                .send(to_json(ServerMsg::ScriptSkill {
+                    text: crate::SCRIPT_SKILL.into(),
                 }))
                 .await;
         }
