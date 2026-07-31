@@ -424,6 +424,7 @@ async fn tool_serial_run_script(
         .unwrap_or_default();
     let script = ss_core::Script {
         description: None,
+        group: None,
         params: Vec::new(),
         code: code.to_string(),
     };

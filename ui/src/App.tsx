@@ -19,6 +19,7 @@ import {
   downloadJson,
   getRemoteFromUrl,
   initConn,
+  groupBy,
   isTauri,
   loadConfig,
   loadMacrosLocal,
@@ -233,6 +234,23 @@ export default function App() {
     return saved >= 180 && saved <= 480 ? saved : 240;
   });
   const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
+  /** 侧栏分组折叠状态(收起的组名集合,localStorage 持久化)。 */
+  const [macroCollapsed, setMacroCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("macro-groups-collapsed") ?? "[]") as string[]));
+  const [scriptCollapsed, setScriptCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("script-groups-collapsed") ?? "[]") as string[]));
+  const toggleMacroGroup = (g: string) =>
+    setMacroCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g); else next.add(g);
+      localStorage.setItem("macro-groups-collapsed", JSON.stringify([...next]));
+      return next;
+    });
+  const toggleScriptGroup = (g: string) =>
+    setScriptCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g); else next.add(g);
+      localStorage.setItem("script-groups-collapsed", JSON.stringify([...next]));
+      return next;
+    });
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
@@ -1203,18 +1221,27 @@ export default function App() {
                 />
               </div>
               {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
-              {Object.entries(macros).map(([name]) => (
-                <div key={name} className="macro-row">
-                  <button className="macro-run" onClick={() => runMacro(name)} disabled={!activePort}>
-                    <IconPlay />
-                    <span className="macro-run__label">{name}</span>
+              {groupBy(Object.entries(macros), (m) => m.group).map((g) => (
+                <div key={g.name} className="macro-group">
+                  <button className="macro-group__head" onClick={() => toggleMacroGroup(g.name)}>
+                    <span className="macro-group__caret">{macroCollapsed.has(g.name) ? "▶" : "▼"}</span>
+                    <span className="macro-group__name">{g.name}</span>
+                    <span className="macro-group__count">{g.items.length}</span>
                   </button>
-                  <button className="macro-action macro-action--edit" onClick={() => openMacroEditor(name)} title="编辑">
-                    <IconEdit />
-                  </button>
-                  <button className="macro-action macro-action--danger" onClick={() => deleteMacro(name)} title="删除">
-                    <IconTrash />
-                  </button>
+                  {!macroCollapsed.has(g.name) && g.items.map(([name]) => (
+                    <div key={name} className="macro-row">
+                      <button className="macro-run" onClick={() => runMacro(name)} disabled={!activePort}>
+                        <IconPlay />
+                        <span className="macro-run__label">{name}</span>
+                      </button>
+                      <button className="macro-action macro-action--edit" onClick={() => openMacroEditor(name)} title="编辑">
+                        <IconEdit />
+                      </button>
+                      <button className="macro-action macro-action--danger" onClick={() => deleteMacro(name)} title="删除">
+                        <IconTrash />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               ))}
               {macroResult && (
@@ -1268,18 +1295,27 @@ export default function App() {
                 />
               </div>
               {Object.keys(scripts).length === 0 && <p className="sidebar__empty">无脚本（点 ＋ 新增）</p>}
-              {Object.entries(scripts).map(([name]) => (
-                <div key={name} className="macro-row">
-                  <button className="macro-run" onClick={() => runScript(name)} disabled={!activePort}>
-                    <IconPlay />
-                    <span className="macro-run__label">{name}</span>
+              {groupBy(Object.entries(scripts), (s) => s.group).map((g) => (
+                <div key={g.name} className="macro-group">
+                  <button className="macro-group__head" onClick={() => toggleScriptGroup(g.name)}>
+                    <span className="macro-group__caret">{scriptCollapsed.has(g.name) ? "▶" : "▼"}</span>
+                    <span className="macro-group__name">{g.name}</span>
+                    <span className="macro-group__count">{g.items.length}</span>
                   </button>
-                  <button className="macro-action macro-action--edit" onClick={() => openScriptEditor(name)} title="编辑">
-                    <IconEdit />
-                  </button>
-                  <button className="macro-action macro-action--danger" onClick={() => deleteScript(name)} title="删除">
-                    <IconTrash />
-                  </button>
+                  {!scriptCollapsed.has(g.name) && g.items.map(([name]) => (
+                    <div key={name} className="macro-row">
+                      <button className="macro-run" onClick={() => runScript(name)} disabled={!activePort}>
+                        <IconPlay />
+                        <span className="macro-run__label">{name}</span>
+                      </button>
+                      <button className="macro-action macro-action--edit" onClick={() => openScriptEditor(name)} title="编辑">
+                        <IconEdit />
+                      </button>
+                      <button className="macro-action macro-action--danger" onClick={() => deleteScript(name)} title="删除">
+                        <IconTrash />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               ))}
               {scriptResult && (
@@ -1531,6 +1567,7 @@ export default function App() {
           macro={editorMacro}
           error={editorError}
           isNew={editing.isNew}
+          groups={Array.from(new Set(Object.values(macros).map((m) => m.group).filter((g): g is string => !!g)))}
           onName={setEditorName}
           onMacroChange={setEditorMacro}
           onSave={saveMacroDef}
@@ -1546,6 +1583,7 @@ export default function App() {
           script={editorScript}
           error={editorScriptError}
           isNew={editingScript.isNew}
+          groups={Array.from(new Set(Object.values(scripts).map((s) => s.group).filter((g): g is string => !!g)))}
           onName={setEditorScriptName}
           onScriptChange={setEditorScript}
           onSave={saveScriptDef}

@@ -46,6 +46,29 @@ export function parseParamsFromCode(code: string): ScriptParam[] | null {
   return params.length > 0 ? params : null;
 }
 
+/**
+ * 按分组字段聚合:返回有序组列表,每组含组名 + 组内项(按 key 字典序)。
+ * 具名组按组名字典序在前;无 group 的项并入末尾「未分组」组(仅当存在无组项)。
+ */
+export function groupBy<T>(
+  items: [string, T][],
+  getGroup: (t: T) => string | undefined,
+): { name: string; items: [string, T][] }[] {
+  const buckets = new Map<string, [string, T][]>();
+  const ungrouped: [string, T][] = [];
+  for (const [k, v] of items) {
+    const g = getGroup(v)?.trim();
+    if (g) (buckets.get(g) ?? buckets.set(g, []).get(g)!).push([k, v]);
+    else ungrouped.push([k, v]);
+  }
+  const groups = [...buckets.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, it]) => ({ name, items: it.sort((a, b) => a[0].localeCompare(b[0])) }));
+  if (ungrouped.length)
+    groups.push({ name: "未分组", items: ungrouped.sort((a, b) => a[0].localeCompare(b[0])) });
+  return groups;
+}
+
 // ===== localStorage 持久化（跟着用户走的配置） =====
 
 const CONFIG_KEY = "serial-studio-config";

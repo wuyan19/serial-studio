@@ -1706,6 +1706,7 @@ export function MacroEditor({
   macro,
   error,
   isNew,
+  groups,
   onName,
   onMacroChange,
   onSave,
@@ -1716,6 +1717,7 @@ export function MacroEditor({
   macro: Macro;
   error: string;
   isNew: boolean;
+  groups: string[];
   onName: (s: string) => void;
   onMacroChange: (m: Macro) => void;
   onSave: () => void;
@@ -1724,6 +1726,7 @@ export function MacroEditor({
 }) {
   useEscClose(onCancel);
   const setDesc = (description: string) => onMacroChange({ ...macro, description });
+  const setGroup = (group: string) => onMacroChange({ ...macro, group: group || undefined });
   const setStep = (i: number, s: MacroStep) => {
     const steps = macro.steps.slice();
     steps[i] = s;
@@ -1797,6 +1800,10 @@ export function MacroEditor({
           </ConfigRow>
           <ConfigRow label="描述">
             <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+          </ConfigRow>
+          <ConfigRow label="分组">
+            <input value={macro.group ?? ""} list="macro-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" />
+            <datalist id="macro-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
           </ConfigRow>
         </div>
 
@@ -1894,6 +1901,7 @@ export function ScriptEditor({
   script,
   error,
   isNew,
+  groups,
   onName,
   onScriptChange,
   onSave,
@@ -1904,6 +1912,7 @@ export function ScriptEditor({
   script: Script;
   error: string | null;
   isNew: boolean;
+  groups: string[];
   onName: (v: string) => void;
   onScriptChange: (s: Script) => void;
   onSave: () => void;
@@ -1912,6 +1921,7 @@ export function ScriptEditor({
 }) {
   useEscClose(onCancel);
   const setDesc = (description: string) => onScriptChange({ ...script, description });
+  const setGroup = (group: string) => onScriptChange({ ...script, group: group || undefined });
   const setCode = (code: string) => {
     // code 含 // @param 声明 → 自动解析填参数区(AI 生成自包含脚本,粘贴即用)。无声明则不动 params。
     const parsed = parseParamsFromCode(code);
@@ -1939,6 +1949,10 @@ export function ScriptEditor({
           </ConfigRow>
           <ConfigRow label="描述">
             <input value={script.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+          </ConfigRow>
+          <ConfigRow label="分组">
+            <input value={script.group ?? ""} list="script-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" />
+            <datalist id="script-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
           </ConfigRow>
         </div>
 

@@ -81,6 +81,9 @@ pub struct ScriptParam {
 pub struct Script {
     #[serde(default)]
     pub description: Option<String>,
+    /// 分组名(侧栏按组折叠);空 = 未分组。
+    #[serde(default)]
+    pub group: Option<String>,
     /// 声明的运行时参数(string/select),持久化进 scripts.json。旧脚本缺省为空。
     #[serde(default)]
     pub params: Vec<ScriptParam>,

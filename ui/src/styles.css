@@ -228,6 +228,41 @@ button {
 .sidebar-resizer:hover {
   background: var(--rx, var(--hairline));
 }
+/* 侧栏分组(宏/脚本按 group 折叠;组头整行可点) */
+.macro-group {
+  margin-bottom: 4px;
+}
+.macro-group__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.macro-group__head:hover {
+  background: var(--surface-2);
+}
+.macro-group__caret {
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+.macro-group__name {
+  flex: 1;
+  text-align: left;
+}
+.macro-group__count {
+  color: var(--ink-faint);
+  font-weight: 400;
+}
 .sidebar__conn {
   display: flex;
   align-items: center;

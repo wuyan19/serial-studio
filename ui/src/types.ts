@@ -21,6 +21,8 @@ export type StepType = MacroStep["type"];
 
 export interface Macro {
   description?: string;
+  /** 分组名(侧栏按组折叠);空 = 未分组。 */
+  group?: string;
   steps: MacroStep[];
 }
 
@@ -47,6 +49,8 @@ export interface ScriptParam {
 
 export interface Script {
   description?: string;
+  /** 分组名(侧栏按组折叠);空 = 未分组。 */
+  group?: string;
   /** 声明的运行时参数(持久化);运行收集的值经 runScript 的 args 参数注入,不入库。 */
   params?: ScriptParam[];
   code: string;

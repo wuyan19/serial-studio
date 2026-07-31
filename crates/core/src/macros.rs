@@ -18,6 +18,9 @@ use std::time::Duration;
 pub struct Macro {
     #[serde(default)]
     pub description: Option<String>,
+    /// 分组名(侧栏按组折叠);空 = 未分组。
+    #[serde(default)]
+    pub group: Option<String>,
     pub steps: Vec<MacroStep>,
 }
 
