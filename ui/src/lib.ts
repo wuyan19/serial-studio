@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, Script, ScriptParam, SerialConfig } from "./types";
+import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -67,6 +67,21 @@ export function groupBy<T>(
   if (ungrouped.length)
     groups.push({ name: "未分组", items: ungrouped.sort((a, b) => a[0].localeCompare(b[0])) });
   return groups;
+}
+
+// ===== 端口复合键（devId::name，多 Transport 共存时区分本地/远程同名端口） =====
+
+/** 组装端口复合键：`${devId}::${name}`。串口名不含 `::`，分隔安全。 */
+export function portIdOf(devId: string, name: string): PortId {
+  return `${devId}::${name}`;
+}
+
+/** 解析端口复合键。仅按首个 `::` 切分：devId（UUID 或 "local"）不含 `::`，
+ *  name（如 /dev/ttyUSB0）含 `/` 但不含 `::`。无分隔符时按本地裸端口名兼容旧值。 */
+export function parsePortId(id: PortId): { devId: string; name: string } {
+  const idx = id.indexOf("::");
+  if (idx < 0) return { devId: "local", name: id };
+  return { devId: id.slice(0, idx), name: id.slice(idx + 2) };
 }
 
 // ===== localStorage 持久化（跟着用户走的配置） =====
@@ -190,6 +205,24 @@ export async function persistScripts(scripts: Record<string, Script>) {
     }
   } else {
     persistScriptsLocal(scripts);
+  }
+}
+
+const REMOTES_KEY = "serial-studio-remotes";
+export function loadRemotesLocal(): RemoteDevice[] {
+  try {
+    const raw = localStorage.getItem(REMOTES_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+export function persistRemotesLocal(remotes: RemoteDevice[]) {
+  try {
+    localStorage.setItem(REMOTES_KEY, JSON.stringify(remotes));
+  } catch {
+    /* ignore */
   }
 }
 

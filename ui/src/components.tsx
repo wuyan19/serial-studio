@@ -11,6 +11,7 @@ import type {
   Macro,
   MacroStep,
   PaneHalf,
+  PortId,
   PortInfo,
   Script,
   ScriptParam,
@@ -20,7 +21,7 @@ import type {
   StepType,
   TermInstance,
 } from "./types";
-import { BAUD_RATES, downloadJson, isTauri, parseParamsFromCode } from "./lib";
+import { BAUD_RATES, downloadJson, isTauri, parsePortId, parseParamsFromCode } from "./lib";
 import { getTheme, subscribe, type Theme } from "./theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "./term-font";
 import {
@@ -348,6 +349,7 @@ export function GroupView({
   focused,
   aliasEditTab,
   aliasOf,
+  sourceLabelOf,
   onSwitchTab,
   onCloseTab,
   onRenameTab,
@@ -370,6 +372,8 @@ export function GroupView({
   focused: boolean;
   aliasEditTab: { port: string } | null;
   aliasOf: (port: string) => string | undefined;
+  /** Tab 来源标识（多设备时非本地端口后缀设备昵称/地址）；undefined = 不显示。 */
+  sourceLabelOf?: (port: string) => string | undefined;
   onSwitchTab: (port: string) => void;
   onCloseTab: (port: string) => void;
   onRenameTab: (port: string) => void;
@@ -468,6 +472,8 @@ export function GroupView({
         {group.ports.map((port) => {
           const isActive = port === group.activePort;
           const editingThis = aliasEditTab?.port === port;
+          const portName = parsePortId(port).name;
+          const src = sourceLabelOf?.(port);
           return (
             <div
               key={port}
@@ -485,19 +491,22 @@ export function GroupView({
                 if (!editingThis) onSwitchTab(port);
               }}
               onDoubleClick={() => onRenameTab(port)}
-              title={`切换 ${port}（双击改名）`}
+              title={`切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
             >
               <span className="tab__dot" />
               <span className="tab__name">
                 {editingThis ? (
                   <InlineAliasInput
                     initial={aliasOf(port) ?? ""}
-                    placeholder={`为 ${port} 设置别名`}
+                    placeholder={`为 ${portName} 设置别名`}
                     onCommit={(alias) => onCommitAlias(port, alias)}
                     onCancel={onCancelAlias}
                   />
                 ) : (
-                  <PortLabel name={port} alias={aliasOf(port)} />
+                  <>
+                    <PortLabel name={portName} alias={aliasOf(port)} />
+                    {src && <span className="tab__src">{src}</span>}
+                  </>
                 )}
               </span>
               <span
@@ -506,7 +515,7 @@ export function GroupView({
                   e.stopPropagation();
                   onCloseTab(port);
                 }}
-                title={`关闭 ${port}`}
+                title={`关闭 ${portName}`}
               >
                 <IconClose />
               </span>
@@ -1531,8 +1540,8 @@ export function PortPalette({
   onSelect,
   onClose,
 }: {
-  ports: PortInfo[];
-  onSelect: (name: string) => void;
+  ports: (PortInfo & { pid: PortId })[];
+  onSelect: (pid: PortId) => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -1540,14 +1549,14 @@ export function PortPalette({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => {
-    const matched: { name: string; score: number; first: number }[] = [];
+    const matched: { pid: PortId; score: number; first: number }[] = [];
     for (const p of ports) {
       const hay = p.alias ? `${p.alias} ${p.name}` : p.name;
       const m = fuzzyMatch(query, hay);
-      if (m) matched.push({ name: p.name, score: m.score, first: m.first });
+      if (m) matched.push({ pid: p.pid, score: m.score, first: m.first });
     }
-    matched.sort((a, b) => a.score - b.score || a.first - b.first || a.name.localeCompare(b.name));
-    return matched.map((x) => x.name);
+    matched.sort((a, b) => a.score - b.score || a.first - b.first || a.pid.localeCompare(b.pid));
+    return matched.map((x) => x.pid);
   }, [ports, query]);
 
   useEffect(() => {
@@ -1558,14 +1567,14 @@ export function PortPalette({
     inputRef.current?.select();
   }, []);
 
-  const byName = useMemo(() => {
+  const byPid = useMemo(() => {
     const m: Record<string, PortInfo> = {};
-    for (const p of ports) m[p.name] = p;
+    for (const p of ports) m[p.pid] = p;
     return m;
   }, [ports]);
 
-  const commit = (name: string) => {
-    onSelect(name);
+  const commit = (pid: PortId) => {
+    onSelect(pid);
     onClose();
   };
   const onKey = (e: React.KeyboardEvent) => {
@@ -1577,8 +1586,8 @@ export function PortPalette({
       if (filtered.length) setSelected((i) => (i - 1 + filtered.length) % filtered.length);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const name = filtered[selected] ?? filtered[0];
-      if (name) commit(name);
+      const pid = filtered[selected] ?? filtered[0];
+      if (pid) commit(pid);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onClose();
@@ -1598,16 +1607,16 @@ export function PortPalette({
         />
         <div className="palette__list">
           {filtered.length === 0 && <div className="palette__empty">无匹配串口</div>}
-          {filtered.map((name, i) => (
+          {filtered.map((pid, i) => (
             <button
               type="button"
-              key={name}
+              key={pid}
               className={"palette__item" + (i === selected ? " palette__item--selected" : "")}
               onMouseEnter={() => setSelected(i)}
-              onClick={() => commit(name)}
+              onClick={() => commit(pid)}
             >
               <span className="palette__name">
-                <PortLabel name={name} alias={byName[name]?.alias} />
+                <PortLabel name={byPid[pid]?.name ?? pid} alias={byPid[pid]?.alias} />
               </span>
             </button>
           ))}
@@ -2284,8 +2293,8 @@ export function ScriptSkillDialog({
 }
 
 export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
-  input: { host: string; port: number };
-  onChange: (v: { host: string; port: number }) => void;
+  input: { host: string; port: number; nickname: string };
+  onChange: (v: { host: string; port: number; nickname: string }) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -2294,22 +2303,25 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
-          <IconGlobe /> REMOTE
+          <IconGlobe /> 添加远程设备
         </h3>
-        <div className="dialog__sub">连接远程服务</div>
+        <div className="dialog__sub">连接远程 Serial Studio 服务</div>
         <ConfigRow label="地址">
           <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" />
         </ConfigRow>
         <ConfigRow label="端口">
           <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" />
         </ConfigRow>
-        <p className="dialog__hint">将在新窗口连接远程 Serial Studio 服务，本地窗口保留。</p>
+        <ConfigRow label="昵称">
+          <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" />
+        </ConfigRow>
+        <p className="dialog__hint">将作为远程设备卡加入串口列表，展开即按需连接。</p>
         <div className="btn-row">
           <button className="btn btn--ghost" onClick={onCancel}>
             取消
           </button>
           <button className="btn btn--primary" onClick={onConfirm}>
-            连接
+            添加
           </button>
         </div>
       </div>

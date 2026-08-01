@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActionId,
   ConnConfig,
@@ -7,7 +7,9 @@ import type {
   MacroResult,
   PaneHalf,
   PaneNode,
+  PortId,
   PortInfo,
+  RemoteDevice,
   Script,
   ScriptResult,
   SerialConfig,
@@ -23,9 +25,13 @@ import {
   isTauri,
   loadConfig,
   loadMacrosLocal,
+  loadRemotesLocal,
   loadScriptsLocal,
+  parsePortId,
   persistMacros,
+  persistRemotesLocal,
   persistScripts,
+  portIdOf,
   saveConfig,
   saveConn,
   tauriInvoke,
@@ -175,17 +181,29 @@ function parseImportedScripts(data: unknown, existing: Record<string, Script>): 
   return [];
 }
 
+/** Web/远程窗口：把单连接配置派生为单设备列表（id 固定 "remote"，无 localStorage 持久化）。 */
+function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
+  return [{ id: "remote", host: c.host, port: c.port }];
+}
+
 /**
  * Serial Studio 前端主组件（Tauri 与浏览器共用）。
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
  * 仪器风布局：活动栏 + 可收起次侧栏 + 通道条 + 主终端区。
  */
 export default function App() {
-  const [ports, setPorts] = useState<PortInfo[]>([]);
+  const isRemote = !!getRemoteFromUrl();
+  const isLocal = isTauri() && !isRemote;
+  // portsByDev：按设备域分桶的端口列表（key=devId）。本地 devId="local"，远程=设备 UUID/窗口 "remote"。
+  // devId 由桶 key 隐含（不进 PortInfo），保后端契约零侵入。多 Transport 共存的核心数据结构。
+  const [portsByDev, setPortsByDev] = useState<Record<string, PortInfo[]>>({});
   const [macros, setMacros] = useState<Record<string, Macro>>({});
   const [macroResult, setMacroResult] = useState<MacroResult | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [openPorts, setOpenPorts] = useState<string[]>([]);
+  // devOnline[devId]：该设备 WS/IPC 是否就绪，驱动折叠卡状态点。
+  const [devOnline, setDevOnline] = useState<Record<string, boolean>>({});
+  /** 全局连接标志（兼容旧消费方：通道条/Web 远程提示）。本地看 devOnline["local"]，远程看任一就绪。 */
+  const connected = isLocal ? !!devOnline["local"] : Object.values(devOnline).some(Boolean);
+  const [openPorts, setOpenPorts] = useState<PortId[]>([]);
   const [portConfigs, setPortConfigs] = useState<Record<string, SerialConfig>>({});
   /** editor-group 分栏：每个 group = 标签栏 + 终端区。端口唯一归属一个 group（不扇出）。
    *  单 group（layout 单叶）时 openPorts == groups[g1].ports，行为同单视图。多 group 见后续 Phase。 */
@@ -211,9 +229,17 @@ export default function App() {
   const [pendingPort, setPendingPort] = useState<string | null>(null);
   const [serialConfig, setSerialConfig] = useState<SerialConfig>(loadConfig);
   const [connConfig, setConnConfig] = useState<ConnConfig>(initConn);
-  const isRemote = !!getRemoteFromUrl();
+  // 已知远程设备列表：桌面端持久化 localStorage；Web/远程窗口由 connConfig 派生单设备（不持久化）。
+  const [remotes, setRemotes] = useState<RemoteDevice[]>(() =>
+    isLocal ? loadRemotesLocal() : initRemoteFromConn(connConfig),
+  );
+  // 展开的远程设备卡（= 需要连接）。桌面端启动时默认全展开 → 自动重连之前的设备；
+  // Web/远程窗口默认展开其唯一设备。
+  const [expandedRemotes, setExpandedRemotes] = useState<Set<string>>(() =>
+    isLocal ? new Set(loadRemotesLocal().map((r) => r.id)) : new Set(["remote"]),
+  );
   const [remoteOpen, setRemoteOpen] = useState(false);
-  const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700 });
+  const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editing, setEditing] = useState<{ name: string; isNew: boolean } | null>(null);
@@ -251,6 +277,15 @@ export default function App() {
       localStorage.setItem("script-groups-collapsed", JSON.stringify([...next]));
       return next;
     });
+  /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
+  const [portCollapsed, setPortCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("port-groups-collapsed") ?? "[]") as string[]));
+  const togglePortGroup = (devId: string) =>
+    setPortCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(devId)) next.delete(devId); else next.add(devId);
+      localStorage.setItem("port-groups-collapsed", JSON.stringify([...next]));
+      return next;
+    });
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
@@ -285,7 +320,12 @@ export default function App() {
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
-  const transportRef = useRef<Transport | null>(null);
+  // 多 Transport 实例：key=devId。本地 "local" 常驻，远程按引用计数懒建/销（见 transport effect）。
+  const transportsRef = useRef<Map<string, Transport>>(new Map());
+  /** 每设备 Transport 的回调取消函数（dispose 时清理）。 */
+  const unsubsByDev = useRef<Map<string, (() => void)[]>>(new Map());
+  /** 每远程设备上次连接地址（host:port）；变化时强制销毁重建（Web 改连接 / 编辑设备 host）。 */
+  const remoteAddrRef = useRef<Map<string, string>>(new Map());
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const importInputRef = useRef<HTMLInputElement>(null);
   const scriptImportInputRef = useRef<HTMLInputElement>(null);
@@ -340,40 +380,41 @@ export default function App() {
     activityRef.current.set(port, e);
   };
 
-  const isLocal = isTauri() && !isRemote;
   // 脚本入口显隐：本地主权恒显；远程/Web 取决于服务端 enable_scripting
   const showScripts = isLocal || scriptEnabled;
 
-  // 数据面连接。本地模式 IPC 常驻——不随 connConfig 重连：connConfig 在本地仅用于显示，
-  // 重建 LocalTransport 会丢掉已开端口的 per-port RX Channel，导致改服务监听设置后串口"变哑"
-  // （输入发出但收不到回显/响应，重开端口才好）。远程/Web 用 WS，connConfig 变化时重建。
-  // transportKey 表达此意图：本地恒为 "local"，远程随地址变。
-  const transportKey = isLocal ? "local" : `${connConfig.host}:${connConfig.port}`;
-  useEffect(() => {
-    const t = isLocal ? new LocalTransport() : new RemoteTransport(connConfig.host, connConfig.port);
-    transportRef.current = t;
-    const unsubs = [
-      t.onPorts(setPorts),
+  // activeTabCount：每设备的活跃 Tab 数（端口在任一 group.ports 中）。驱动远程按需连接。
+  const activeTabCount = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const g of Object.values(groups))
+      for (const pid of g.ports) {
+        const { devId } = parsePortId(pid);
+        counts[devId] = (counts[devId] ?? 0) + 1;
+      }
+    return counts;
+  }, [groups]);
+
+  /** 把 Transport 的所有事件绑到指定 devId：onData/onPortClosed 用 portIdOf 还原复合键，
+   *  onPorts 写入 portsByDev[devId] 桶，onConnectedChange 写 devOnline[devId]。返回取消函数。 */
+  const bindTransport = useCallback((devId: string, t: Transport): (() => void)[] => {
+    return [
+      t.onPorts((list) => setPortsByDev((prev) => ({ ...prev, [devId]: list }))),
       t.onConnectedChange((conn) => {
-        setConnected(conn);
+        setDevOnline((prev) => ({ ...prev, [devId]: conn }));
         if (conn) t.list();
       }),
       t.onData((port, data) => {
-        touch(port, "rx"); // 签名：收到字节 → RX 亮
-        const inst = terminalsRef.current.get(port);
-        if (inst) inst.term.write(data);
+        const pid = portIdOf(devId, port);
+        touch(pid, "rx"); // 签名：收到字节 → RX 亮
+        terminalsRef.current.get(pid)?.term.write(data);
       }),
-      t.onPortOpened(() => {
-        t.list();
-      }),
+      t.onPortOpened(() => t.list()),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
-        prunePort(port);
+        prunePort(portIdOf(devId, port));
         t.list();
       }),
-      t.onHolders(() => {
-        t.list();
-      }),
+      t.onHolders(() => t.list()),
       t.onMetaChanged(() => {
         // 别名等元数据变更（本机或别的客户端改的）→ 及时刷新，不必等串口事件
         t.list();
@@ -385,12 +426,78 @@ export default function App() {
       t.onMacroResult((name, success, message) => setMacroResult({ name, success, message })),
       t.onScriptResult((name, success, message) => setScriptResult({ name, success, message })),
     ];
-    return () => {
-      unsubs.forEach((fn) => fn());
-      t.dispose();
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transportKey]);
+  }, []);
+
+  // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
+  // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。
+  useEffect(() => {
+    if (!isLocal) return;
+    const devId = "local";
+    const t = new LocalTransport();
+    transportsRef.current.set(devId, t);
+    unsubsByDev.current.set(devId, bindTransport(devId, t));
+    return () => {
+      unsubsByDev.current.get(devId)?.forEach((fn) => fn());
+      unsubsByDev.current.delete(devId);
+      t.dispose();
+      transportsRef.current.delete(devId);
+    };
+  }, [isLocal, bindTransport]);
+
+  // 远程 Transport 引用计数（按需）：需求 = 卡展开 OR 该 devId 有活跃 Tab。
+  // false→true 建连（RemoteTransport + 绑回调 + list），true→false 断开（dispose + 清状态）。
+  // 地址变化（Web 改连接 / 编辑设备 host）→ 销毁旧实例按新地址重建。Web 单设备默认在 expandedRemotes，自动建连。
+  useEffect(() => {
+    const wanted = new Set<string>();
+    for (const d of remotes) {
+      if (expandedRemotes.has(d.id) || (activeTabCount[d.id] ?? 0) > 0) wanted.add(d.id);
+    }
+    const map = transportsRef.current;
+    const addrMap = remoteAddrRef.current;
+    const teardown = (id: string) => {
+      unsubsByDev.current.get(id)?.forEach((fn) => fn());
+      unsubsByDev.current.delete(id);
+      map.get(id)?.dispose();
+      map.delete(id);
+      addrMap.delete(id);
+      setDevOnline((prev) => {
+        const n = { ...prev };
+        delete n[id];
+        return n;
+      });
+    };
+    const create = (d: RemoteDevice) => {
+      const t = new RemoteTransport(d.host, d.port);
+      map.set(d.id, t);
+      addrMap.set(d.id, `${d.host}:${d.port}`);
+      unsubsByDev.current.set(d.id, bindTransport(d.id, t));
+    };
+    for (const d of remotes) {
+      const existing = map.get(d.id);
+      const addrChanged = addrMap.get(d.id) !== `${d.host}:${d.port}`;
+      if (wanted.has(d.id)) {
+        if (!existing) create(d);
+        else if (addrChanged) {
+          teardown(d.id);
+          create(d);
+        }
+      } else if (existing) {
+        teardown(d.id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remotes, expandedRemotes, activeTabCount, bindTransport]);
+
+  // Web/远程窗口：connConfig 变 → 同步单设备 remotes[0] 的 host/port（驱动上面的引用计数 effect 重连）。
+  useEffect(() => {
+    if (isLocal) return;
+    setRemotes((prev) => {
+      const r = prev[0];
+      if (r && r.host === connConfig.host && r.port === connConfig.port) return prev;
+      return [{ id: r?.id ?? "remote", host: connConfig.host, port: connConfig.port }];
+    });
+  }, [isLocal, connConfig.host, connConfig.port]);
 
   // 服务器配置：Tauri 控制面 invoke 读本地 settings.json
   useEffect(() => {
@@ -427,10 +534,12 @@ export default function App() {
   // 远程窗口虽 isTauri() 为真，但连的是远程服务，版本应反映服务端而非本机 app。
   // 连接时序由 RemoteTransport.send() 内部 await open 兜底，挂载即取也不会踩 CONNECTING 异常。
   useEffect(() => {
-    transportRef.current?.getVersion().then(({ version, enableScripting }) => {
+    const t = transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "");
+    t?.getVersion().then(({ version, enableScripting }) => {
       setVersion(version);
       setScriptEnabled(enableScripting);
     }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 侧栏宽度持久化(随用户走,localStorage)
@@ -519,21 +628,22 @@ export default function App() {
   }, [activePort]);
 
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。 */
-  const openPort = async (port: string, config: SerialConfig) => {
+  const openPort = async (pid: PortId, config: SerialConfig) => {
+    const { devId, name } = parsePortId(pid);
     try {
-      const res = await transportRef.current?.open(port, config);
+      const res = await transportsRef.current.get(devId)?.open(name, config);
       if (!res) return undefined;
       // 成功占有（首开或附加）：创建本会话的终端标签，并记录端口实际配置供通道条展示
-      setOpenPorts((prev) => (prev.includes(port) ? prev : [...prev, port]));
+      setOpenPorts((prev) => (prev.includes(pid) ? prev : [...prev, pid]));
       // 进聚焦 group 并设为活动端口（端口唯一归属：openPort 是新开，此前不在任何 group）
       const fg = focusedGroupIdRef.current;
       setGroups((g) => {
         const cur = g[fg];
         if (!cur) return g;
-        const ports = cur.ports.includes(port) ? cur.ports : [...cur.ports, port];
-        return { ...g, [fg]: { ...cur, ports, activePort: port } };
+        const ports = cur.ports.includes(pid) ? cur.ports : [...cur.ports, pid];
+        return { ...g, [fg]: { ...cur, ports, activePort: pid } };
       });
-      setPortConfigs((prev) => ({ ...prev, [port]: res.config }));
+      setPortConfigs((prev) => ({ ...prev, [pid]: res.config }));
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置
         const c = res.config;
@@ -550,18 +660,19 @@ export default function App() {
 
   /** 打开对话框确认：先 open，仅首开（opened=true）才落别名——与串口参数同逻辑（附加时别名忽略）。 */
   const confirmOpen = async (config: SerialConfig, alias: string) => {
-    const port = pendingPort;
-    if (!port) return;
+    const pid = pendingPort;
+    if (!pid) return;
     saveConfig(config);
     setPendingPort(null);
-    const res = await openPort(port, config);
+    const res = await openPort(pid, config);
     const trimmed = alias.trim();
     if (!trimmed) return;
     if (res?.opened) {
       // 首开：别名生效
+      const { devId, name } = parsePortId(pid);
       try {
-        await transportRef.current?.setAlias(port, trimmed);
-        refreshPorts();
+        await transportsRef.current.get(devId)?.setAlias(name, trimmed);
+        refreshPorts(devId);
       } catch (e) {
         setErrorMsg("设置别名失败: " + String(e));
         setTimeout(() => setErrorMsg(""), 5000);
@@ -576,23 +687,23 @@ export default function App() {
   /** 从分栏与端口清单移除端口（关端口共用：用户主动关 closePort + 远端被关 onPortClosed）。
    *  所属 group 的 ports 移除 + activePort 回退；group 空（且非唯一根）→ 删 group + removeLeaf 坍缩，
    *  focused 回退交给 effect 自愈。全用函数式 setState，transport effect 的 stale 闭包调用也安全。 */
-  const prunePort = (port: string) => {
-    const gid = groupOfPortRef.current.get(port);
-    setOpenPorts((prev) => prev.filter((p) => p !== port));
+  const prunePort = (pid: PortId) => {
+    const gid = groupOfPortRef.current.get(pid);
+    setOpenPorts((prev) => prev.filter((p) => p !== pid));
     setPortConfigs((prev) => {
-      if (!prev[port]) return prev;
+      if (!prev[pid]) return prev;
       const next = { ...prev };
-      delete next[port];
+      delete next[pid];
       return next;
     });
-    terminalsRef.current.delete(port);
-    activityRef.current.delete(port);
+    terminalsRef.current.delete(pid);
+    activityRef.current.delete(pid);
     if (!gid) return; // 不在任何 group（异常）——上面已清端口清单/实例
     setGroups((g) => {
       const cur = g[gid];
       if (!cur) return g;
-      const ports = cur.ports.filter((p) => p !== port);
-      if (ports.length > 0) return { ...g, [gid]: { ...cur, ports, activePort: cur.activePort === port ? ports[ports.length - 1] : cur.activePort } };
+      const ports = cur.ports.filter((p) => p !== pid);
+      if (ports.length > 0) return { ...g, [gid]: { ...cur, ports, activePort: cur.activePort === pid ? ports[ports.length - 1] : cur.activePort } };
       // group 空：唯一根保留为空 group（承接下次 openPort，否则 layout 仍指向它、focused 也指向它，
       // 重开端口进不去 → 端口在线却不显示）；多 group 才删（layout 坍缩见下）
       if (Object.keys(g).length <= 1) return { ...g, [gid]: { ...cur, ports: [], activePort: "" } };
@@ -605,22 +716,33 @@ export default function App() {
       setLayout((tree) => (leafGroupIds(tree).length <= 1 ? tree : removeLeaf(tree, gid) ?? tree));
     }
   };
-  const closePort = (port: string) => {
+  const closePort = (pid: PortId) => {
     // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
-    if (aliasEdit?.port === port) setAliasEdit(null);
-    transportRef.current?.close(port);
-    prunePort(port);
+    if (aliasEdit?.port === pid) setAliasEdit(null);
+    const { devId, name } = parsePortId(pid);
+    transportsRef.current.get(devId)?.close(name);
+    prunePort(pid);
   };
 
-  const forceClosePort = (port: string) => {
+  const forceClosePort = (pid: PortId) => {
+    const { name } = parsePortId(pid);
     setConfirmState({
       title: "强制关闭端口",
       icon: <IconPower />,
-      message: `强制关闭 ${port}？将断开所有远程客户端（WS/MCP）的连接。`,
+      message: `强制关闭 ${name}？将断开所有远程客户端并关闭该端口。`,
       confirmText: "强制关闭",
       tone: "danger",
-      onConfirm: () => {
-        transportRef.current?.forceClose(port);
+      onConfirm: async () => {
+        const t = transportsRef.current.get("local");
+        if (t) {
+          try {
+            await t.forceClose(name); // 踢远程持有者（force_close_others）
+            await t.close(name);      // 本地释放（远程已踢 → 末位 → 拆毁端口）
+          } catch {
+            /* 端口可能已被 force_close 拆毁，忽略 */
+          }
+        }
+        prunePort(pid); // 显式清本地 tab（不依赖 onPortClosed 事件）
         setConfirmState(null);
       },
     });
@@ -752,6 +874,13 @@ export default function App() {
         focused={isFocused}
         aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
         aliasOf={aliasOf}
+        sourceLabelOf={(pid) => {
+          if (remotes.length === 0) return undefined;
+          const { devId } = parsePortId(pid);
+          if (devId === "local") return undefined;
+          const d = remotes.find((r) => r.id === devId);
+          return d ? (d.nickname?.trim() || `${d.host}:${d.port}`) : undefined;
+        }}
         onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
         onCloseTab={closePort}
         onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
@@ -760,7 +889,8 @@ export default function App() {
         onFocusGroup={() => setFocusedGroupId(node.groupId)}
         onWrite={(p, data) => {
           touch(p, "tx");
-          transportRef.current?.write(p, data);
+          const { devId, name } = parsePortId(p);
+          transportsRef.current.get(devId)?.write(name, data);
         }}
         onReady={(p, inst) => {
           if (inst) terminalsRef.current.set(p, inst);
@@ -784,16 +914,17 @@ export default function App() {
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
-  const triggerPort = (name: string) => {
-    if (openPorts.includes(name)) {
+  const triggerPort = (pid: PortId) => {
+    if (openPorts.includes(pid)) {
       // 已开：聚焦到端口所属 group 并切其 tab（端口可能不在当前聚焦 group，纯 switchPort 会 no-op）
-      const gid = groupOfPort.get(name);
-      if (gid) switchTabInGroup(gid, name);
-      else switchPort(name);
-    } else if (ports.find((p) => p.name === name)?.opened) {
-      void openPort(name, serialConfig);
+      const gid = groupOfPort.get(pid);
+      if (gid) switchTabInGroup(gid, pid);
+      else switchPort(pid);
     } else {
-      setPendingPort(name);
+      const { devId, name } = parsePortId(pid);
+      const info = portsByDev[devId]?.find((p) => p.name === name);
+      if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
+      else setPendingPort(pid); // 未开：弹配置框
     }
   };
 
@@ -803,7 +934,8 @@ export default function App() {
       return;
     }
     setMacroResult({ name, success: true, message: "运行中..." });
-    transportRef.current?.runMacro(name, activePort, macros[name]);
+    const { devId, name: portName } = parsePortId(activePort);
+    transportsRef.current.get(devId)?.runMacro(name, portName, macros[name]);
   };
 
   const openMacroEditor = (name: string | null) => {
@@ -860,7 +992,8 @@ export default function App() {
       return;
     }
     setScriptResult({ name, success: true, message: "运行中..." });
-    transportRef.current?.runScript(name, activePort, scripts[name], args);
+    const { devId, name: portName } = parsePortId(activePort);
+    transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args);
   };
   const runScript = (name: string) => {
     // 脚本声明了参数 → 弹收集框;否则直接跑。
@@ -990,37 +1123,119 @@ export default function App() {
     }
   };
 
-  const openRemoteWindow = async () => {
+  /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。同地址已存在则轻提示。 */
+  const addRemote = () => {
     const host = remoteInput.host.trim();
     if (!host) return;
-    try {
-      await tauriInvoke("open_remote_window", { host, port: remoteInput.port });
-      setRemoteOpen(false);
-    } catch (e) {
-      setErrorMsg("打开远程窗口失败: " + e);
-      setTimeout(() => setErrorMsg(""), 5000);
+    const id = crypto.randomUUID();
+    const dev: RemoteDevice = { id, host, port: remoteInput.port, nickname: remoteInput.nickname.trim() || undefined };
+    const dup = remotes.some((r) => r.host === host && r.port === dev.port);
+    setRemotes((prev) => {
+      const next = [...prev, dev];
+      if (isLocal) persistRemotesLocal(next);
+      return next;
+    });
+    setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
+    setRemoteInput({ host: "", port: 18700, nickname: "" });
+    setRemoteOpen(false);
+    if (dup) {
+      setNotice(`已添加（${host}:${dev.port} 已存在同地址设备）。`);
+      setTimeout(() => setNotice(""), 5000);
     }
   };
 
-  const refreshPorts = () => {
-    transportRef.current?.list();
+  /** 删除远程设备：关其所有 Tab + 显式销毁 transport（引用计数 effect 不再遍历已删 devId）+ 移出列表。 */
+  const removeRemote = (dev: RemoteDevice) => {
+    setConfirmState({
+      title: "删除远程设备",
+      icon: <IconTrash />,
+      message: `删除远程设备「${dev.nickname?.trim() || `${dev.host}:${dev.port}`}」？将关闭其所有打开的串口标签。`,
+      confirmText: "删除",
+      tone: "danger",
+      onConfirm: () => {
+        openPorts.filter((p) => parsePortId(p).devId === dev.id).forEach((pid) => prunePort(pid));
+        unsubsByDev.current.get(dev.id)?.forEach((fn) => fn());
+        unsubsByDev.current.delete(dev.id);
+        transportsRef.current.get(dev.id)?.dispose();
+        transportsRef.current.delete(dev.id);
+        remoteAddrRef.current.delete(dev.id);
+        setDevOnline((prev) => {
+          const n = { ...prev };
+          delete n[dev.id];
+          return n;
+        });
+        setRemotes((prev) => {
+          const next = prev.filter((r) => r.id !== dev.id);
+          if (isLocal) persistRemotesLocal(next);
+          return next;
+        });
+        setExpandedRemotes((prev) => {
+          const n = new Set(prev);
+          n.delete(dev.id);
+          return n;
+        });
+        setConfirmState(null);
+      },
+    });
   };
 
-  const aliasOf = (name: string) => ports.find((p) => p.name === name)?.alias;
+  /** 手动重连：dispose 旧 transport + 清地址缓存 + 确保 wanted → 引用计数 effect 重建（重试 WS）。 */
+  const reconnectRemote = (dev: RemoteDevice) => {
+    unsubsByDev.current.get(dev.id)?.forEach((fn) => fn());
+    unsubsByDev.current.delete(dev.id);
+    transportsRef.current.get(dev.id)?.dispose();
+    transportsRef.current.delete(dev.id);
+    remoteAddrRef.current.delete(dev.id);
+    setDevOnline((prev) => {
+      const n = { ...prev };
+      delete n[dev.id];
+      return n;
+    });
+    setExpandedRemotes((prev) => {
+      const n = new Set(prev);
+      n.add(dev.id);
+      return n;
+    });
+  };
+
+  const refreshPorts = (devId?: string) => {
+    if (devId) transportsRef.current.get(devId)?.list();
+    else transportsRef.current.forEach((t) => t.list());
+  };
+
+  /** 按复合键查端口信息（devId 桶 + 裸 name）。多 Transport 端口查找的唯一入口。 */
+  const portInfoOf = (pid: PortId): PortInfo | undefined => {
+    const { devId, name } = parsePortId(pid);
+    return portsByDev[devId]?.find((p) => p.name === name);
+  };
+  const aliasOf = (pid: PortId) => portInfoOf(pid)?.alias;
 
   /** 提交别名：写 ports.json + 刷新列表使别名立即显示。空串 = 清除。 */
-  const commitAlias = async (port: string, alias: string) => {
+  const commitAlias = async (pid: PortId, alias: string) => {
     setAliasEdit(null);
+    const { devId, name } = parsePortId(pid);
     try {
-      await transportRef.current?.setAlias(port, alias);
-      refreshPorts();
+      await transportsRef.current.get(devId)?.setAlias(name, alias);
+      refreshPorts(devId);
     } catch (e) {
       setErrorMsg("设置别名失败: " + String(e));
       setTimeout(() => setErrorMsg(""), 5000);
     }
   };
 
-  const activeHolders = ports.find((p) => p.name === activePort)?.holders ?? 0;
+  const activeHolders = activePort ? portInfoOf(activePort)?.holders ?? 0 : 0;
+  /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）。每卡带 devId/label/online/ports。 */
+  const portGroups: { devId: string; label: string; online?: boolean; ports: PortInfo[] }[] = [
+    ...(isLocal ? [{ devId: "local", label: "本地", online: devOnline["local"], ports: portsByDev["local"] ?? [] }] : []),
+    ...remotes.map((d) => ({
+      devId: d.id,
+      label: d.nickname?.trim() || `${d.host}:${d.port}`,
+      online: devOnline[d.id],
+      ports: portsByDev[d.id] ?? [],
+    })),
+  ];
+  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。 */
+  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: portIdOf(g.devId, p.name) })));
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
 
@@ -1087,7 +1302,7 @@ export default function App() {
           <ActivityIcon icon={<IconCode className="act-icon__svg" />} title="脚本" active={activity === "scripts"} onClick={() => setActivity(activity === "scripts" ? null : "scripts")} />
         )}
         <div className="activity-bar__spacer" />
-        {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="打开远程窗口" active={false} onClick={() => setRemoteOpen(true)} />}
+        {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
         <ActivityIcon
           icon={theme === "dark" ? <IconMoon className="act-icon__svg" /> : <IconSun className="act-icon__svg" />}
           title={theme === "dark" ? "切换亮色模式" : "切换暗色模式"}
@@ -1127,65 +1342,94 @@ export default function App() {
             <>
               <div className="section-head">
                 <h4 className="section-head__title">PORTS</h4>
-                <button className="icon-btn" onClick={refreshPorts} title="刷新">
+                <button className="icon-btn" onClick={() => refreshPorts()} title="刷新">
                   <IconRefresh />
                 </button>
               </div>
-              {ports.length === 0 && <p className="sidebar__empty">无可用端口</p>}
-              {ports.map((p) => {
-                const isActive = p.name === activePort;
-                const editingThis = aliasEdit?.port === p.name && aliasEdit?.where === "list";
+              {portGroups.map((grp) => {
+                const dev = grp.devId === "local" ? null : remotes.find((r) => r.id === grp.devId);
                 return (
-                  <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={isLocal && p.opened ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
-                    <div
-                      className="port-item"
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => {
-                        if (!editingThis) triggerPort(p.name);
-                      }}
-                      onKeyDown={(e) => {
-                        if (editingThis) return;
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          triggerPort(p.name);
-                        }
-                      }}
-                    >
-                      <span className={`port-item__dot${p.opened ? " open" : ""}`} />
-                      <span className="port-item__name">
-                        {editingThis ? (
-                          <InlineAliasInput
-                            initial={p.alias ?? ""}
-                            placeholder={`为 ${p.name} 设置别名`}
-                            onCommit={(alias) => commitAlias(p.name, alias)}
-                            onCancel={() => setAliasEdit(null)}
-                          />
-                        ) : (
-                          <PortLabel name={p.name} alias={p.alias} />
-                        )}
-                      </span>
-                      {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
-                    </div>
-                    <button
-                      className="port-item__edit"
-                      title={`设置 ${p.name} 别名`}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => setAliasEdit({ port: p.name, where: "list" })}
-                    >
-                      <IconEdit />
+                <div key={grp.devId} className="macro-group">
+                  <div className="port-group__head">
+                    <button className="port-group__toggle" onClick={() => togglePortGroup(grp.devId)}>
+                      <span className={`dot ${grp.online ? "on" : "off"}`} />
+                      <span className="macro-group__caret">{portCollapsed.has(grp.devId) ? "▶" : "▼"}</span>
+                      <span className="port-group__name">{grp.label}</span>
+                      <span className="macro-group__count">{grp.ports.length}</span>
                     </button>
-                    {isLocal && p.opened && (
-                      <button
-                        className="port-item__force"
-                        title={`强制关闭 ${p.name}（断开远程）`}
-                        onClick={() => forceClosePort(p.name)}
-                      >
-                        <IconPower />
-                      </button>
+                    {dev && (
+                      <>
+                        {grp.online !== true && (
+                          <button className="macro-action port-group__action" title="重连设备" onClick={() => reconnectRemote(dev)}><IconRefresh /></button>
+                        )}
+                        <button className="macro-action macro-action--danger port-group__action" title="删除设备" onClick={() => removeRemote(dev)}><IconTrash /></button>
+                      </>
                     )}
                   </div>
-                );
+                  {!portCollapsed.has(grp.devId) &&
+                    (grp.ports.length === 0 ? (
+                      <p className="sidebar__empty">{grp.online === false ? "未连接" : "无可用端口"}</p>
+                    ) : (
+                      grp.ports.map((p) => {
+                        const pid = portIdOf(grp.devId, p.name);
+                        const isActive = pid === activePort;
+                        const editingThis = aliasEdit?.port === pid && aliasEdit?.where === "list";
+                        const canForce = grp.devId === "local" && p.opened;
+                        return (
+                          <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
+                            <div
+                              className="port-item"
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => {
+                                if (!editingThis) triggerPort(pid);
+                              }}
+                              onKeyDown={(e) => {
+                                if (editingThis) return;
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  triggerPort(pid);
+                                }
+                              }}
+                            >
+                              <span className={`port-item__dot${p.opened ? " open" : ""}`} />
+                              <span className="port-item__name">
+                                {editingThis ? (
+                                  <InlineAliasInput
+                                    initial={p.alias ?? ""}
+                                    placeholder={`为 ${p.name} 设置别名`}
+                                    onCommit={(alias) => commitAlias(pid, alias)}
+                                    onCancel={() => setAliasEdit(null)}
+                                  />
+                                ) : (
+                                  <PortLabel name={p.name} alias={p.alias} />
+                                )}
+                              </span>
+                              {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
+                            </div>
+                            <button
+                              className="port-item__edit"
+                              title={`设置 ${p.name} 别名`}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => setAliasEdit({ port: pid, where: "list" })}
+                            >
+                              <IconEdit />
+                            </button>
+                            {canForce && (
+                              <button
+                                className="port-item__force"
+                                title={`强制关闭 ${p.name}（断开远程）`}
+                                onClick={() => forceClosePort(pid)}
+                              >
+                                <IconPower />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
+                    ))}
+                </div>
+              );
               })}
             </>
           )}
@@ -1279,7 +1523,7 @@ export default function App() {
                     onClick={() => {
                       setSkillOpen(true);
                       if (skillText === null) {
-                        transportRef.current?.getScriptSkill().then(setSkillText).catch(() => {});
+                        transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "")?.getScriptSkill().then(setSkillText).catch(() => {});
                       }
                     }}
                   >
@@ -1391,7 +1635,8 @@ export default function App() {
                 focused={!!g && gid === focusedGroupId && g.activePort === port}
                 onWrite={(p, data) => {
                   touch(p, "tx");
-                  transportRef.current?.write(p, data);
+                  const { devId, name } = parsePortId(p);
+                  transportsRef.current.get(devId)?.write(name, data);
                 }}
                 onReady={(inst) => {
                   if (inst) terminalsRef.current.set(port, inst);
@@ -1538,7 +1783,7 @@ export default function App() {
       )}
       {portPaletteOpen && (
         <PortPalette
-          ports={ports}
+          ports={allPorts}
           onSelect={triggerPort}
           onClose={() => {
             setPortPaletteOpen(false);
@@ -1546,7 +1791,7 @@ export default function App() {
           }}
         />
       )}
-      {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={openRemoteWindow} onCancel={() => setRemoteOpen(false)} />}
+      {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={addRemote} onCancel={() => setRemoteOpen(false)} />}
 
       {confirmState && (
         <ConfirmDialog

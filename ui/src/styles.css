@@ -263,6 +263,67 @@ button {
   color: var(--ink-faint);
   font-weight: 400;
 }
+/* 串口分组卡标题：本地卡 / 远程设备卡。head 为 div（内含 toggle button + 可选删除 button，
+   避免 button 嵌套 button）。复用 macro-group 的 caret/count 子元素样式。 */
+.port-group__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+}
+.port-group__toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.port-group__toggle:hover {
+  background: var(--surface-2);
+}
+.port-group__name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Tab 来源标识：多设备时非本地端口后缀设备昵称/地址 */
+.tab__src {
+  color: var(--ink-faint);
+  font-size: var(--fs-xs);
+  margin-left: 4px;
+  font-weight: 400;
+}
+/* 端口行操作按钮：hover 端口项才显示（编辑别名 / 强制关闭） */
+.port-item__edit,
+.port-item__force {
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.port-item-row:hover .port-item__edit,
+.port-item-row:hover .port-item__force {
+  opacity: 1;
+}
+/* 远程设备卡操作按钮：hover 设备标签才显示（重连 / 删除） */
+.port-group__action {
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.port-group__head:hover .port-group__action {
+  opacity: 1;
+}
+/* 端口项左缩进：表归属其上的分组卡（本地 / 远程设备） */
+.macro-group .port-item-row {
+  padding-left: 10px;
+}
 .sidebar__conn {
   display: flex;
   align-items: center;
@@ -873,7 +934,7 @@ button {
   border: 1px solid transparent;
 }
 .group[data-focused="true"] {
-  border-color: var(--rx);
+  border-color: var(--hairline);
 }
 /* 拖拽落点四半区高亮：半透明青色覆盖对应半区 */
 .group__dropzone {
