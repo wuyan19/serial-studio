@@ -271,6 +271,32 @@ button {
   gap: 4px;
   padding: 4px 6px;
 }
+/* 端口数：浅色灰（与宏分组 count 同款），与按钮同区，停 btns 占位区前（gap 贴按钮）。
+   padding-right:6px 与端口项 holders 的 padding-right 对齐，保证文本右缘同列。 */
+.port-group__count {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+  font-weight: 400;
+  padding-right: 6px;
+}
+/* 操作区：count + btns 整体推到右端（margin-left:auto），右缘 = head padding 内 */
+.port-group__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* 按钮占位区：固定 46px(重连22 + 删除22 + gap2)，本地卡无按钮也占位 → count 列恒对齐 */
+.port-group__btns {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  width: 46px;
+  flex-shrink: 0;
+}
 .port-group__toggle {
   flex: 1;
   display: flex;
@@ -280,7 +306,7 @@ button {
   background: transparent;
   border: none;
   color: var(--ink);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 700;
   cursor: pointer;
   border-radius: var(--r-sm);
@@ -312,17 +338,36 @@ button {
 .port-item-row:hover .port-item__force {
   opacity: 1;
 }
-/* 远程设备卡操作按钮：hover 设备标签才显示（重连 / 删除） */
+/* 远程设备卡操作按钮（重连 / 删除）：常显。独立 class（不复用 macro-action 的 absolute 布局），
+   作 flex item 排在标题行右侧。 */
 .port-group__action {
-  opacity: 0;
-  transition: opacity var(--t-fast) var(--ease);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
 }
-.port-group__head:hover .port-group__action {
-  opacity: 1;
+.port-group__action:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+.port-group__action--danger:hover {
+  color: var(--danger);
+  background: rgba(229, 83, 75, 0.12);
+}
+.port-group__action svg {
+  width: 14px;
+  height: 14px;
 }
 /* 端口项左缩进：表归属其上的分组卡（本地 / 远程设备） */
 .macro-group .port-item-row {
-  padding-left: 10px;
+  padding-left: 16px;
 }
 .sidebar__conn {
   display: flex;
@@ -439,7 +484,7 @@ button {
 /* 已打开端口：右侧有在线人数 badge + 铅笔，预留空间避免重叠。
    关闭态不预留（无 badge/force），保持原设计不留空块。 */
 .port-item-row[data-opened="true"] .port-item {
-  padding-right: 30px;
+  padding-right: 54px; /* 与组标题 count 右缘对齐（head padding 6 + btns 46 + gap 2） */
 }
 /* 本地已打开：再加强制关闭按钮，预留两图标空间（覆盖上一条）。 */
 .port-item-row[data-force="true"] .port-item {
@@ -584,6 +629,7 @@ button {
   padding: 1px 6px;
   border-radius: var(--r-pill);
   flex-shrink: 0;
+  margin-left: auto; /* 推到右侧按钮区前，与组标题 count badge 同列 */
 }
 
 /* macro rows —— 编辑/删除按钮绝对定位到宏按钮右侧内嵌 */

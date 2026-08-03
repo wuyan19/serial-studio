@@ -219,6 +219,9 @@ export function TermView({
       theme: termThemeFor(getTheme()),
       allowProposedApi: true,
       scrollback: 10000,
+      // 向上滚动(离开底部)后输入不再自动跳回底部：xterm 默认 scrollOnUserInput=true，
+      // 会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新。看最新输出用滚轮滚到底 / ⌘+End。
+      scrollOnUserInput: false,
     });
     const fit = new FitAddon();
     const search = new SearchAddon();
@@ -252,7 +255,12 @@ export function TermView({
     fitRef.current = fit;
     termRef.current = term;
     onReady({ term, fit, search });
-    const disposable = term.onData((data) => onWrite(port, data));
+    const disposable = term.onData((data) => {
+      // 发命令(回车)后回到底部看回显：scrollOnUserInput=false 已停用"任意输入跳底"(连 Ctrl 也误触)，
+      // 这里只对回车显式滚底；Ctrl 等修饰键单独按不再误触。滚到底后回显到达会自然跟随。
+      if (data.includes("\r")) term.scrollToBottom();
+      onWrite(port, data);
+    });
     const timer = setTimeout(() => {
       try {
         fit.fit();

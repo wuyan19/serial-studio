@@ -1355,16 +1355,21 @@ export default function App() {
                       <span className={`dot ${grp.online ? "on" : "off"}`} />
                       <span className="macro-group__caret">{portCollapsed.has(grp.devId) ? "▶" : "▼"}</span>
                       <span className="port-group__name">{grp.label}</span>
-                      <span className="macro-group__count">{grp.ports.length}</span>
                     </button>
-                    {dev && (
-                      <>
-                        {grp.online !== true && (
-                          <button className="macro-action port-group__action" title="重连设备" onClick={() => reconnectRemote(dev)}><IconRefresh /></button>
+                    <div className="port-group__actions">
+                      <span className="port-group__count">{grp.ports.length}</span>
+                      {/* 按钮区固定占位(46px)：本地卡无按钮也占位，使 count 列在所有卡上对齐 */}
+                      <div className="port-group__btns">
+                        {dev && (
+                          <>
+                            {grp.online !== true && (
+                              <button className="port-group__action" title="重连设备" onClick={() => reconnectRemote(dev)}><IconRefresh /></button>
+                            )}
+                            <button className="port-group__action port-group__action--danger" title="删除设备" onClick={() => removeRemote(dev)}><IconTrash /></button>
+                          </>
                         )}
-                        <button className="macro-action macro-action--danger port-group__action" title="删除设备" onClick={() => removeRemote(dev)}><IconTrash /></button>
-                      </>
-                    )}
+                      </div>
+                    </div>
                   </div>
                   {!portCollapsed.has(grp.devId) &&
                     (grp.ports.length === 0 ? (
