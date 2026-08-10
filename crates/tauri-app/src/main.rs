@@ -138,28 +138,6 @@ async fn save_scripts(
     ss_server::scripts_store::save(&scripts)
 }
 
-/// 打开远程窗口（VS Code 风）：新 WebviewWindow 连接指定远程服务。
-/// URL 带 ?remote=host:port，新窗口前端据此切远程模式。同地址已开则聚焦。
-#[tauri::command]
-async fn open_remote_window(app: tauri::AppHandle, host: String, port: u16) -> Result<(), String> {
-    // label 只允许字母数字 / - / : / _，host 的 "." 要替换掉
-    let label = format!("remote-{}-{}", host.replace('.', "_"), port);
-    if let Some(w) = app.get_webview_window(&label) {
-        w.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let url = format!("index.html?remote={}:{}", host, port);
-    let title = format!("Serial Studio · 远程 {}:{}", host, port);
-    let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
-        .title(title)
-        .inner_size(900.0, 640.0)
-        // 关掉 webview 的 drag-drop 拦截：否则 Tauri 吃掉 drag 事件，网页里的 HTML5 拖拽
-        // （分栏拖 tab）不工作。等效主窗口 tauri.conf 的 dragDropEnabled:false。
-        .disable_drag_drop_handler();
-    builder.build().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 // ===== 数据面：Tauri command（本地模式 IPC，与 axum WS 是同一核心域的两个 adapter）=====
 
 /// 窗口级会话注册表：把 Tauri 窗口 label 映射到串口占有份额归属的 SessionId。
@@ -572,7 +550,6 @@ fn run_gui() {
             load_scripts,
             save_scripts,
             get_script_skill,
-            open_remote_window,
             list_ports,
             open_port_stream,
             close_port_stream,

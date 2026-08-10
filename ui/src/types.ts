@@ -2,6 +2,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 
+/** 端口复合键 = `${devId}::${name}`（设备域 devId + 裸端口名）。本地与远程端口可能同名，
+ *  靠 devId 区分；编解码见 lib.ts 的 portIdOf / parsePortId。运行时即 string，此处仅语义化。 */
+export type PortId = string;
+
 export interface PortInfo {
   name: string;
   opened: boolean;
@@ -84,6 +88,17 @@ export interface ConnConfig {
   port: number;
 }
 
+/** 已知的远程设备（持久化于 localStorage，单窗口多远程共存）。
+ *  id 即 devId，用于端口复合键。 */
+export interface RemoteDevice {
+  /** 稳定主键（UUID），作为 devId 用于端口复合键。 */
+  id: string;
+  host: string;
+  port: number;
+  /** 可选昵称；空则 UI 回退 host:port。 */
+  nickname?: string;
+}
+
 export interface SrvSettings {
   ws_host: string;
   ws_port: number;
@@ -152,10 +167,10 @@ export type ShortcutMap = Record<ActionId, KeyBinding>;
  *  端口全局唯一归属一个 group（不扇出）：一个 port 只在一个 group 的 ports 里。 */
 export interface Group {
   id: string;
-  /** 该 group 内的 tab（串口名），有序；端口全局唯一归属。 */
-  ports: string[];
-  /** 本 group 当前显示的端口（空串 = 无 tab）。 */
-  activePort: string;
+  /** 该 group 内的 tab（端口复合键 PortId），有序；端口全局唯一归属。 */
+  ports: PortId[];
+  /** 本 group 当前显示的端口复合键（空串 = 无 tab）。 */
+  activePort: PortId;
 }
 
 /** 分栏方向：row=左右排列（主轴 X），col=上下排列（主轴 Y）。 */
