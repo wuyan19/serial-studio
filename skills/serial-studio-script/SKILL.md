@@ -11,7 +11,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 
 ## 全局 API(只有这 4 个 + 标准 JS)
 
-脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面 4 个注入的 `async` 函数,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`。
+脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面 4 个注入的 `async` 函数,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`/`console`。
 
 | 调用 | 作用 | 返回 |
 |---|---|---|
@@ -26,24 +26,28 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 
 把易变值(MAC、目标端口、次数……)从 code 抽出,换参重跑不改脚本。值都注入 `args.<name>`。声明方式:
 
-**code 顶部注释**(自包含, 一段代码搞定):
-- `// @param <name> string [default=值]`
-- `// @param <name> select 选项1|选项2|... [default=选项]`(选项用 `|` 分隔)
+**code 顶部注释**(自包含, 一段代码搞定)。**default 不带方括号**(写 `default=值`,不要写 `[default=值]`):
+
+- `// @param <name> string default=值`
+- `// @param <name> select 选项1|选项2|... default=选项`(选项用 `|` 分隔)
+
+**类型只有 `string` 和 `select`**——没有 number/int/float。数字参数用 `string` 声明,脚本里 `Number(args.x)` 转。
 
 ```js
-// @param port1 select COM5|COM7
+// @param port1 select COM5|COM7 default=COM5
 // @param file  string default=mac.txt
+// @param count string default=3          // 数字也用 string,不是 number
 await clear(args.port1);
 await send("ifconfig br-lan", args.port1);
-// ... 用 args.port1 / args.file
+for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 ```
 
 ## 硬约束(违背即出错)
 
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`;不判就把"没收到"当"收到"继续走。
-2. **没有控制台——用 `throw` 当 print。** `console.log` 不存在。调试看变量、回报最终结果都靠 `throw new Error("...")`(消息显示在结果栏;代价是脚本以失败结束,验证完删掉调试用 throw)。
+2. **严禁 `console.log` / `console.*`——沙箱没有 console 对象,写了运行就报 ReferenceError。** 打印变量、调试、回报结果**只能**用 `throw new Error("...")`(消息显示在结果栏;代价是脚本以失败结束,验证完删掉调试用 throw)。生成脚本时绝对不要写 console.log,一律改成 throw。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
-4. **总执行上限 30s,死循环会被强杀。** `expect` 的 `timeout_ms` 别设太大(常用 500~3000ms),循环要有出口。
+4. **无总时长上限(可长时间运行,适合复现问题)。** 死循环/卡住可由用户点「停止」按钮秒级中断;`expect` 的 `timeout_ms` 别设太大(常用 500~3000ms),循环要有出口。内存上限 64MiB,超出会被强杀。
 5. **`throw` 正常传播。** `throw new Error("设备未响应")` 让脚本失败并把消息显示出来——这是"中止并报错"的正道(配合第 1 条:没等到就 throw)。
 
 ## 核心模式

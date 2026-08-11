@@ -22,8 +22,8 @@ export function hexToBytes(hex: string): Uint8Array {
 /**
  * 从脚本 code 解析 `// @param` 声明:让 AI 生成的脚本自包含(一段 code 含参数声明,
  * 粘贴即用,自动填入参数区)。格式:
- *   // @param <name> string [default=值]
- *   // @param <name> select 选项1|选项2|... [default=选项]
+ *   // @param <name> string default=值
+ *   // @param <name> select 选项1|选项2|... default=选项
  * 返回解析出的参数数组;code 无任何 @param 行时返回 null(调用方据此不覆盖现有 params)。
  */
 export function parseParamsFromCode(code: string): ScriptParam[] | null {
@@ -34,11 +34,12 @@ export function parseParamsFromCode(code: string): ScriptParam[] | null {
     const name = m[1];
     const type = m[2] as "string" | "select";
     const rest = m[3] ?? "";
-    const defaultMatch = rest.match(/\bdefault=(\S+)/);
+    // 容错:default 提取到 ]/[ 空格停(AI 可能误生成 [default=x]);options 剥方括号
+    const defaultMatch = rest.match(/\bdefault=([^\[\]\s]+)/);
     const def = defaultMatch ? defaultMatch[1] : undefined;
     let options: string[] | undefined;
     if (type === "select") {
-      const optsStr = rest.replace(/\bdefault=\S+/, "").trim();
+      const optsStr = rest.replace(/\bdefault=\S+/, "").replace(/[\[\]]/g, "").trim();
       options = optsStr ? optsStr.split("|").map((s) => s.trim()).filter((s) => s.length > 0) : undefined;
     }
     params.push({ name, type, default: def, options });

@@ -525,7 +525,7 @@ const SERIAL_SCRIPT_GUIDE: &str = r#"# Serial Studio 脚本编写指南
 
 serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。send/expect/clear 的可选 port 参数可指定其它已打开端口,从而在一个脚本里跨多串口操作。
 
-## 可用全局 async 函数(只有这 4 个 + 标准 JS;无 fetch/require/fs,沙箱)
+## 可用全局 async 函数(只有这 4 个 + 标准 JS;无 fetch/require/fs/console,沙箱)
 - await send(data, [port])          发文本,自动追加换行。总成功,无返回。
 - await expect(pattern, ms, [port]) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
                                     超时无匹配返回空串 ""(不报错)——必须判断返回值。
@@ -535,7 +535,7 @@ serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串
 
 ## 必须遵守的约束
 1. 判断 expect 返回值:expect 超时返回 "" 不报错。不判断会把"没收到"当"收到"。用 if (line === "") 识别。
-2. 无控制台输出:无 console.log。要打印/调试/回报结果,只能 throw new Error("...")——消息会显示给用户(脚本以失败结束)。
+2. 严禁 console.log/console.*(沙箱无 console 对象,写了运行报 ReferenceError)。打印/调试/回报结果只能 throw new Error("...")——消息显示给用户(脚本以失败结束)。
 3. expect 的 pattern 是正则字符串:写 expect("OK", 1000),不要 expect(/OK/, 1000)(字面量转 "/OK/" 会让正则编译失败)。
 4. 30 秒超时:脚本总执行上限 30s,死循环会被强杀。expect 的 ms 通常 500~3000。
 5. 用户 throw 正常传播:expect 没等到 → throw new Error("原因") 是中止报错的正道。
