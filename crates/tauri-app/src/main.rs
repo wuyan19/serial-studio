@@ -371,25 +371,50 @@ async fn run_macro(
 #[tauri::command]
 async fn run_script(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     name: String,
     port: String,
     script: ss_core::Script,
     args: std::collections::HashMap<String, String>,
+    run_id: String,
 ) -> Result<(), String> {
     let manager = state.manager.clone();
     let app = app.clone();
+    // 注册停止信号(归属本窗口,关窗时一并 abort 防 orphan)+ stop_script set flag → sleep 分段轮询退出。
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.script_runs.lock().unwrap().insert(
+        run_id.clone(),
+        ss_server::ScriptRun { abort: abort.clone(), owner: ss_server::ScriptOwner::Window(window.label().to_string()) },
+    );
+    let script_runs = state.script_runs.clone();
+    let run_id_for_cleanup = run_id.clone();
     tokio::spawn(async move {
-        let result = ss_core::run_script(&port, &script, manager, args).await;
+        // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
+        let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, abort).await;
+        script_runs.lock().unwrap().remove(&run_id_for_cleanup);
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
+            // Aborted 用 display_message(「已停止」)对齐 WS 路径;其它本地保留 Display 详情。
+            Err(ss_core::ScriptError::Aborted) => (false, ss_core::ScriptError::Aborted.display_message()),
             Err(e) => (false, e.to_string()),
         };
         let _ = app.emit(
             "script-result",
-            serde_json::json!({ "name": name, "success": success, "message": message }),
+            serde_json::json!({ "run_id": run_id, "name": name, "success": success, "message": message }),
         );
     });
+    Ok(())
+}
+
+/// 停止运行中的脚本:set 对应 run_id 的 abort flag,脚本经 sleep 分段轮询退出(秒级)。
+#[tauri::command]
+async fn stop_script(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let flag = state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone());
+    match flag {
+        Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
+        None => tracing::warn!("stop_script: run_id {} 未找到(已结束?)", run_id),
+    }
     Ok(())
 }
 
@@ -496,6 +521,21 @@ fn run_gui() {
                     .try_state::<SessionRegistry>()
                     .and_then(|s| s.take(&label));
                 if let (Some(mgr), Some(session)) = (mgr, session) {
+                    // 本窗口启动的脚本跟着停(防 orphan):同步 set AtomicBool(不需 await),在 spawn 前、
+                    // app 还有效时做;spawn 只负责 release_all(异步)。
+                    if let Some(st) = app.try_state::<AppState>() {
+                        let orphan_aborts: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> = st
+                            .script_runs
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|(_, r)| matches!(&r.owner, ss_server::ScriptOwner::Window(w) if w == &label))
+                            .map(|(_, r)| r.abort.clone())
+                            .collect();
+                        for f in orphan_aborts {
+                            f.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     tauri::async_runtime::spawn(async move {
                         let released = mgr.release_all(session).await;
                         if !released.is_empty() {
@@ -563,6 +603,7 @@ fn run_gui() {
             write_port,
             run_macro,
             run_script,
+            stop_script,
             save_json_file,
         ])
         .run(tauri::generate_context!())

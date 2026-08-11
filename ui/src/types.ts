@@ -62,8 +62,9 @@ export interface Script {
   code: string;
 }
 
-/** 脚本执行结果(与 MacroResult 同构)。 */
+/** 脚本执行结果(与 MacroResult 同构)。runId 供前端按运行实例路由(停止/并发区分)。 */
 export interface ScriptResult {
+  runId?: string;
   name: string;
   success: boolean;
   message: string;

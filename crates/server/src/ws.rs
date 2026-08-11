@@ -7,7 +7,8 @@
 //!     {"action":"close","port":"COM3"}
 //!     {"action":"write","port":"COM3","data":"...","encoding":"hex|text"}
 //!     {"action":"set_alias","port":"COM3","alias":"GPS"}   # 空串/null 清除别名
-//!     {"action":"run_script","name":"...","port":"COM3","script":{"code":"..."}}  # 运行 JS 脚本（受 enable_scripting 限制）
+//!     {"action":"run_script","name":"...","port":"COM3","script":{"code":"..."},"run_id":"<uuid>","args":{...}}  # 运行 JS 脚本（受 enable_scripting 限制）
+//!     {"action":"stop_script","run_id":"<uuid>"}                              # 停止运行中的脚本
 //!     {"action":"version"}                                # 查询服务版本（远程/Web 关于页用）
 //!   server → client:
 //!     {"type":"ports","ports":[...]}
@@ -16,7 +17,7 @@
 //!     {"type":"closed","port":"COM3"}
 //!     {"type":"acquired","port":"COM3","opened":bool,"config":{...},"holders":n}  # open 的直接回复（区分首开/附加）
 //!     {"type":"holders","port":"COM3","holders":n}                                 # 持有者数量变化
-//!     {"type":"script_result","name":"...","success":bool,"message":"..."}         # run_script 的结果
+//!     {"type":"script_result","run_id":"...","name":"...","success":bool,"message":"..."}  # run_script 的结果（含停止 Aborted）
 //!     {"type":"version","version":"0.1.0","enable_scripting":false}                # version 的直接回复
 //!     {"type":"ok","message":"..."}
 //!     {"type":"error","message":"..."}
@@ -36,6 +37,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use ss_core::{AcquireResult, ReleaseOutcome, SerialConfig, SerialEvent, SessionId};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// 服务器 → 客户端 消息（全 owned，避免生命周期纠缠）。
@@ -56,8 +59,8 @@ enum ServerMsg {
     Error { message: String },
     Ok { message: String },
     MacroResult { name: String, success: bool, message: String },
-    /// run_script 的结果（与 MacroResult 同构）。
-    ScriptResult { name: String, success: bool, message: String },
+    /// run_script 的结果（与 MacroResult 同构）。run_id 供前端按运行实例路由（停止/并发区分）。
+    ScriptResult { run_id: String, name: String, success: bool, message: String },
     /// version 的直接回复：服务端编译版本 + 是否启用远程脚本执行（前端据此显隐脚本 UI）。
     Version { version: String, enable_scripting: bool },
     /// get_script_skill 的直接回复：脚本编写 SKILL 全文(前端展示 / 复制给外部 Agent)。
@@ -93,7 +96,11 @@ enum ClientMsg {
         script: ss_core::Script,
         #[serde(default)]
         args: std::collections::HashMap<String, String>,
+        /// 运行实例 id（前端生成 uuid）,用于停止与结果路由。
+        run_id: String,
     },
+    /// 停止运行中的脚本（按 run_id）:set 对应 abort flag,脚本经 sleep 轮询退出。
+    StopScript { run_id: String },
     /// 设置端口别名（""/null = 清除）。别名写入 ports.json，跟随端口所在机器。
     SetAlias {
         port: String,
@@ -222,6 +229,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     event_task.abort();
     meta_task.abort();
     state.closers.lock().unwrap().remove(&session);
+    // 本 session 启动的脚本跟着停(防 orphan:客户端断连后脚本继续占并发槽,无超时后变无界)
+    let orphan_aborts: Vec<Arc<AtomicBool>> = state
+        .script_runs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, r)| matches!(&r.owner, crate::ScriptOwner::Session(s) if s == &session))
+        .map(|(_, r)| r.abort.clone())
+        .collect();
+    for f in orphan_aborts {
+        f.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let released = state.manager.release_all(session).await;
     if !released.is_empty() {
         tracing::info!("session {:?} 断连，释放 {} 个持有端口", session, released.len());
@@ -381,7 +400,7 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 let _ = out_tx2.send(to_json(msg)).await;
             });
         }
-        ClientMsg::RunScript { name, port, script, args } => {
+        ClientMsg::RunScript { name, port, script, args, run_id } => {
             // 远程路径强制闸门:服务器默认 0.0.0.0 无认证,脚本执行须显式开启
             if !state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = out_tx
@@ -413,21 +432,33 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                     .await;
                 return;
             }
+            // 注册停止信号:StopScript 时 set flag,脚本 sleep 分段轮询命中即抛异常退出。
+            let abort = Arc::new(AtomicBool::new(false));
+            state.script_runs.lock().unwrap().insert(
+                run_id.clone(),
+                crate::ScriptRun { abort: abort.clone(), owner: crate::ScriptOwner::Session(session) },
+            );
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
+            let script_runs = state.script_runs.clone();
+            let run_id_for_cleanup = run_id.clone();
             let _ = out_tx
                 .send(to_json(ServerMsg::Ok { message: format!("运行脚本 {}", name) }))
                 .await;
             tokio::spawn(async move {
                 let _permit = permit; // 持有到脚本结束
-                let result = ss_core::run_script(&port, &script, manager, args).await;
+                // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
+                let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, abort).await;
+                script_runs.lock().unwrap().remove(&run_id_for_cleanup);
                 let msg = match result {
                     Ok(()) => ServerMsg::ScriptResult {
+                        run_id,
                         name,
                         success: true,
                         message: "完成".into(),
                     },
                     Err(e) => ServerMsg::ScriptResult {
+                        run_id,
                         name,
                         success: false,
                         message: e.display_message(),
@@ -435,6 +466,19 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
             });
+        }
+        ClientMsg::StopScript { run_id } => {
+            // 锁内取 abort Arc,锁随 block 结束立即释放,再 store/send——避免持 std 锁跨 await(非 Send)
+            let abort = { state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone()) };
+            match abort {
+                Some(flag) => {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = out_tx.send(to_json(ServerMsg::Ok { message: "停止信号已发送".into() })).await;
+                }
+                None => {
+                    let _ = out_tx.send(to_json(ServerMsg::Ok { message: "脚本已结束或不存在".into() })).await;
+                }
+            }
         }
         ClientMsg::SetAlias { port, alias } => {
             match crate::set_alias_and_notify(state, &port, alias) {

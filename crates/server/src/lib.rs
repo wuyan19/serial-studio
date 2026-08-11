@@ -25,6 +25,22 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// 应用共享状态：GUI 模式和 headless 模式共用。
+/// 运行中脚本的归属:断连/关窗时据此 abort 本连接启动的脚本,防 orphan 占槽(无超时后变无界)。
+#[derive(Debug)]
+pub enum ScriptOwner {
+    /// WS 连接(session 级)。
+    Session(SessionId),
+    /// Tauri 窗口(label)。
+    Window(String),
+}
+
+/// 一条运行中脚本:停止信号 + 归属。
+#[derive(Debug)]
+pub struct ScriptRun {
+    pub abort: Arc<std::sync::atomic::AtomicBool>,
+    pub owner: ScriptOwner,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub manager: Arc<SerialManager>,
@@ -41,6 +57,9 @@ pub struct AppState {
     /// WS 连接的关闭信号:session → oneshot sender。force_close 经此点对点断开被踢的连接
     /// (不靠 EventBus 广播——广播 Lagged 会丢,踢人须必送达)。
     pub closers: Arc<std::sync::Mutex<HashMap<SessionId, tokio::sync::oneshot::Sender<()>>>>,
+    /// 运行中脚本的停止信号:run_id → abort flag。StopScript 时 set flag,脚本 sleep 分段轮询
+    /// 命中即抛 JS 异常退出(见 ss_core::script)。脚本结束自动移除。
+    pub script_runs: Arc<std::sync::Mutex<HashMap<String, ScriptRun>>>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -61,6 +80,7 @@ pub fn create_state() -> AppState {
         enable_scripting,
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(SCRIPT_MAX_CONCURRENCY)),
         closers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        script_runs: Arc::new(std::sync::Mutex::new(HashMap::new())),
     }
 }
 

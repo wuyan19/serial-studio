@@ -87,6 +87,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
         enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

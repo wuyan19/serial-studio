@@ -28,7 +28,9 @@ export interface Transport {
   forceClose(port: string): Promise<void>;
   write(port: string, data: string): Promise<void>;
   runMacro(name: string, port: string, macro: Macro): Promise<void>;
-  runScript(name: string, port: string, script: Script, args: Record<string, string>): Promise<void>;
+  runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string): Promise<void>;
+  /** 停止运行中的脚本(按 runId)。set abort flag,脚本经 sleep 轮询秒级退出。 */
+  stopScript(runId: string): Promise<void>;
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
   onPortOpened(cb: (port: string) => void): () => void;
   onPortClosed(cb: (port: string) => void): () => void;
@@ -40,7 +42,7 @@ export interface Transport {
   onMetaChanged(cb: () => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
-  onScriptResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
+  onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   onConnectedChange(cb: (connected: boolean) => void): () => void;
   /** 服务版本号 + 是否启用远程脚本执行（关于页 + 脚本 UI 显隐）。本地恒 enableScripting=true。 */
   getVersion(): Promise<{ version: string; enableScripting: boolean }>;
@@ -76,7 +78,7 @@ export class RemoteTransport implements Transport {
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
-    scriptResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -150,7 +152,7 @@ export class RemoteTransport implements Transport {
           }
           break;
         case "script_result":
-          this.handlers.scriptResult.forEach((cb) => cb(msg.name, msg.success, msg.message));
+          this.handlers.scriptResult.forEach((cb) => cb(msg.run_id, msg.name, msg.success, msg.message));
           break;
       }
     };
@@ -193,8 +195,11 @@ export class RemoteTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await this.send(JSON.stringify({ action: "run_macro", name, port, macro }));
   }
-  async runScript(name: string, port: string, script: Script, args: Record<string, string>) {
-    await this.send(JSON.stringify({ action: "run_script", name, port, script, args }));
+  async runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string) {
+    await this.send(JSON.stringify({ action: "run_script", name, port, script, args, run_id: runId }));
+  }
+  async stopScript(runId: string) {
+    await this.send(JSON.stringify({ action: "stop_script", run_id: runId }));
   }
   async getVersion() {
     const result = new Promise<{ version: string; enableScripting: boolean }>((resolve) => {
@@ -243,7 +248,7 @@ export class RemoteTransport implements Transport {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
   }
-  onScriptResult(cb: (name: string, success: boolean, msg: string) => void) {
+  onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.scriptResult.add(cb);
     return () => { this.handlers.scriptResult.delete(cb); };
   }
@@ -273,7 +278,7 @@ export class LocalTransport implements Transport {
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
-    scriptResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -316,11 +321,11 @@ export class LocalTransport implements Transport {
         )
       );
       this.unlisten.push(
-        await listen<{ name: string; success: boolean; message: string }>(
+        await listen<{ run_id?: string; name: string; success: boolean; message: string }>(
           "script-result",
           (e) =>
             this.handlers.scriptResult.forEach((cb) =>
-              cb(e.payload.name, e.payload.success, e.payload.message)
+              cb(e.payload.run_id, e.payload.name, e.payload.success, e.payload.message)
             )
         )
       );
@@ -379,8 +384,11 @@ export class LocalTransport implements Transport {
   async runMacro(name: string, port: string, macro: Macro) {
     await tauriInvoke("run_macro", { name, port, macro });
   }
-  async runScript(name: string, port: string, script: Script, args: Record<string, string>) {
-    await tauriInvoke("run_script", { name, port, script, args });
+  async runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string) {
+    await tauriInvoke("run_script", { name, port, script, args, runId });
+  }
+  async stopScript(runId: string) {
+    await tauriInvoke("stop_script", { runId });
   }
   async getVersion() {
     const { getVersion } = await import("@tauri-apps/api/app");
@@ -423,7 +431,7 @@ export class LocalTransport implements Transport {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
   }
-  onScriptResult(cb: (name: string, success: boolean, msg: string) => void) {
+  onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.scriptResult.add(cb);
     return () => { this.handlers.scriptResult.delete(cb); };
   }

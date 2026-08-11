@@ -250,6 +250,8 @@ export default function App() {
   const [editorError, setEditorError] = useState("");
   const [scripts, setScripts] = useState<Record<string, Script>>({});
   const [scriptResult, setScriptResult] = useState<ScriptResult | null>(null);
+  /** 运行中的脚本:runId → {name, devId}。驱动「运行中」行 + 停止按钮(替掉"运行中..."字符串标记,顺带解并发错配)。 */
+  const [runningScripts, setRunningScripts] = useState<Map<string, { name: string; devId: string }>>(new Map());
   const [editingScript, setEditingScript] = useState<{ name: string; isNew: boolean } | null>(null);
   const [editorScriptName, setEditorScriptName] = useState("");
   const [editorScript, setEditorScript] = useState<Script>({ code: "" });
@@ -404,6 +406,12 @@ export default function App() {
       t.onConnectedChange((conn) => {
         setDevOnline((prev) => ({ ...prev, [devId]: conn }));
         if (conn) t.list();
+        // 断连:清本设备 runningScripts 幽灵(脚本经 owner 清理 abort,但 result 发不回前端)
+        else setRunningScripts((prev) => {
+          const n = new Map(prev);
+          for (const [rid, info] of n) if (info.devId === devId) n.delete(rid);
+          return n;
+        });
       }),
       t.onData((port, data) => {
         const pid = portIdOf(devId, port);
@@ -444,7 +452,10 @@ export default function App() {
         setTimeout(() => setErrorMsg(""), 5000);
       }),
       t.onMacroResult((name, success, message) => setMacroResult({ name, success, message })),
-      t.onScriptResult((name, success, message) => setScriptResult({ name, success, message })),
+      t.onScriptResult((runId, name, success, message) => {
+        if (runId) setRunningScripts((prev) => { const n = new Map(prev); n.delete(runId); return n; });
+        setScriptResult({ runId, name, success, message });
+      }),
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1023,9 +1034,10 @@ export default function App() {
       setScriptResult({ name, success: false, message: "请先选择并打开一个串口" });
       return;
     }
-    setScriptResult({ name, success: true, message: "运行中..." });
+    const runId = crypto.randomUUID();
     const { devId, name: portName } = parsePortId(activePort);
-    transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args);
+    setRunningScripts((prev) => new Map(prev).set(runId, { name, devId }));
+    transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
     // 脚本声明了参数 → 弹收集框;否则直接跑。
@@ -1599,8 +1611,15 @@ export default function App() {
                   ))}
                 </div>
               ))}
+              {[...runningScripts.entries()].map(([runId, { name, devId }]) => (
+                <div key={runId} className="script-task">
+                  <span className="script-task__name" title={name}>⟳ {name}</span>
+                  <span className="script-task__status">运行中</span>
+                  <button className="script-task__stop" title="停止脚本" onClick={() => transportsRef.current.get(devId)?.stopScript(runId)}>停止</button>
+                </div>
+              ))}
               {scriptResult && (
-                <div className={`macro-result ${scriptResult.success && scriptResult.message !== "运行中..." ? "ok" : scriptResult.message === "运行中..." ? "run" : "err"}`}>
+                <div className={`macro-result ${scriptResult.success ? "ok" : "err"}`}>
                   {scriptResult.success ? "✓" : "✗"} {scriptResult.name}: {scriptResult.message}
                 </div>
               )}

@@ -729,6 +729,47 @@ button {
   background: rgba(229, 83, 75, 0.08);
   border-color: rgba(229, 83, 75, 0.25);
 }
+/* 运行中脚本任务(脚本侧栏):每条运行实例一行,独立停止按钮(per-runId,多任务各停各的)。 */
+.script-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 9px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+}
+.script-task__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.script-task__status {
+  flex: none;
+  opacity: 0.7;
+}
+.script-task__stop {
+  flex: none;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.script-task__stop:hover {
+  color: var(--danger);
+  border-color: rgba(229, 83, 75, 0.4);
+  background: rgba(229, 83, 75, 0.1);
+}
 
 /* ============================================================
    Main — tabs, channel strip, terminal
