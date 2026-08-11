@@ -177,6 +177,8 @@ export function TermView({
   targetContainer,
   onWrite,
   onReady,
+  disconnected,
+  onReconnect,
 }: {
   port: string;
   visible: boolean;
@@ -186,10 +188,19 @@ export function TermView({
   targetContainer: HTMLElement | null;
   onWrite: (port: string, data: string) => void;
   onReady: (inst: TermInstance | null) => void;
+  /** 该端口是否处于设备断开态(单键 R 重连仅此态触发)。 */
+  disconnected?: boolean;
+  /** 单键 R 重连回调(TermView 在断开态拦截 R)。 */
+  onReconnect?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  // 断开态 + 重连回调经 ref:customKeyEventHandler 在 [port] effect 内,直接闭包 props 会 stale
+  const disconnectedRef = useRef(disconnected ?? false);
+  const onReconnectRef = useRef(onReconnect);
+  useEffect(() => { disconnectedRef.current = disconnected ?? false; }, [disconnected]);
+  useEffect(() => { onReconnectRef.current = onReconnect; }, [onReconnect]);
 
   // DOM reparent：把本根 div 挪到所属 group 的终端容器。targetContainer 变（跨 group 搬）→ 重挪。
   // 用 useLayoutEffect：在 paint 前挪，避免 term-pool 闪现；xterm 实例不重建，canvas 跟随根 div 移动。
@@ -249,6 +260,12 @@ export function TermView({
       if (combo === m["zoom.reset"].combo) {
         e.preventDefault();
         resetFontSize();
+        return false;
+      }
+      // 单键 R 重连:仅断开态触发(connected 态 R 是普通串口输入,放行)
+      if (disconnectedRef.current && combo === m["port.reconnect"].combo) {
+        e.preventDefault();
+        onReconnectRef.current?.();
         return false;
       }
       return true;
@@ -359,6 +376,8 @@ export function GroupView({
   aliasEditTab,
   aliasOf,
   sourceLabelOf,
+  disconnectedOf,
+  onReconnectTab,
   onSwitchTab,
   onCloseTab,
   onRenameTab,
@@ -383,6 +402,10 @@ export function GroupView({
   aliasOf: (port: string) => string | undefined;
   /** Tab 来源标识（多设备时非本地端口后缀设备昵称/地址）；undefined = 不显示。 */
   sourceLabelOf?: (port: string) => string | undefined;
+  /** 该端口是否处于"设备断开"态(灰显 + 显示重连按钮)。 */
+  disconnectedOf?: (port: string) => boolean;
+  /** 重连断开的 tab。 */
+  onReconnectTab?: (port: string) => void;
   onSwitchTab: (port: string) => void;
   onCloseTab: (port: string) => void;
   onRenameTab: (port: string) => void;
@@ -483,11 +506,13 @@ export function GroupView({
           const editingThis = aliasEditTab?.port === port;
           const portName = parsePortId(port).name;
           const src = sourceLabelOf?.(port);
+          const disconnected = disconnectedOf?.(port) ?? false;
           return (
             <div
               key={port}
               className="tab"
               data-active={isActive}
+              data-disconnected={disconnected ? "true" : undefined}
               data-editing={editingThis ? "true" : undefined}
               draggable={!editingThis}
               onDragStart={(e) => {
@@ -528,6 +553,18 @@ export function GroupView({
               >
                 <IconClose />
               </span>
+              {disconnected && (
+                <span
+                  className="tab__btn tab__btn--reconnect"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onReconnectTab?.(port);
+                  }}
+                  title={`重连 ${portName} (${formatCombo(getBindings()["port.reconnect"].combo)})`}
+                >
+                  <IconPlug />
+                </span>
+              )}
             </div>
           );
         })}
@@ -1187,6 +1224,7 @@ const SHORTCUT_ORDER: ActionId[] = [
   "zoom.in",
   "zoom.out",
   "zoom.reset",
+  "port.reconnect",
 ];
 
 /** 快捷键改键对话框：逐行展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。

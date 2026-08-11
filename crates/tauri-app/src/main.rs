@@ -424,6 +424,11 @@ fn spawn_event_emitter(
                     }
                     let _ = app.emit("serial-closed", &port);
                 }
+                ss_core::SerialEvent::PortDisconnected { port } => {
+                    // 设备断开:保留 per-(window,port) 通道(重连后字节流接回同一 tab 的 scrollback),
+                    // 仅通知前端标"已断开"。区别于 PortClosed 的 remove_port_all(那是真删 tab)。
+                    let _ = app.emit("serial-disconnected", &port);
+                }
                 ss_core::SerialEvent::HoldersChanged { port, holders } => {
                     let _ = app.emit(
                         "serial-holders",

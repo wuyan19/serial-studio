@@ -121,8 +121,8 @@ impl SessionId {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AcquireResult {
-    /// 本次真正打开了端口（首个持有者）。
-    Opened { config: SerialConfig },
+    /// 本次真正打开或重连(reopen)了端口。holders 为当前持有者数(open=1,reopen=保留的 N)。
+    Opened { config: SerialConfig, holders: usize },
     /// 端口已开，本次为附加（持有者 +1）。config 为端口当前实际配置
     /// （请求的配置被忽略），调用方应据此告知用户。
     Attached { config: SerialConfig, holders: usize },
@@ -148,6 +148,10 @@ pub struct PortInfo {
     pub opened: bool,
     /// 当前持有该端口的会话数（多端共享时 >1）。
     pub holders: usize,
+    /// 设备已断开(USB 拔出等)但占有权(holder)仍保留——前端据此显断开态、可重连。
+    /// 区别于 opened=false(从未打开)。
+    #[serde(default)]
+    pub disconnected: bool,
 }
 
 #[cfg(test)]

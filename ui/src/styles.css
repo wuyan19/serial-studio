@@ -819,6 +819,22 @@ button {
   width: 12px;
   height: 12px;
 }
+/* 设备断开态:tab 灰显 + 状态点转红(保留 scrollback,可点重连按钮恢复)。 */
+.tab[data-disconnected="true"] {
+  opacity: 0.5;
+}
+.tab[data-disconnected="true"] .tab__dot {
+  background: var(--danger);
+  box-shadow: none;
+}
+/* 重连按钮(仅断开 tab 条件渲染);复用 .tab__btn 基类,只覆盖 hover 色。 */
+.tab__btn--reconnect {
+  color: var(--rx);
+}
+.tab__btn--reconnect:hover {
+  color: var(--rx);
+  background: rgba(79, 214, 194, 0.12);
+}
 
 /* banners */
 .banner {

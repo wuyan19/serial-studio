@@ -20,12 +20,14 @@ use tokio_tungstenite::tungstenite::Message;
 /// connect_async 返回的流类型（MaybeTlsStream 包裹）。
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-// ===== 内存桩串口（与 core 单测同款：read 自退，避免阻塞测试运行时） =====
+// ===== 内存桩串口（与 core 单测同款：read 返 TimedOut 模拟空闲,保持端口连接态） =====
 
 struct FakePort;
 impl std::io::Read for FakePort {
     fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "fake port"))
+        // 空闲:模拟无数据(读循环 continue,端口保持开)——返非 timeout 错误会触发设备断开
+        // (drainer 标 disconnected),破坏本测试"附加"所依赖的连接态。
+        Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
     }
 }
 impl std::io::Write for FakePort {
@@ -132,6 +134,10 @@ async fn open_returns_acquired_and_attach_shows_holders() {
     let attached = recv_until(&mut b, "\"type\":\"acquired\"").await;
     assert!(attached.contains("\"opened\":false"), "第二客户端应附加: {}", attached);
     assert!(attached.contains("\"holders\":2"), "附加应显示 2 持有者: {}", attached);
+    // 清理:close 两客户端(末位 teardown 退出读线程,免 runtime drop 卡在 spawn_blocking)
+    send_text(&mut a, r#"{"action":"close","port":"COM7"}"#).await;
+    send_text(&mut b, r#"{"action":"close","port":"COM7"}"#).await;
+    let _ = recv_until(&mut a, "\"type\":\"ok\"").await;
 }
 
 #[tokio::test]
@@ -159,6 +165,9 @@ async fn disconnect_releases_holders_no_leak() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(ok, "B 断连后持有者应回到 1（release_all 生效，不泄漏）");
+    // 清理:a close(末位 teardown 退出读线程)
+    send_text(&mut a, r#"{"action":"close","port":"COM7"}"#).await;
+    let _ = recv_until(&mut a, "\"type\":\"ok\"").await;
 }
 
 #[tokio::test]

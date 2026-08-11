@@ -18,6 +18,9 @@ pub enum SerialEvent {
     PortOpened { port: String },
     /// 串口已关闭
     PortClosed { port: String },
+    /// 设备意外断开(USB 拔出等):OS 句柄已释放,前端保留 tab 可重连。
+    /// 与 PortClosed(用户主动关、tab 摘除)区分。
+    PortDisconnected { port: String },
     /// 持有者数量变化（有人加入/退出，但端口未关闭）
     HoldersChanged { port: String, holders: usize },
     /// 串口错误

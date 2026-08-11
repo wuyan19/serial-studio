@@ -204,6 +204,8 @@ export default function App() {
   /** 全局连接标志（兼容旧消费方：通道条/Web 远程提示）。本地看 devOnline["local"]，远程看任一就绪。 */
   const connected = isLocal ? !!devOnline["local"] : Object.values(devOnline).some(Boolean);
   const [openPorts, setOpenPorts] = useState<PortId[]>([]);
+  /** 设备断开(USB 拔出)但 tab 保留的端口——可手动重连。区别于主动关(从 openPorts 移除)。 */
+  const [disconnectedPorts, setDisconnectedPorts] = useState<Set<PortId>>(new Set());
   const [portConfigs, setPortConfigs] = useState<Record<string, SerialConfig>>({});
   /** editor-group 分栏：每个 group = 标签栏 + 终端区。端口唯一归属一个 group（不扇出）。
    *  单 group（layout 单叶）时 openPorts == groups[g1].ports，行为同单视图。多 group 见后续 Phase。 */
@@ -408,10 +410,28 @@ export default function App() {
         touch(pid, "rx"); // 签名：收到字节 → RX 亮
         terminalsRef.current.get(pid)?.term.write(data);
       }),
-      t.onPortOpened(() => t.list()),
+      t.onPortOpened((port) => {
+        t.list();
+        // 端口重新可用(本会话 reopen 或别处)→ 清该 tab 断开标记。保留占有权方案下
+        // holder 真在、物理层已重建,清红是正确的(非上一版的"假绿")。
+        const pid = portIdOf(devId, port);
+        setDisconnectedPorts((prev) => {
+          if (!prev.has(pid)) return prev;
+          const n = new Set(prev);
+          n.delete(pid);
+          return n;
+        });
+      }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
         prunePort(portIdOf(devId, port));
+        t.list();
+      }),
+      t.onPortDisconnected((port) => {
+        // 设备物理断开:保留 tab(scrollback 可继续看),仅标"已断开"待手动重连。
+        // 不动 openPorts/terminalsRef/groups——重连后 onData 自动接回同一 term。
+        const pid = portIdOf(devId, port);
+        setDisconnectedPorts((prev) => new Set(prev).add(pid));
         t.list();
       }),
       t.onHolders(() => t.list()),
@@ -881,6 +901,8 @@ export default function App() {
           const d = remotes.find((r) => r.id === devId);
           return d ? (d.nickname?.trim() || `${d.host}:${d.port}`) : undefined;
         }}
+        disconnectedOf={(pid) => disconnectedPorts.has(pid)}
+        onReconnectTab={reconnectPort}
         onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
         onCloseTab={closePort}
         onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
@@ -912,9 +934,19 @@ export default function App() {
     );
   };
 
+  /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term),成功后清断开标记。 */
+  const reconnectPort = async (pid: PortId) => {
+    const res = await openPort(pid, portConfigs[pid] ?? serialConfig);
+    if (res) setDisconnectedPorts((prev) => { const n = new Set(prev); n.delete(pid); return n; });
+  };
+
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
   const triggerPort = (pid: PortId) => {
+    if (disconnectedPorts.has(pid)) {
+      void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
+      return;
+    }
     if (openPorts.includes(pid)) {
       // 已开：聚焦到端口所属 group 并切其 tab（端口可能不在当前聚焦 group，纯 switchPort 会 no-op）
       const gid = groupOfPort.get(pid);
@@ -1647,6 +1679,8 @@ export default function App() {
                   if (inst) terminalsRef.current.set(port, inst);
                   else terminalsRef.current.delete(port);
                 }}
+                disconnected={disconnectedPorts.has(port)}
+                onReconnect={() => reconnectPort(port)}
               />
             );
           })}

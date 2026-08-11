@@ -26,15 +26,38 @@ pub enum PortCommand {
     Close(oneshot::Sender<()>),
 }
 
-/// 端口任务句柄（由 SerialManager 持有）。
-pub struct PortHandle {
+/// 读线程检测到设备断开(read 非 timeout 错误)时,发给 manager drainer 的通知。
+/// `instance` 标识端口实例——drainer 仅当 map 中该端口的 instance 与此相等时才判定为
+/// "当前实例真断开"(remove + 发 PortDisconnected),借此区分主动关闭(已先 remove)与
+/// 断开后重开的同名新实例(不误杀)。
+#[derive(Clone)]
+pub struct Disconnect {
+    pub port: String,
+    pub instance: u64,
+}
+
+/// 物理层:读线程 + 命令通道(OS 句柄随 port_task 闭包生命周期,run 返回即 drop)。
+/// 设备断开时丢弃、reopen 时重建。与逻辑层解耦——拔了只丢物理,保留占有权。
+pub struct PhysicalLayer {
     pub join_handle: JoinHandle<()>,
     pub abort_handle: AbortHandle,
     pub command_tx: mpsc::Sender<PortCommand>,
-    pub rx_buffer: Arc<RxBuffer>,
-    pub config: SerialConfig,
-    /// 当前持有本端口的会话集合。空集时端口拆毁。
+}
+
+/// 端口任务句柄(SerialManager 持有)。逻辑层 + 物理层解耦。
+pub struct PortHandle {
+    // 逻辑层:设备断开时保留(占有权不丢),reopen 复用
+    /// 当前持有本端口的会话集合。空集时端口才真正拆除。
     pub holders: HashSet<SessionId>,
+    pub config: SerialConfig,
+    pub rx_buffer: Arc<RxBuffer>,
+    /// 端口实例标识(每次 open/reopen 单调递增)。drainer 据此判断断开通知是否仍属当前实例,
+    /// 区分主动关闭(已先 remove)与断开后重开的同名新实例(不误杀)。
+    pub instance: u64,
+    /// 设备已断开(读线程退出、OS 句柄 drop),但占有权保留,等 reopen 重建物理层。
+    pub disconnected: bool,
+    // 物理层:None = 断开(等 reopen);Some = 连接中
+    pub physical: Option<PhysicalLayer>,
 }
 
 pub async fn run(
@@ -43,10 +66,11 @@ pub async fn run(
     mut command_rx: mpsc::Receiver<PortCommand>,
     event_bus: Arc<EventBus>,
     rx_buffer: Arc<RxBuffer>,
+    disconnect_tx: mpsc::Sender<Disconnect>,
+    instance: u64,
 ) {
-    event_bus.publish(SerialEvent::PortOpened {
-        port: port_name.clone(),
-    });
+    // PortOpened 由 manager.acquire 在 open/reopen 成功后统一发(事件单所有权归 manager,
+    // 与 PortClosed 一致);此处不再发,避免与 manager 双发。
     tracing::info!("端口任务启动: {}", port_name);
 
     // 读/写分离：try_clone 复制一份给 write，两个独立 Mutex 不互斥。
@@ -76,7 +100,9 @@ pub async fn run(
     let event_bus_read = Arc::clone(&event_bus);
     let rx_buffer_read = Arc::clone(&rx_buffer);
     let name_for_read = port_name.clone();
-    let read_handle = tokio::task::spawn_blocking(move || {
+    let disconnect_tx_read = disconnect_tx.clone();
+    let instance_read = instance;
+    let mut read_handle = tokio::task::spawn_blocking(move || {
         loop {
             if quit_read.load(Ordering::Relaxed) {
                 return;
@@ -102,6 +128,14 @@ pub async fn run(
                             port: name_for_read.clone(),
                             message: format!("读取错误: {}", e),
                         });
+                        // 设备断开:通知 manager drainer(标 disconnected + 发 PortDisconnected)。
+                        // spawn_blocking 内不能 .await,用 try_send 同步发;通道满(极端)丢则 warn 留痕
+                        if disconnect_tx_read
+                            .try_send(Disconnect { port: name_for_read.clone(), instance: instance_read })
+                            .is_err()
+                        {
+                            tracing::warn!("端口 {} 断开通知被丢弃(drainer 通道满,可能留僵尸)", name_for_read);
+                        }
                         return;
                     }
                 }
@@ -117,43 +151,54 @@ pub async fn run(
         }
     });
 
-    // command 循环（主 task）：串口写入串行化，天然单写者
+    // command 循环（主 task）：串口写入串行化，天然单写者。
+    // select! 同时等命令与读线程退出——读线程遇设备断开会先 try_send 通知再 return,
+    // 其 JoinHandle 完成经 select! 唤醒本循环,使 run() 能结束(否则只在 Close 命令退出,
+    // 设备断开时端口变僵尸)。
     let mut close_response: Option<oneshot::Sender<()>> = None;
-    while let Some(cmd) = command_rx.recv().await {
-        match cmd {
-            PortCommand::Write(data, response_tx) => {
-                let port = Arc::clone(&write_port);
-                let result = tokio::task::spawn_blocking(move || {
-                    let mut guard = port.lock().unwrap();
-                    guard.write_all(&data).map(|_| data.len())
-                })
-                .await;
-                let response = match result {
-                    Ok(Ok(n)) => Ok(n),
-                    Ok(Err(e)) => Err(SerialError::WriteFailed(e.to_string())),
-                    Err(_) => Err(SerialError::WriteFailed("写任务取消".into())),
-                };
-                let _ = response_tx.send(response);
-            }
-            PortCommand::Close(response_tx) => {
-                tracing::info!("关闭端口: {}", port_name);
-                // 不立即回 response：先让读线程退出、port 释放，否则 close 后立刻重开
-                // 会因读线程仍持有 handle 而端口占用打不开
-                close_response = Some(response_tx);
-                break;
-            }
+    loop {
+        tokio::select! {
+            cmd = command_rx.recv() => match cmd {
+                Some(PortCommand::Write(data, response_tx)) => {
+                    let port = Arc::clone(&write_port);
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mut guard = port.lock().unwrap();
+                        guard.write_all(&data).map(|_| data.len())
+                    })
+                    .await;
+                    let response = match result {
+                        Ok(Ok(n)) => Ok(n),
+                        Ok(Err(e)) => Err(SerialError::WriteFailed(e.to_string())),
+                        Err(_) => Err(SerialError::WriteFailed("写任务取消".into())),
+                    };
+                    let _ = response_tx.send(response);
+                }
+                Some(PortCommand::Close(response_tx)) => {
+                    tracing::info!("关闭端口: {}", port_name);
+                    // 不立即回 response：先让读线程退出、port 释放，否则 close 后立刻重开
+                    // 会因读线程仍持有 handle 而端口占用打不开
+                    close_response = Some(response_tx);
+                    break;
+                }
+                None => break,
+            },
+            // 读线程退出(设备断开已 try_send 通知 drainer;或 quit 主动关闭)→ 结束 run()
+            _ = &mut read_handle => { break; }
         }
     }
 
-    // 通知读线程退出并等待（read timeout 100ms 后它会检查 quit 返回）。
-    // 必须等读线程退出、port 真正释放，才能回 close response——否则 manager.close
-    // 返回后立刻重开同端口会因读线程仍持有 handle 而失败。
-    quit.store(true, Ordering::Relaxed);
-    let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
+    // 等读线程退出、port 释放(Close 路径:读线程仍在 loop,quit 后 100ms 内退)。
+    // 但若读线程已自行退出(设备断开 → select! 命中 read_handle;或 command_rx None 路径下
+    // 读线程已退),read_handle 已完成——再 await 会 panic(JoinHandle polled after completion)。
+    // 故先 is_finished 判断:仅未完成时才 quit + 等。
+    if !read_handle.is_finished() {
+        quit.store(true, Ordering::Relaxed);
+        let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
+    }
 
-    event_bus.publish(SerialEvent::PortClosed {
-        port: port_name.clone(),
-    });
+    // 不在此发端口事件:事件单所有权交给 manager——主动关闭由 release/force_close 发
+    // PortClosed,设备断开由 drainer 发 PortDisconnected(读线程已 try_send 通知)。
+    // 原先这里发 PortClosed 与 manager 重复,现消除双发。
     tracing::info!("端口任务结束: {}", port_name);
 
     // 读线程已退出、port 已释放，现在才回 close response

@@ -43,6 +43,8 @@ export const DEFAULT_BINDINGS: ShortcutMap = {
   "zoom.in": { combo: "mod+=", scope: "terminal" },
   "zoom.out": { combo: "mod+-", scope: "terminal" },
   "zoom.reset": { combo: "mod+0", scope: "terminal" },
+  // 单键 R,仅断开态终端聚焦时触发(connected 态 R 是普通输入);断开无输入,不冲突打字
+  "port.reconnect": { combo: "r", scope: "terminal" },
 };
 
 /** 动作中文展示名（改键对话框列表 + 冲突提示共用）。 */
@@ -66,6 +68,7 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   "zoom.in": "放大字体",
   "zoom.out": "缩小字体",
   "zoom.reset": "重置字体",
+  "port.reconnect": "重连当前端口",
 };
 
 type Listener = (m: ShortcutMap) => void;
@@ -145,8 +148,8 @@ export type SetResult = { ok: true } | { ok: false; reason: string };
 export function validateCombo(combo: string, action: ActionId): SetResult {
   if (!combo) return { ok: true };
   const parts = combo.split("+");
-  if (!parts.includes("mod") && !parts.includes("alt")) {
-    return { ok: false, reason: "必须包含 Ctrl/⌘ 或 Alt" };
+  if (!parts.includes("mod") && !parts.includes("alt") && action !== "port.reconnect") {
+    return { ok: false, reason: "必须包含 Ctrl/⌘ 或 Alt(重连除外:仅断开态触发,不冲突打字)" };
   }
   if (isReserved(combo)) {
     return { ok: false, reason: isTauri() ? "系统保留键" : "浏览器保留键（无法拦截）" };

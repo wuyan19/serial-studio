@@ -400,8 +400,8 @@ async fn tool_serial_run_script(
         Err(e) => return error_text(e),
     };
     // 端口预检:未打开则脚本内 send 静默失败却显示"完成",误导。
-    if !manager.is_open(&port).await {
-        return error_text(format!("端口 {} 未打开", port));
+    if !manager.is_open(&port).await || manager.is_disconnected(&port).await {
+        return error_text(format!("端口 {} 未打开或已断开", port));
     }
     // 并发上限(同 WS):防 DoS。permit 借用 semaphore,持到 run_script 完成(函数返回即释放)。
     let _permit = match semaphore.try_acquire() {

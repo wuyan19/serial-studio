@@ -120,9 +120,9 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
         .trim_matches(|c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0')
         .to_string();
 
-    if port.is_empty() || !state.manager.is_open(&port).await {
+    if port.is_empty() || !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
         let _ = stream
-            .write_all(format!("串口 {} 未打开，断开。\r\n", port).as_bytes())
+            .write_all(format!("串口 {} 未打开或已断开，断开。\r\n", port).as_bytes())
             .await;
         return Ok(());
     }
@@ -170,6 +170,10 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
                 }
                 Ok(SerialEvent::PortClosed { port: p }) if p == port => {
                     let _ = wr.write_all("\r\n[串口已关闭]\r\n".as_bytes()).await;
+                    return;
+                }
+                Ok(SerialEvent::PortDisconnected { port: p }) if p == port => {
+                    let _ = wr.write_all("\r\n[设备已断开 — 请在桌面端重连]\r\n".as_bytes()).await;
                     return;
                 }
                 Ok(SerialEvent::Error { port: p, message }) if p == port => {

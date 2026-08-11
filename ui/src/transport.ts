@@ -32,6 +32,8 @@ export interface Transport {
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
   onPortOpened(cb: (port: string) => void): () => void;
   onPortClosed(cb: (port: string) => void): () => void;
+  /** 设备意外断开(USB 拔出):前端保留 tab 可重连(区别于 onPortClosed 的删 tab)。 */
+  onPortDisconnected(cb: (port: string) => void): () => void;
   /** 持有者数量变化（有人加入/退出，端口未关）。 */
   onHolders(cb: (port: string, holders: number) => void): () => void;
   /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
@@ -69,6 +71,7 @@ export class RemoteTransport implements Transport {
     ports: new Set<(p: PortInfo[]) => void>(),
     opened: new Set<(port: string) => void>(),
     closed: new Set<(port: string) => void>(),
+    disconnected: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
@@ -105,6 +108,9 @@ export class RemoteTransport implements Transport {
           break;
         case "closed":
           this.handlers.closed.forEach((cb) => cb(msg.port));
+          break;
+        case "disconnected":
+          this.handlers.disconnected.forEach((cb) => cb(msg.port));
           break;
         case "acquired":
           if (this.openResolver) {
@@ -217,6 +223,10 @@ export class RemoteTransport implements Transport {
     this.handlers.closed.add(cb);
     return () => { this.handlers.closed.delete(cb); };
   }
+  onPortDisconnected(cb: (port: string) => void) {
+    this.handlers.disconnected.add(cb);
+    return () => { this.handlers.disconnected.delete(cb); };
+  }
   onHolders(cb: (port: string, holders: number) => void) {
     this.handlers.holders.add(cb);
     return () => { this.handlers.holders.delete(cb); };
@@ -258,6 +268,7 @@ export class LocalTransport implements Transport {
     ports: new Set<(p: PortInfo[]) => void>(),
     opened: new Set<(port: string) => void>(),
     closed: new Set<(port: string) => void>(),
+    disconnected: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
@@ -282,6 +293,10 @@ export class LocalTransport implements Transport {
       this.unlisten.push(
         await listen<string>("serial-closed", (e) =>
           this.handlers.closed.forEach((cb) => cb(e.payload)))
+      );
+      this.unlisten.push(
+        await listen<string>("serial-disconnected", (e) =>
+          this.handlers.disconnected.forEach((cb) => cb(e.payload)))
       );
       this.unlisten.push(
         await listen<{ port: string; holders: number }>("serial-holders", (e) =>
@@ -340,7 +355,7 @@ export class LocalTransport implements Transport {
       { port, config, onEvent: chan }
     );
     if (r.kind === "opened") {
-      return { port, opened: true, config: r.config, holders: 1 };
+      return { port, opened: true, config: r.config, holders: r.holders ?? 1 };
     }
     return { port, opened: false, config: r.config, holders: r.holders ?? 1 };
   }
@@ -387,6 +402,10 @@ export class LocalTransport implements Transport {
   onPortClosed(cb: (port: string) => void) {
     this.handlers.closed.add(cb);
     return () => { this.handlers.closed.delete(cb); };
+  }
+  onPortDisconnected(cb: (port: string) => void) {
+    this.handlers.disconnected.add(cb);
+    return () => { this.handlers.disconnected.delete(cb); };
   }
   onHolders(cb: (port: string, holders: number) => void) {
     this.handlers.holders.add(cb);

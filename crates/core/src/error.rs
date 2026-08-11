@@ -21,4 +21,7 @@ pub enum SerialError {
 
     #[error("无效配置: {0}")]
     InvalidConfig(String),
+
+    #[error("串口 {0} 设备已断开(占有权保留,可重连)")]
+    Disconnected(String),
 }

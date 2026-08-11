@@ -13,6 +13,8 @@ export interface PortInfo {
   holders: number;
   /** 用户自定义别名（描述端口下连接的设备）；无则为 undefined。后端注入。 */
   alias?: string;
+  /** 设备已断开(USB 拔出)但占有权保留、可重连(后端 PortInfo.disconnected)。 */
+  disconnected?: boolean;
 }
 
 /** 宏步骤（判别联合，与后端 MacroStep 对齐） */
@@ -132,7 +134,8 @@ export type ActionId =
   | "tab.prev"
   | "zoom.in"
   | "zoom.out"
-  | "zoom.reset";
+  | "zoom.reset"
+  | "port.reconnect";
 
 /**
  * 作用域：

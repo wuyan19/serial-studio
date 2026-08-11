@@ -158,27 +158,28 @@ mod tests {
     #[test]
     fn port_view_flattens_to_flat_wire() {
         let v = PortView {
-            info: ss_core::PortInfo { name: "COM7".into(), opened: true, holders: 2 },
+            info: ss_core::PortInfo { name: "COM7".into(), opened: true, holders: 2, disconnected: false },
             alias: Some("GPS".into()),
         };
         let json = serde_json::to_value(&v).unwrap();
         let obj = json.as_object().unwrap();
-        assert_eq!(obj.len(), 4, "flatten 应内联 PortInfo 字段 + alias，共 4 个");
+        assert_eq!(obj.len(), 5, "flatten 应内联 PortInfo 字段(含 disconnected) + alias");
         assert_eq!(obj["name"], "COM7");
         assert_eq!(obj["opened"], true);
         assert_eq!(obj["holders"], 2);
+        assert_eq!(obj["disconnected"], false);
         assert_eq!(obj["alias"], "GPS");
     }
 
     #[test]
     fn port_view_skips_none_alias() {
         let v = PortView {
-            info: ss_core::PortInfo { name: "COM3".into(), opened: false, holders: 0 },
+            info: ss_core::PortInfo { name: "COM3".into(), opened: false, holders: 0, disconnected: false },
             alias: None,
         };
         let json = serde_json::to_value(&v).unwrap();
         let obj = json.as_object().unwrap();
         assert!(!obj.contains_key("alias"), "None alias 不应出现在线上");
-        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.len(), 4);
     }
 }

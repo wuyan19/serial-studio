@@ -45,6 +45,8 @@ enum ServerMsg {
     Ports { ports: Vec<crate::PortView> },
     Opened { port: String },
     Closed { port: String },
+    /// 设备意外断开(USB 拔出):前端保留 tab 可重连(区别于 Closed 的删 tab)。
+    Disconnected { port: String },
     /// open 的直接回复：opened=true 首开，false 附加（config 为实际配置，holders 为当前持有数）。
     Acquired { port: String, opened: bool, config: SerialConfig, holders: usize },
     /// 持有者数量变化（有人加入/退出，端口未关）。
@@ -255,6 +257,7 @@ fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
         SerialEvent::DataReceived { port, data } => OutFrame::Binary(data_frame(port, data)),
         SerialEvent::PortOpened { port } => to_json(ServerMsg::Opened { port: port.clone() }),
         SerialEvent::PortClosed { port } => to_json(ServerMsg::Closed { port: port.clone() }),
+        SerialEvent::PortDisconnected { port } => to_json(ServerMsg::Disconnected { port: port.clone() }),
         SerialEvent::HoldersChanged { port, holders } => to_json(ServerMsg::Holders {
             port: port.clone(),
             holders: *holders,
@@ -284,9 +287,9 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
         ClientMsg::Open { port, config } => match state.manager.acquire(port.clone(), config, session).await {
-            Ok(AcquireResult::Opened { config }) => {
+            Ok(AcquireResult::Opened { config, holders }) => {
                 let _ = out_tx
-                    .send(to_json(ServerMsg::Acquired { port, opened: true, config, holders: 1 }))
+                    .send(to_json(ServerMsg::Acquired { port, opened: true, config, holders }))
                     .await;
             }
             Ok(AcquireResult::Attached { config, holders }) => {
@@ -402,10 +405,10 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 }
             };
             // 端口预检:未打开则脚本内 send 全静默失败却显示"完成",误导——提前拒。
-            if !state.manager.is_open(&port).await {
+            if !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
                 let _ = out_tx
                     .send(to_json(ServerMsg::Error {
-                        message: format!("端口 {} 未打开,请先连接", port),
+                        message: format!("端口 {} 未打开或已断开,请先连接", port),
                     }))
                     .await;
                 return;
