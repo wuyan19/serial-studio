@@ -449,6 +449,19 @@ impl SerialManager {
             .unwrap_or_default())
     }
 
+    /// 破坏性读取缓冲区（带静默期，命令-响应场景用）。
+    pub async fn drain_buffer_quiet(
+        &self,
+        port: &str,
+        deadline_ms: u64,
+        idle_ms: u64,
+    ) -> Result<Vec<u8>, SerialError> {
+        let buf = self.get_rx_buffer(port).await?;
+        Ok(tokio::task::spawn_blocking(move || buf.drain_quiet(deadline_ms, idle_ms))
+            .await
+            .unwrap_or_default())
+    }
+
     /// 清空缓冲区。
     pub async fn clear_buffer(&self, port: &str) -> Result<(), SerialError> {
         let buf = self.get_rx_buffer(port).await?;

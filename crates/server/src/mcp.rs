@@ -268,9 +268,10 @@ async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
         Ok(n) => {
             let timeout_ms = args.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(0);
             if timeout_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // 带静默期读取：首字节等到 timeout_ms，之后连续无新数据即视为响应完整，
+                // 避免 drain() 取首片即返回导致多分片响应被截断。
                 let resp = manager
-                    .drain_buffer(&port, timeout_ms)
+                    .drain_buffer_quiet(&port, timeout_ms, 40)
                     .await
                     .unwrap_or_default();
                 ok_text(format!("Sent {} bytes. Response: {}", n, String::from_utf8_lossy(&resp)))

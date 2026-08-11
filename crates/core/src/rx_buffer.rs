@@ -54,6 +54,44 @@ impl RxBuffer {
         buf.drain(..).collect()
     }
 
+    /// 破坏性读取（带静默期判定，命令-响应场景用）：
+    /// 首字节前一直等到 deadline；首字节到达后，每段只等 idle_ms，
+    /// 连续 idle_ms 无新数据即视为响应完整，返回累积的全部内容。
+    /// 解决 drain() "取首片即返回" 导致多分片响应被截断的问题。
+    ///
+    /// 注意：响应中途出现 >idle_ms 的间隙会从间隙处返回（如 modem 回显后停顿再回 OK）；
+    /// 持续流式数据（间隙始终 <idle_ms）会一直阻塞到 deadline。这两种场景需评估 idle_ms
+    /// 取值或改用 drain()/serial_read。返回内容包含调用时已缓冲的全部数据。
+    pub fn drain_quiet(&self, deadline_ms: u64, idle_ms: u64) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+        let idle = Duration::from_millis(idle_ms);
+        let mut buf = self.buf.lock().unwrap();
+        let mut out = Vec::new();
+        let mut seen_data = !buf.is_empty();
+        out.extend(buf.drain(..));
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // 首字节前：等到 deadline；之后：每段只等 idle（静默期判定）
+            let wait = (if seen_data { idle } else { remaining }).min(remaining);
+            let (guard, wt) = self
+                .cvar
+                .wait_timeout(buf, wait)
+                .unwrap_or_else(|e| e.into_inner());
+            buf = guard;
+            if !buf.is_empty() {
+                out.extend(buf.drain(..));
+                seen_data = true;
+            }
+            if wt.timed_out() {
+                break; // 静默期到（首字节后）或 deadline 到（首字节前）
+            }
+        }
+        out
+    }
+
     pub fn clear(&self) {
         self.buf.lock().unwrap().clear();
     }
@@ -143,6 +181,87 @@ mod tests {
         let r = b.drain(50);
         assert!(r.is_empty());
         assert!(start.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn drain_quiet_accumulates_multi_chunk() {
+        // 模拟设备分三拨吐数据（每拨间隔 20ms < idle 30ms，流式期间静默期不断重置）：
+        // drain_quiet 应等到最后一拨 + 一个 idle 静默期后，把三段拼齐返回。
+        let b = std::sync::Arc::new(RxBuffer::new());
+        let producer = std::sync::Arc::clone(&b);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            producer.push(b"part1-");
+            std::thread::sleep(Duration::from_millis(20));
+            producer.push(b"part2-");
+            std::thread::sleep(Duration::from_millis(20));
+            producer.push(b"part3");
+        });
+        let r = b.drain_quiet(1000, 30);
+        assert_eq!(r, b"part1-part2-part3");
+    }
+
+    #[test]
+    fn drain_quiet_no_data_returns_empty() {
+        // 首字节前等到 deadline 仍无数据 → 返回空，且耗时 ≈ deadline。
+        let b = RxBuffer::new();
+        let start = Instant::now();
+        let r = b.drain_quiet(50, 30);
+        assert!(r.is_empty());
+        assert!(start.elapsed() >= Duration::from_millis(45));
+    }
+
+    #[test]
+    fn drain_quiet_buf_nonempty_returns_after_idle() {
+        // 调用时缓冲区已有数据（seen_data 初始 true）：应等一个 idle 静默期后返回，而非等到 deadline。
+        let b = RxBuffer::new();
+        b.push(b"stale");
+        let start = Instant::now();
+        let r = b.drain_quiet(200, 30);
+        assert_eq!(r, b"stale");
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "不应等到 deadline: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn drain_quiet_deadline_zero_returns_initial() {
+        // deadline=0：立即返回初始 buf 内容，不等待。
+        let b = RxBuffer::new();
+        b.push(b"x");
+        assert_eq!(b.drain_quiet(0, 40), b"x");
+        // 空缓冲 + deadline=0 同样立即返回空
+        assert!(RxBuffer::new().drain_quiet(0, 40).is_empty());
+    }
+
+    #[test]
+    fn drain_quiet_idle_ge_deadline_no_hang() {
+        // idle > deadline：不能挂死，应被 deadline 兜底（约 deadline_ms 后返回空）。
+        let b = RxBuffer::new();
+        let start = Instant::now();
+        let r = b.drain_quiet(40, 1000);
+        assert!(r.is_empty());
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_millis(300), "idle>deadline 不应挂死: {:?}", elapsed);
+        assert!(elapsed >= Duration::from_millis(35), "应被 deadline 兜底: {:?}", elapsed);
+    }
+
+    #[test]
+    fn drain_quiet_inter_gap_gt_idle_returns_early() {
+        // 响应中途间隙 > idle：从间隙处返回（只拿到第一拨），文档化该行为。
+        let b = std::sync::Arc::new(RxBuffer::new());
+        let producer = std::sync::Arc::clone(&b);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            producer.push(b"chunk1");
+            // 间隙 60ms > idle 30ms → drain_quiet 会在 chunk1 后约 30ms 返回
+            std::thread::sleep(Duration::from_millis(60));
+            producer.push(b"chunk2");
+        });
+        let r = b.drain_quiet(1000, 30);
+        assert_eq!(r, b"chunk1", "间隙>idle 应只返回第一拨");
     }
 
     #[test]
