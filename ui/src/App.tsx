@@ -1064,15 +1064,21 @@ export default function App() {
   };
 
   const doRun = (name: string, args: Record<string, string>) => {
-    if (!activePort) {
-      setErrorMsg("请先选择并打开一个串口");
+    // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
+    // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
+    // devId(transport):有 tab 用其设备;无 tab → 本地 "local" / 远程第一个 remote。
+    const { devId, name: portName } = activePort
+      ? parsePortId(activePort)
+      : { devId: isLocal ? "local" : (remotes[0]?.id ?? ""), name: "" };
+    const transport = transportsRef.current.get(devId);
+    if (!transport) {
+      setErrorMsg(isLocal ? "本地服务未就绪" : "请先连接一台远程设备");
       return;
     }
     const runId = crypto.randomUUID();
-    const { devId, name: portName } = parsePortId(activePort);
     setScriptRuns((prev) => new Map(prev).set(runId, { name, devId, status: "running", logs: [] }));
     setExpandedLog(runId); // 新运行自动展开:实时看进度;结束后同卡片继续展开看完整历史
-    transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args, runId);
+    transport.runScript(name, portName, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
     // 脚本声明了参数 → 弹收集框;否则直接跑。
@@ -1666,7 +1672,6 @@ export default function App() {
                           // 仅在不弹参数框时回焦终端;弹框场景焦点应进对话框(由 modalOpen effect 接管)
                           if (!scripts[name]?.params?.length) activeTerm?.term.focus();
                         }}
-                        disabled={!activePort}
                       >
                         <IconPlay />
                         <span className="macro-run__label">{name}</span>

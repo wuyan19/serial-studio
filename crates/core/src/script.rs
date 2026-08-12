@@ -249,7 +249,8 @@ async fn run_script_inner(
                                     Ok(_) => Ok::<Option<String>, rquickjs::Error>(None),
                                     Err(e) => {
                                         tracing::error!("脚本 send 失败: {}", e);
-                                        Ok(Some(format!("send 失败(端口 {}): {e}", p)))
+                                        let where_ = if p.is_empty() { "未指定端口".to_string() } else { format!("端口 {}", p) };
+                                        Ok(Some(format!("send 失败({}): {e}", where_)))
                                     }
                                 }
                             }
