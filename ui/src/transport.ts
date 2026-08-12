@@ -27,10 +27,12 @@ export interface Transport {
   /** 强制关闭:踢掉远程客户端(WS/MCP)。仅本地可用。 */
   forceClose(port: string): Promise<void>;
   write(port: string, data: string): Promise<void>;
-  runMacro(name: string, port: string, macro: Macro): Promise<void>;
+  runMacro(name: string, port: string, macro: Macro, runId: string): Promise<void>;
   runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string): Promise<void>;
   /** 停止运行中的脚本(按 runId)。set abort flag,脚本经 sleep 轮询秒级退出。 */
   stopScript(runId: string): Promise<void>;
+  /** 停止运行中的宏(按 runId)。复用 script_runs 表,set abort flag → 宏经 Delay/Expect 退出。 */
+  stopMacro(runId: string): Promise<void>;
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
   onPortOpened(cb: (port: string) => void): () => void;
   onPortClosed(cb: (port: string) => void): () => void;
@@ -41,7 +43,7 @@ export interface Transport {
   /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
   onMetaChanged(cb: () => void): () => void;
   onError(cb: (msg: string) => void): () => void;
-  onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
+  onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   /** 脚本 log() 实时输出。前端按 runId 路由到对应运行实例的日志区(MCP 触发的 run_id="" 由调用方过滤)。 */
   onScriptLog(cb: (runId: string, message: string) => void): () => void;
@@ -79,7 +81,7 @@ export class RemoteTransport implements Transport {
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
-    macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptLog: new Set<(runId: string, message: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
@@ -139,7 +141,7 @@ export class RemoteTransport implements Transport {
           break;
         case "macro_result":
           this.handlers.macroResult.forEach((cb) =>
-            cb(msg.name, msg.success, msg.message)
+            cb(msg.run_id, msg.name, msg.success, msg.message)
           );
           break;
         case "version":
@@ -198,14 +200,17 @@ export class RemoteTransport implements Transport {
   async write(port: string, data: string) {
     await this.send(JSON.stringify({ action: "write", port, data, encoding: "text" }));
   }
-  async runMacro(name: string, port: string, macro: Macro) {
-    await this.send(JSON.stringify({ action: "run_macro", name, port, macro }));
+  async runMacro(name: string, port: string, macro: Macro, runId: string) {
+    await this.send(JSON.stringify({ action: "run_macro", name, port, macro, run_id: runId }));
   }
   async runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string) {
     await this.send(JSON.stringify({ action: "run_script", name, port, script, args, run_id: runId }));
   }
   async stopScript(runId: string) {
     await this.send(JSON.stringify({ action: "stop_script", run_id: runId }));
+  }
+  async stopMacro(runId: string) {
+    await this.send(JSON.stringify({ action: "stop_macro", run_id: runId }));
   }
   async getVersion() {
     const result = new Promise<{ version: string; enableScripting: boolean }>((resolve) => {
@@ -250,7 +255,7 @@ export class RemoteTransport implements Transport {
     this.handlers.metaChanged.add(cb);
     return () => { this.handlers.metaChanged.delete(cb); };
   }
-  onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
+  onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
   }
@@ -287,7 +292,7 @@ export class LocalTransport implements Transport {
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
-    macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
+    macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptLog: new Set<(runId: string, message: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
@@ -323,11 +328,11 @@ export class LocalTransport implements Transport {
           this.handlers.error.forEach((cb) => cb(e.payload.message)))
       );
       this.unlisten.push(
-        await listen<{ name: string; success: boolean; message: string }>(
+        await listen<{ run_id?: string; name: string; success: boolean; message: string }>(
           "macro-result",
           (e) =>
             this.handlers.macroResult.forEach((cb) =>
-              cb(e.payload.name, e.payload.success, e.payload.message)
+              cb(e.payload.run_id, e.payload.name, e.payload.success, e.payload.message)
             )
         )
       );
@@ -397,14 +402,17 @@ export class LocalTransport implements Transport {
   async write(port: string, data: string) {
     await tauriInvoke("write_port", { port, data });
   }
-  async runMacro(name: string, port: string, macro: Macro) {
-    await tauriInvoke("run_macro", { name, port, macro });
+  async runMacro(name: string, port: string, macro: Macro, runId: string) {
+    await tauriInvoke("run_macro", { name, port, macro, runId });
   }
   async runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string) {
     await tauriInvoke("run_script", { name, port, script, args, runId });
   }
   async stopScript(runId: string) {
     await tauriInvoke("stop_script", { runId });
+  }
+  async stopMacro(runId: string) {
+    await tauriInvoke("stop_macro", { runId });
   }
   async getVersion() {
     const { getVersion } = await import("@tauri-apps/api/app");
@@ -443,7 +451,7 @@ export class LocalTransport implements Transport {
     this.handlers.metaChanged.add(cb);
     return () => { this.handlers.metaChanged.delete(cb); };
   }
-  onMacroResult(cb: (name: string, success: boolean, msg: string) => void) {
+  onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
   }

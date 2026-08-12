@@ -345,22 +345,34 @@ async fn write_port(
 #[tauri::command]
 async fn run_macro(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     name: String,
     port: String,
     r#macro: ss_core::Macro,
+    run_id: String,
 ) -> Result<(), String> {
     let manager = state.manager.clone();
     let app = app.clone();
+    // 注册停止信号(复用 script_runs 表,owner=Window):关窗时一并 abort 防 orphan;stop_macro set flag 退出。
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.script_runs.lock().unwrap().insert(
+        run_id.clone(),
+        ss_server::ScriptRun { abort: abort.clone(), owner: ss_server::ScriptOwner::Window(window.label().to_string()) },
+    );
+    let script_runs = state.script_runs.clone();
+    let run_id_for_cleanup = run_id.clone();
     tokio::spawn(async move {
-        let result = ss_core::run_macro(&port, &r#macro, &manager).await;
+        let result = ss_core::run_macro(&port, &r#macro, &manager, abort).await;
+        script_runs.lock().unwrap().remove(&run_id_for_cleanup);
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
+            Err(ss_core::MacroError::Aborted) => (false, ss_core::MacroError::Aborted.display_message()),
             Err(e) => (false, e.to_string()),
         };
         let _ = app.emit(
             "macro-result",
-            serde_json::json!({ "name": name, "success": success, "message": message }),
+            serde_json::json!({ "run_id": run_id, "name": name, "success": success, "message": message }),
         );
     });
     Ok(())
@@ -414,6 +426,17 @@ async fn stop_script(state: tauri::State<'_, AppState>, run_id: String) -> Resul
     match flag {
         Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
         None => tracing::warn!("stop_script: run_id {} 未找到(已结束?)", run_id),
+    }
+    Ok(())
+}
+
+/// 停止运行中的宏:与 stop_script 同表(script_runs),set abort flag → 宏经 Delay 分段/Expect select! 退出。
+#[tauri::command]
+async fn stop_macro(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let flag = state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone());
+    match flag {
+        Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
+        None => tracing::warn!("stop_macro: run_id {} 未找到(已结束?)", run_id),
     }
     Ok(())
 }
@@ -611,6 +634,7 @@ fn run_gui() {
             run_macro,
             run_script,
             stop_script,
+            stop_macro,
             save_json_file,
         ])
         .run(tauri::generate_context!())

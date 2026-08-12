@@ -58,7 +58,7 @@ enum ServerMsg {
     MetaChanged,
     Error { message: String },
     Ok { message: String },
-    MacroResult { name: String, success: bool, message: String },
+    MacroResult { run_id: String, name: String, success: bool, message: String },
     /// run_script 的结果（与 MacroResult 同构）。run_id 供前端按运行实例路由（停止/并发区分）。
     ScriptResult { run_id: String, name: String, success: bool, message: String },
     /// 脚本 log() 输出(实时)。前端按 run_id 路由到对应运行实例的日志区。port 不转发(前端按 run_id 路由)。
@@ -90,6 +90,8 @@ enum ClientMsg {
         name: String,
         port: String,
         r#macro: ss_core::Macro,
+        /// 运行实例 id（前端生成 uuid），用于停止与结果路由（对齐 RunScript）。
+        run_id: String,
     },
     /// 运行 JS 脚本（受 settings.enable_scripting 限制，默认 false）。
     RunScript {
@@ -103,6 +105,8 @@ enum ClientMsg {
     },
     /// 停止运行中的脚本（按 run_id）:set 对应 abort flag,脚本经 sleep 轮询退出。
     StopScript { run_id: String },
+    /// 停止运行中的宏(按 run_id):复用 script_runs 表,set abort flag → 宏经 Delay 分段/Expect select! 退出。
+    StopMacro { run_id: String },
     /// 设置端口别名（""/null = 清除）。别名写入 ports.json，跟随端口所在机器。
     SetAlias {
         port: String,
@@ -382,25 +386,36 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 }
             }
         }
-        ClientMsg::RunMacro { name, port, r#macro: mac } => {
+        ClientMsg::RunMacro { name, port, r#macro: mac, run_id } => {
             // 宏定义由前端持有（本地存储），服务端无状态，只负责在指定端口执行
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
+            // 注册停止信号(复用 script_runs 表):StopMacro 时 set flag,宏经 Delay 分段/Expect select! 退出。
+            let abort = Arc::new(AtomicBool::new(false));
+            state.script_runs.lock().unwrap().insert(
+                run_id.clone(),
+                crate::ScriptRun { abort: abort.clone(), owner: crate::ScriptOwner::Session(session) },
+            );
+            let script_runs = state.script_runs.clone();
+            let run_id_for_cleanup = run_id.clone();
             let _ = out_tx
                 .send(to_json(ServerMsg::Ok { message: format!("运行宏 {}", name) }))
                 .await;
             tokio::spawn(async move {
-                let result = ss_core::run_macro(&port, &mac, &manager).await;
+                let result = ss_core::run_macro(&port, &mac, &manager, abort).await;
+                script_runs.lock().unwrap().remove(&run_id_for_cleanup);
                 let msg = match result {
                     Ok(()) => ServerMsg::MacroResult {
+                        run_id,
                         name,
                         success: true,
                         message: "完成".into(),
                     },
                     Err(e) => ServerMsg::MacroResult {
+                        run_id,
                         name,
                         success: false,
-                        message: e.to_string(),
+                        message: e.display_message(),
                     },
                 };
                 let _ = out_tx2.send(to_json(msg)).await;
@@ -483,6 +498,19 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                 }
                 None => {
                     let _ = out_tx.send(to_json(ServerMsg::Ok { message: "脚本已结束或不存在".into() })).await;
+                }
+            }
+        }
+        ClientMsg::StopMacro { run_id } => {
+            // 与 StopScript 同表(script_runs):run_id uuid 不区分宏/脚本,abort flag 通用。
+            let abort = { state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone()) };
+            match abort {
+                Some(flag) => {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = out_tx.send(to_json(ServerMsg::Ok { message: "停止信号已发送".into() })).await;
+                }
+                None => {
+                    let _ = out_tx.send(to_json(ServerMsg::Ok { message: "宏已结束或不存在".into() })).await;
                 }
             }
         }

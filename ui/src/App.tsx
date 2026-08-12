@@ -199,6 +199,8 @@ export default function App() {
   const [portsByDev, setPortsByDev] = useState<Record<string, PortInfo[]>>({});
   const [macros, setMacros] = useState<Record<string, Macro>>({});
   const [macroResult, setMacroResult] = useState<MacroResult | null>(null);
+  /** 运行中的宏:runId → {name, devId}。驱动「运行中」任务行 + 停止按钮(对齐 runningScripts)。 */
+  const [runningMacros, setRunningMacros] = useState<Map<string, { name: string; devId: string }>>(new Map());
   // devOnline[devId]：该设备 WS/IPC 是否就绪，驱动折叠卡状态点。
   const [devOnline, setDevOnline] = useState<Record<string, boolean>>({});
   /** 全局连接标志（兼容旧消费方：通道条/Web 远程提示）。本地看 devOnline["local"]，远程看任一就绪。 */
@@ -455,7 +457,10 @@ export default function App() {
         setErrorMsg(msg);
         setTimeout(() => setErrorMsg(""), 5000);
       }),
-      t.onMacroResult((name, success, message) => setMacroResult({ name, success, message })),
+      t.onMacroResult((runId, name, success, message) => {
+        if (runId) setRunningMacros((prev) => { const n = new Map(prev); n.delete(runId); return n; });
+        setMacroResult({ runId, name, success, message });
+      }),
       t.onScriptResult((runId, name, success, message) => {
         if (runId) setRunningScripts((prev) => { const n = new Map(prev); n.delete(runId); return n; });
         setScriptResult({ runId, name, success, message });
@@ -995,9 +1000,11 @@ export default function App() {
       setMacroResult({ name, success: false, message: "请先选择并打开一个串口" });
       return;
     }
-    setMacroResult({ name, success: true, message: "运行中..." });
+    setMacroResult(null); // 清旧结果横幅(运行态由 task 行表达,避免旧横幅与新运行并存)
+    const runId = crypto.randomUUID();
     const { devId, name: portName } = parsePortId(activePort);
-    transportsRef.current.get(devId)?.runMacro(name, portName, macros[name]);
+    setRunningMacros((prev) => new Map(prev).set(runId, { name, devId }));
+    transportsRef.current.get(devId)?.runMacro(name, portName, macros[name], runId);
   };
 
   const openMacroEditor = (name: string | null) => {
@@ -1565,9 +1572,27 @@ export default function App() {
                   ))}
                 </div>
               ))}
+              {[...runningMacros.entries()].map(([runId, { name, devId }]) => (
+                <div key={runId} className="script-task">
+                  <div className="script-task__head" title={`${name} 运行中`}>
+                    <span className="script-task__name">⟳ {name}</span>
+                    <span className="script-task__status">运行中…</span>
+                    <button
+                      className="script-task__stop"
+                      title="停止宏"
+                      onClick={() => transportsRef.current.get(devId)?.stopMacro(runId)}
+                    >停止</button>
+                  </div>
+                </div>
+              ))}
               {macroResult && (
-                <div className={`macro-result ${macroResult.success && macroResult.message !== "运行中..." ? "ok" : macroResult.message === "运行中..." ? "run" : "err"}`}>
-                  {macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}
+                <div className={`macro-result ${macroResult.success ? "ok" : "err"}`}>
+                  <span className="macro-result__msg">{macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}</span>
+                  <button
+                    className="macro-result__close"
+                    title="关闭"
+                    onClick={() => setMacroResult(null)}
+                  >×</button>
                 </div>
               )}
             </>

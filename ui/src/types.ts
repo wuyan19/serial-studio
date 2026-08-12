@@ -33,6 +33,8 @@ export interface Macro {
 }
 
 export interface MacroResult {
+  /** 运行实例 id(对齐 ScriptResult)。停止路由 + 结果回看;"请先选端口"等本地错误无。 */
+  runId?: string;
   name: string;
   success: boolean;
   message: string;
