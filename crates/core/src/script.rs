@@ -234,6 +234,8 @@ async fn run_script_inner(
                 let globals = ctx.globals();
 
                 // send(data, [port]):text + 按端口 line_ending 自动追加换行。port 缺省=脚本绑定端口。
+                // 失败返 Some(msg) 而非吞错:JS 包装层(见下)据此 throw 干净消息——绕过 rquickjs
+                // async future 内无法抛带消息异常的限制(spike 验证,见文件头注释)。
                 {
                     let mgr = manager.clone();
                     let dp = port.clone();
@@ -243,10 +245,13 @@ async fn run_script_inner(
                             let mgr = mgr.clone();
                             let p = port.unwrap_or_else(|| dp.clone());
                             async move {
-                                if let Err(e) = mgr.send(&p, &data, "text", true).await {
-                                    tracing::error!("脚本 send 失败: {}", e);
+                                match mgr.send(&p, &data, "text", true).await {
+                                    Ok(_) => Ok::<Option<String>, rquickjs::Error>(None),
+                                    Err(e) => {
+                                        tracing::error!("脚本 send 失败: {}", e);
+                                        Ok(Some(format!("send 失败(端口 {}): {e}", p)))
+                                    }
                                 }
-                                Ok::<_, rquickjs::Error>(())
                             }
                         })),
                     ).map_err(|e| e.to_string())?;
@@ -365,7 +370,7 @@ async fn run_script_inner(
                 // "1 argument(s) while 2 where expected",不会把缺失参数填 undefined→None。
                 // 故在 JS 层把缺省 port 补成 null(Rust Option<String> 把 null→None),
                 // 让 send/expect/clear 支持缺省 port。sleep 无 port 参数,不包装。
-                ctx.eval::<(), _>(r#"const __send=globalThis.send;globalThis.send=async(d,p)=>__send(d,typeof p==="undefined"?null:p);
+                ctx.eval::<(), _>(r#"const __send=globalThis.send;globalThis.send=async(d,p)=>{const r=await __send(d,typeof p==="undefined"?null:p);if(r!==undefined) throw new Error(r);};
 const __expect=globalThis.expect;globalThis.expect=async(t,m,p)=>__expect(t,m,typeof p==="undefined"?null:p);
 const __clear=globalThis.clear;globalThis.clear=async(p)=>__clear(typeof p==="undefined"?null:p);"#)
                     .map_err(|e| e.to_string())?;
@@ -509,12 +514,12 @@ mod tests {
     /// 端口未开时 send/expect 失败被 tracing 吞、不影响 Ok,故仅断言脚本正常完成。
     #[tokio::test]
     async fn optional_port_param_arity() {
-        // send 缺省 port(默认=绑定端口 COM0,未开则 send 失败被吞,仍 Ok)
+        // send 缺省 port(默认=绑定端口 COM0,未开 → send 返 Some(fail) → JS 包装 throw,脚本中断回明确错误)
         let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
-        assert!(r.is_ok(), "send(data) 缺省 port 应 Ok: {:?}", r);
-        // send 显式 port
+        assert!(matches!(r, Err(ScriptError::Script(ref m)) if m.contains("send 失败")), "send(data) 未开端口应 throw 'send 失败': {:?}", r);
+        // send 显式 port(未开同样 throw)
         let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
-        assert!(r2.is_ok(), "send(data, port) 显式 port 应 Ok: {:?}", r2);
+        assert!(matches!(r2, Err(ScriptError::Script(ref m)) if m.contains("send 失败")), "send(data, port) 未开应 throw: {:?}", r2);
         // expect 三参(端口未开 → grep_buffer 报错被吞 → 返回空串 → 不 throw)
         let code = r#"const v = await expect("OK", 50, "COM9"); if (v !== "") throw new Error("未开端口应返回空串,得到: " + v);"#;
         let r3 = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;

@@ -444,15 +444,8 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                     return;
                 }
             };
-            // 端口预检:未打开则脚本内 send 全静默失败却显示"完成",误导——提前拒。
-            if !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
-                let _ = out_tx
-                    .send(to_json(ServerMsg::Error {
-                        message: format!("端口 {} 未打开或已断开,请先连接", port),
-                    }))
-                    .await;
-                return;
-            }
+            // 不预检端口:未开则脚本内 send 返 Some(fail) → JS 包装层 throw "send 失败(端口 X): …",
+            // 脚本中断回明确错误(不再静默坑用户)。见 core/script.rs send 闭包 + JS 包装层。
             // 注册停止信号:StopScript 时 set flag,脚本 sleep 分段轮询命中即抛异常退出。
             let abort = Arc::new(AtomicBool::new(false));
             state.script_runs.lock().unwrap().insert(
