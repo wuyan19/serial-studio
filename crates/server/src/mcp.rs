@@ -164,7 +164,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口名（不支持别名）。缺省时使用唯一打开的串口" },
                         "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" },
                         "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string。可选", "additionalProperties": { "type": "string" } }
                     },

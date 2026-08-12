@@ -2016,7 +2016,7 @@ export function ScriptEditor({
           <div className="dialog__group-label" style={{ marginTop: 6 }}>
             代码
           </div>
-          <div className="script-editor__hint">await send(data, [port]) · await expect(pattern, ms, [port]) · await clear([port]) · await sleep(ms)</div>
+          <div className="script-editor__hint">await send(data, [port]) · await expect(pattern, ms, [port]) · await clear([port]) · await sleep(ms) · log(data)</div>
           <div className="script-editor__hint">[port] 可选,缺省为当前活动端口,可指定其它已打开端口(跨多串口操作)</div>
           <textarea
             value={script.code}
