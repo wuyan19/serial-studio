@@ -80,10 +80,12 @@ async fn boot() -> (String, Arc<SerialManager>) {
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpener)));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
+    let (script_tx, _) = tokio::sync::broadcast::channel(16);
     let state = AppState {
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx),
+        script_bus: Arc::new(script_tx),
         enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

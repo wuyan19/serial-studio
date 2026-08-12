@@ -56,6 +56,8 @@ enum ServerMsg {
     Holders { port: String, holders: usize },
     /// 端口元数据（别名等）变更——客户端应重新拉取端口列表。
     MetaChanged,
+    /// 脚本库(scripts.json)变更——客户端应重新拉取脚本列表。
+    ScriptsChanged,
     Error { message: String },
     Ok { message: String },
     MacroResult { run_id: String, name: String, success: bool, message: String },
@@ -178,6 +180,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             match meta_rx.recv().await {
                 Ok(()) => {
                     if out_tx_meta.send(to_json(ServerMsg::MetaChanged)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // 脚本库变更 → 通知客户端重新拉取脚本列表(MCP/Tauri 写入后前端即时刷新)。
+    let mut script_rx = state.script_bus.subscribe();
+    let out_tx_script = out_tx.clone();
+    let _script_task = tokio::spawn(async move {
+        loop {
+            match script_rx.recv().await {
+                Ok(()) => {
+                    if out_tx_script.send(to_json(ServerMsg::ScriptsChanged)).await.is_err() {
                         break;
                     }
                 }

@@ -49,6 +49,10 @@ pub struct AppState {
     /// 否则别的客户端要等下一个串口事件才看到新别名。与串口 EventBus 分离——
     /// 这是用户配置变更，不是串口硬件事件，不进 core 的 SerialEvent。
     pub meta_bus: Arc<broadcast::Sender<()>>,
+    /// 脚本库(scripts.json)变更广播。save/upsert/remove 后通知所有 WS/IPC 客户端
+    /// 重新 load_scripts——否则 MCP/Tauri 写入后前端不感知,要重启才看到(内存权威模型)。
+    /// 与 meta_bus 同构但隔离:不同数据域,前端各自 reload。
+    pub script_bus: Arc<broadcast::Sender<()>>,
     /// 远程脚本执行开关（缓存自 settings.json,WS/MCP 每次检查读内存而非读盘）。
     /// `save_settings`/`apply_settings` 时同步刷新。
     pub enable_scripting: Arc<std::sync::atomic::AtomicBool>,
@@ -70,6 +74,7 @@ pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(RealPortOpener)));
     let (meta_tx, _) = broadcast::channel(16);
+    let (script_tx, _) = broadcast::channel(16);
     let enable_scripting = Arc::new(std::sync::atomic::AtomicBool::new(
         settings::load().enable_scripting,
     ));
@@ -77,6 +82,7 @@ pub fn create_state() -> AppState {
         manager,
         event_bus,
         meta_bus: Arc::new(meta_tx),
+        script_bus: Arc::new(script_tx),
         enable_scripting,
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(SCRIPT_MAX_CONCURRENCY)),
         closers: Arc::new(std::sync::Mutex::new(HashMap::new())),

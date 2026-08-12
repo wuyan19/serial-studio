@@ -130,12 +130,15 @@ async fn get_script_skill() -> Result<String, String> {
     Ok(ss_server::SCRIPT_SKILL.into())
 }
 
-/// 保存用户脚本到 scripts.json。
+/// 保存用户脚本到 scripts.json,并广播变更(让其它客户端/本机 UI 即时刷新,不必重启)。
 #[tauri::command]
 async fn save_scripts(
+    state: tauri::State<'_, AppState>,
     scripts: std::collections::BTreeMap<String, ss_core::Script>,
 ) -> Result<(), String> {
-    ss_server::scripts_store::save(&scripts)
+    ss_server::scripts_store::save(&scripts)?;
+    let _ = state.script_bus.send(());
+    Ok(())
 }
 
 // ===== 数据面：Tauri command（本地模式 IPC，与 axum WS 是同一核心域的两个 adapter）=====
@@ -445,12 +448,16 @@ async fn stop_macro(state: tauri::State<'_, AppState>, run_id: String) -> Result
 /// 与 axum ws.rs 的事件转发是同一 EventBus 的两个出口（一个走 WS，一个走 IPC）。
 /// 另订阅 meta_bus：别名等元数据变更时 emit "ports-meta-changed"，让本地 UI 刷新列表
 /// （远程客户端改了别名，本地桌面 UI 也能及时同步，不必等下一个串口事件）。
+/// 订阅 script_bus：脚本库变更时 emit "scripts-changed"，让本地 UI 重新 load_scripts
+/// （MCP/Tauri 写 scripts.json 后前端即时刷新,不必重启——与 meta 同构）。
 fn spawn_event_emitter(
     app: tauri::AppHandle,
     event_bus: std::sync::Arc<ss_core::EventBus>,
     meta_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
+    script_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
 ) {
     let app_meta = app.clone(); // 第二个 spawn 用；下面的 async move 会 move 掉 app
+    let app_script = app.clone(); // 第三个 spawn（script_bus）用
     let mut rx = event_bus.subscribe();
     tauri::async_runtime::spawn(async move {
         while let Ok(event) = rx.recv().await {
@@ -509,6 +516,20 @@ fn spawn_event_emitter(
             match meta_rx.recv().await {
                 Ok(()) => {
                     let _ = app_meta.emit("ports-meta-changed", ());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // 脚本库变更 → 通知本地前端重新 load_scripts(MCP/Tauri 写入后即时刷新)。
+    let mut script_rx = script_bus.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match script_rx.recv().await {
+                Ok(()) => {
+                    let _ = app_script.emit("scripts-changed", ());
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -590,7 +611,7 @@ fn run_gui() {
             app.manage(PortChannels::default());
 
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
-            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone());
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone());
 
             // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
             // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。

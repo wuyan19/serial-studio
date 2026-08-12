@@ -42,6 +42,8 @@ export interface Transport {
   onHolders(cb: (port: string, holders: number) => void): () => void;
   /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
   onMetaChanged(cb: () => void): () => void;
+  /** 脚本库(scripts.json)变更——重新 load_scripts(MCP/Tauri 写入后及时同步,不必重启)。 */
+  onScriptsChanged(cb: () => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
@@ -80,6 +82,7 @@ export class RemoteTransport implements Transport {
     disconnected: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
+    scriptsChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
@@ -135,6 +138,9 @@ export class RemoteTransport implements Transport {
           break;
         case "meta_changed":
           this.handlers.metaChanged.forEach((cb) => cb());
+          break;
+        case "scripts_changed":
+          this.handlers.scriptsChanged.forEach((cb) => cb());
           break;
         case "error":
           this.handlers.error.forEach((cb) => cb(msg.message));
@@ -255,6 +261,10 @@ export class RemoteTransport implements Transport {
     this.handlers.metaChanged.add(cb);
     return () => { this.handlers.metaChanged.delete(cb); };
   }
+  onScriptsChanged(cb: () => void) {
+    this.handlers.scriptsChanged.add(cb);
+    return () => { this.handlers.scriptsChanged.delete(cb); };
+  }
   onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
@@ -291,6 +301,7 @@ export class LocalTransport implements Transport {
     disconnected: new Set<(port: string) => void>(),
     holders: new Set<(port: string, holders: number) => void>(),
     metaChanged: new Set<() => void>(),
+    scriptsChanged: new Set<() => void>(),
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
@@ -353,6 +364,10 @@ export class LocalTransport implements Transport {
       this.unlisten.push(
         await listen("ports-meta-changed", () =>
           this.handlers.metaChanged.forEach((cb) => cb()))
+      );
+      this.unlisten.push(
+        await listen("scripts-changed", () =>
+          this.handlers.scriptsChanged.forEach((cb) => cb()))
       );
     };
     setup().catch((e) => console.error("本地事件订阅失败", e));
@@ -450,6 +465,10 @@ export class LocalTransport implements Transport {
   onMetaChanged(cb: () => void) {
     this.handlers.metaChanged.add(cb);
     return () => { this.handlers.metaChanged.delete(cb); };
+  }
+  onScriptsChanged(cb: () => void) {
+    this.handlers.scriptsChanged.add(cb);
+    return () => { this.handlers.scriptsChanged.delete(cb); };
   }
   onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.macroResult.add(cb);

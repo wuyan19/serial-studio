@@ -1,11 +1,11 @@
 ---
 name: serial-studio-script
-description: 为 Serial Studio 写串口自动化 JS 脚本(嵌入 QuickJS,顶层 await)。凡涉及重试/条件/循环/解析的串口交互(AT 指令、modem/ESP/单片机/GPS/传感器等)都用脚本生成可粘贴运行的代码;简单顺序发收用宏。
+description: 为 Serial Studio 写串口自动化 JS 脚本(嵌入 QuickJS,顶层 await)。凡涉及重试/条件/循环/解析的串口交互(AT 指令、modem/ESP/单片机/GPS/传感器等)都用脚本生成可粘贴运行的代码。
 ---
 
 # Serial Studio 脚本编写
 
-Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(async () => {})()`,可顶层 `await`),跑在**已打开的串口**上。它补足宏的短板:支持任意 if/for/重试/解析控制流。
+Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(async () => {})()`,可顶层 `await`),跑在**已打开的串口**上。支持任意 if/for/重试/解析控制流,适合复杂串口交互。
 
 产出目标:一段**自包含、可直接粘贴运行**的 JS,加一两句运行说明。
 
@@ -19,7 +19,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 | `await expect(pattern, timeout_ms, [port])` | 用正则 `pattern` 匹配**整行**接收缓冲 | 首条匹配行;**超时无匹配返回空串 `""`** |
 | `await clear([port])` | 清空接收缓冲 | 无 |
 | `await sleep(ms)` | 睡眠 ms 毫秒 | 无 |
-| `log(message)` | 输出一行日志到结果栏(实时,**不中断脚本**;结束点击横幅展开回看) | 无 |
+| `log(message)` | 输出日志(**不中断脚本**,可循环调用) | 无 |
 
 `[port]` 缺省 = 当前活动端口;传端口名(如 `"COM5"`)则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
 
@@ -46,10 +46,9 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 ## 硬约束(违背即出错)
 
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`;不判就把"没收到"当"收到"继续走。
-2. **打印/进度/调试用 `log("...")`,不要用 `throw` 调试。** `log(message)` 实时输出到结果栏且**不中断脚本**——边跑边打、循环里随便用,结束点击结果横幅展开回看。`throw new Error("...")` 仅用于**中止并报错**(配合第 1 条:没等到就 throw)。**严禁 `console.log`/`console.*`**——沙箱没有 console 对象,写了运行就报 ReferenceError。生成脚本时不要写 console.log;调试/进度/回报一律用 `log`,中止报错才用 `throw`。
+2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
-4. **无总时长上限(可长时间运行,适合复现问题)。** 死循环/卡住可由用户点「停止」按钮秒级中断;`expect` 的 `timeout_ms` 别设太大(常用 500~3000ms),循环要有出口。内存上限 64MiB,超出会被强杀。
-5. **`throw` 正常传播。** `throw new Error("设备未响应")` 让脚本失败并把消息显示出来——这是"中止并报错"的正道(配合第 1 条:没等到就 throw)。
+4. **脚本可长跑,但要留出口。** 无总时长上限,运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,循环要有退出条件。内存上限 64MiB,超出被强杀。
 
 ## 核心模式
 
@@ -61,7 +60,7 @@ const line = await expect("OK", 1000);
 if (line === "") throw new Error("未收到 OK——查波特率/接线/上电");
 ```
 
-**失败重试**(脚本核心价值,宏做不到):
+**失败重试**:
 ```js
 await clear();
 let ok = "";
@@ -88,7 +87,7 @@ if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败"
 log("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
 ```
 
-**周期采集**:循环里直接 `log("第 " + i + " 轮: " + value)` 边采边打(实时、不中断),不再需要攒数组+结束一次性 throw。
+**周期采集**:循环里直接 `log("第 " + i + " 轮: " + value)` 边采边打。
 
 ## 完整示例:AT 设备自检
 
@@ -115,5 +114,4 @@ log("✅ 自检通过,信号: " + csq);
 
 - 主体是一段自包含、可整段粘贴的 JS(代码块),注释标清每步在干啥(中文、简短)
 - 代码后一两句说明:假设的设备/波特率、跑在哪个口、预期结果
-- 流程很简单(纯顺序发几条命令、无需判断/重试)就建议**用宏**,别硬写脚本
 - 涉及具体设备命令而用户没给时,按常见 AT 设备惯例给样例并提示"按设备手册调整"

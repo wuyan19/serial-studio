@@ -458,6 +458,10 @@ export default function App() {
         // 别名等元数据变更（本机或别的客户端改的）→ 及时刷新，不必等串口事件
         t.list();
       }),
+      t.onScriptsChanged(() => {
+        // 脚本库变更(MCP/Tauri 写入)→ 重新 load_scripts,不必重启
+        reloadScripts();
+      }),
       t.onError((msg) => {
         setErrorMsg(msg);
         setTimeout(() => setErrorMsg(""), 5000);
@@ -585,13 +589,17 @@ export default function App() {
     }
   }, []);
 
-  // 脚本加载：Tauri → invoke load_scripts；Web → localStorage 回退
-  useEffect(() => {
+  // 脚本加载/重载：Tauri → invoke load_scripts；Web → localStorage 回退。
+  // 抽成函数供 mount + scriptsChanged 广播复用(MCP/Tauri 写入后即时刷新,不必重启)。
+  const reloadScripts = () => {
     if (isTauri()) {
       tauriInvoke<Record<string, Script>>("load_scripts").then(setScripts).catch((e) => console.error("加载脚本失败", e));
     } else {
       setScripts(loadScriptsLocal());
     }
+  };
+  useEffect(() => {
+    reloadScripts();
   }, []);
 
   // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。

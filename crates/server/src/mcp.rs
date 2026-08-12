@@ -11,6 +11,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use ss_core::SerialManager;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -22,6 +23,7 @@ pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Json<Va
             &state.manager,
             state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed),
             &state.script_semaphore,
+            &state.script_bus,
         )
         .await,
     )
@@ -32,6 +34,7 @@ pub async fn handle_request(
     manager: &Arc<SerialManager>,
     enable_scripting: bool,
     semaphore: &tokio::sync::Semaphore,
+    script_bus: &broadcast::Sender<()>,
 ) -> Value {
     let request: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -60,7 +63,7 @@ pub async fn handle_request(
         "initialize" => json!(handle_initialize()),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "tools/list" => json!(handle_tools_list()),
-        "tools/call" => handle_tools_call(&params, manager, enable_scripting, semaphore).await,
+        "tools/call" => handle_tools_call(&params, manager, enable_scripting, semaphore, script_bus).await,
         "prompts/list" => json!(handle_prompts_list()),
         "prompts/get" => json!(handle_prompts_get(&params)),
         "ping" => json!({}),
@@ -170,6 +173,54 @@ fn handle_tools_list() -> Value {
                     },
                     "required": ["code"]
                 }
+            },
+            {
+                "name": "serial_save_script",
+                "description": "保存(或覆盖)一个 JS 脚本到 serial-studio 脚本库(scripts.json),供日后在 UI 或 MCP 复用。这是**数据管理而非执行代码**,不受 enable_scripting 开关限制。name 是脚本唯一标识,已存在则覆盖。脚本内容仍需先用 serial_run_script 调试验证。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "脚本唯一名(存取键,如 \"init-modem\")" },
+                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await)" },
+                        "description": { "type": "string", "description": "用途说明(可选)" },
+                        "group": { "type": "string", "description": "分组名(可选,UI 按组折叠)" },
+                        "params": {
+                            "type": "array",
+                            "description": "声明的运行时参数(可选),运行时收集值注入脚本 args.<name>",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "args.<name> 取值键名" },
+                                    "label": { "type": "string", "description": "UI 显示标签;缺省用 name" },
+                                    "type": { "type": "string", "enum": ["string", "select"], "description": "参数类型" },
+                                    "default": { "type": "string", "description": "缺省值(可选)" },
+                                    "options": { "type": "array", "items": { "type": "string" }, "description": "select 的可选项;string 留空" }
+                                },
+                                "required": ["name", "type"]
+                            }
+                        }
+                    },
+                    "required": ["name", "code"]
+                }
+            },
+            {
+                "name": "serial_list_scripts",
+                "description": "列出脚本库(scripts.json)中所有脚本的元数据(name/description/group/params),**不含 code 全文**。用于发现已有脚本、避免重名。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "serial_delete_script",
+                "description": "从脚本库删除一个脚本。无此名也不报错(幂等)。数据管理,不受 enable_scripting 限制。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "要删除的脚本名" }
+                    },
+                    "required": ["name"]
+                }
             }
         ]
     })
@@ -180,6 +231,7 @@ async fn handle_tools_call(
     manager: &Arc<SerialManager>,
     enable_scripting: bool,
     semaphore: &tokio::sync::Semaphore,
+    script_bus: &broadcast::Sender<()>,
 ) -> Value {
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -194,6 +246,9 @@ async fn handle_tools_call(
         "serial_grep" => tool_serial_grep(arguments, &**manager).await,
         "serial_clear" => tool_serial_clear(arguments, &**manager).await,
         "serial_run_script" => tool_serial_run_script(arguments, manager, enable_scripting, semaphore).await,
+        "serial_save_script" => tool_serial_save_script(arguments, script_bus).await,
+        "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
+        "serial_delete_script" => tool_serial_delete_script(arguments, script_bus).await,
         other => error_text(format!("Unknown tool: {}", other)),
     }
 }
@@ -435,6 +490,65 @@ async fn tool_serial_run_script(
     }
 }
 
+// ===== 脚本库管理(纯数据,不碰串口、不受 enable_scripting 限制)=====
+//
+// save/list/delete 操作 scripts.json 配置文件,不执行任何 JS——故不经 enable_scripting 闸门
+// (该闸门语义是"是否允许远程执行 JS",防 RCE)。AI 调试好脚本后经此落盘供日后复用。
+// 持久化的原子性/并发由 scripts_store 的进程内锁保证。
+
+async fn tool_serial_save_script(args: Value, script_bus: &broadcast::Sender<()>) -> Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return error_text("Missing required parameter: name".into()),
+    };
+    let code = match args.get("code").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return error_text("Missing required parameter: code".into()),
+    };
+    let description = args.get("description").and_then(|v| v.as_str()).map(String::from);
+    let group = args.get("group").and_then(|v| v.as_str()).map(String::from);
+    // params 反序列化为 ScriptParam;格式不符则当空(宽松,不因 params 误填阻断保存)。
+    let params: Vec<ss_core::ScriptParam> = args
+        .get("params")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default();
+    let script = ss_core::Script { description, group, params, code };
+    match crate::scripts_store::upsert(&name, script) {
+        Ok(Some(_)) => { let _ = script_bus.send(()); ok_text(format!("已覆盖脚本「{}」", name)) }
+        Ok(None) => { let _ = script_bus.send(()); ok_text(format!("已保存新脚本「{}」", name)) }
+        Err(e) => error_text(format!("保存失败: {}", e)),
+    }
+}
+
+async fn tool_serial_list_scripts(_args: Value) -> Value {
+    let map = crate::scripts_store::load();
+    // 只回元数据,不含 code 全文(list 膨胀防护;code 在 save 时已由调用方掌握)。
+    let entries: Vec<Value> = map
+        .iter()
+        .map(|(name, s)| {
+            json!({
+                "name": name,
+                "description": s.description,
+                "group": s.group,
+                "params": s.params,
+            })
+        })
+        .collect();
+    ok_text(serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into()))
+}
+
+async fn tool_serial_delete_script(args: Value, script_bus: &broadcast::Sender<()>) -> Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return error_text("Missing required parameter: name".into()),
+    };
+    match crate::scripts_store::remove(&name) {
+        Ok(Some(_)) => { let _ = script_bus.send(()); ok_text(format!("已删除脚本「{}」", name)) }
+        Ok(None) => ok_text(format!("无脚本「{}」(无需删除)", name)),
+        Err(e) => error_text(format!("删除失败: {}", e)),
+    }
+}
+
 // ===== helpers =====
 
 fn ok_text(text: String) -> Value {
@@ -515,66 +629,12 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 
 ## 陷阱
 
-- text 模式默认追加 `\r\n`，设 `auto_newline=false` 才发原始数据。
+- text 模式默认追加换行(按端口配置的 line_ending)，设 `auto_newline=false` 才发原始数据。
 - `serial_grep` 等待期间新数据正常进缓冲区，不阻塞数据流。"#;
 
-/// serial_run_script 的编写指南。跨 MCP 客户端分发(Claude Desktop/Code 等),
-/// 与仓库 skills/serial-studio-script/SKILL.md 同源——前者服务任意 MCP 客户端,
-/// 后者服务装了技能的 Claude Code。改约束时两处同步。
-const SERIAL_SCRIPT_GUIDE: &str = r#"# Serial Studio 脚本编写指南
-
-serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。send/expect/clear 的可选 port 参数可指定其它已打开端口,从而在一个脚本里跨多串口操作。
-
-## 可用全局函数(4 个 async + 同步 log;无 fetch/require/fs/console,沙箱)
-- await send(data, [port])          发文本,自动追加换行。总成功,无返回。
-- await expect(pattern, ms, [port]) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
-                                    超时无匹配返回空串 ""(不报错)——必须判断返回值。
-- await clear([port])               清空接收缓冲。
-- await sleep(ms)                   睡眠(与端口无关)。
-- log(message)                      输出一行日志(同步,不中断脚本)。⚠ MCP 同步路径下日志被丢弃,仅桌面/WS 客户端可见——MCP 调试仍需用 throw。
-[port] 可选,缺省=脚本运行端口;传端口名则操作该端口(须已打开)。
-
-## 必须遵守的约束
-1. 判断 expect 返回值:expect 超时返回 "" 不报错。不判断会把"没收到"当"收到"。用 if (line === "") 识别。
-2. 打印/进度用 log("...")(同步,不中断脚本,边跑边打);throw new Error("...") 仅用于中止报错。严禁 console.log/console.*(沙箱无 console,写了报 ReferenceError)。⚠ MCP 路径下 log 输出被丢弃(仅桌面/WS 可见),MCP 调试仍需用 throw new Error("debug: ...")。
-3. expect 的 pattern 是正则字符串:写 expect("OK", 1000),不要 expect(/OK/, 1000)(字面量转 "/OK/" 会让正则编译失败)。
-4. 30 秒超时:脚本总执行上限 30s,死循环会被强杀。expect 的 ms 通常 500~3000。
-5. 用户 throw 正常传播:expect 没等到 → throw new Error("原因") 是中止报错的正道。
-
-## 多端口:一个脚本操作多个串口
-send/expect/clear 的可选 port 参数指定目标端口(须已打开),缺省=脚本运行端口。各端口接收缓冲相互隔离——对 COM3 的 expect 只读 COM3 的回显。
-未打开的端口:send 静默失败、expect 返回空串(须判空)。脚本无 open 原语,需先手动打开涉及的端口。
-例:COM3 查 MAC → COM5 配该 MAC:
-  await clear("COM3");
-  await send("AT+MAC?", "COM3");
-  const line = await expect("MAC:\\s*([0-9A-Fa-f:]+)", 2000, "COM3");
-  if (!line) throw new Error("COM3 未返回 MAC");
-  const m = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/);
-  const mac = m ? m[0] : "";
-  if (!mac) throw new Error("无法解析 MAC: " + line);
-  await clear("COM5");
-  await send("AT+SETMAC=" + mac, "COM5");
-  if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
-
-## 运行时参数(args)
-serial_run_script 的 args 入参(object,键值均 string)注入为脚本全局对象 args,字段名自定。把易变值从 code 抽出,换参重跑不改脚本。
-  const mac = args.mac;                       // 调用方在 args 里传
-  await send("AT+SETMAC=" + mac, args.target);
-
-## 模式:失败重试(脚本的核心价值)
-await clear();
-let ok = "";
-for (let i = 1; i <= 3; i++) {
-  await send("AT");
-  ok = await expect("OK", 1000);
-  if (ok) break;
-  await sleep(300);
-}
-if (!ok) throw new Error("重试 3 次无响应");
-
-## 调试
-看变量:log("debug: " + JSON.stringify(x))。⚠ MCP 路径下 log 被丢弃,MCP 调试仍用 throw new Error("debug: " + JSON.stringify(x))。
-"#;
+/// serial_run_script 的编写指南。与 skills/serial-studio-script/SKILL.md、
+/// ss_server::SCRIPT_SKILL 三处同源(include_str! 同一文件)——改约束只改 SKILL.md。
+const SERIAL_SCRIPT_GUIDE: &str = include_str!("../../../skills/serial-studio-script/SKILL.md");
 
 #[cfg(test)]
 mod tests {
@@ -586,11 +646,16 @@ mod tests {
         Arc::new(SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener)))
     }
 
+    /// 测试用 script_bus(丢弃 receiver,仅满足签名;验证广播的测试自建 channel 保留 rx)。
+    fn bus() -> broadcast::Sender<()> {
+        broadcast::channel(16).0
+    }
+
     #[tokio::test]
     async fn parse_error() {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request("not json", &m, false, &sem).await;
+        let resp = handle_request("not json", &m, false, &sem, &bus()).await;
         assert_eq!(resp["error"]["code"], -32700);
     }
 
@@ -598,17 +663,21 @@ mod tests {
     async fn initialize() {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &m, false, &sem).await;
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &m, false, &sem, &bus()).await;
         assert_eq!(resp["result"]["serverInfo"]["name"], "serial-studio");
     }
 
     #[tokio::test]
-    async fn tools_list_has_seven() {
+    async fn tools_list_has_ten() {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m, false, &sem).await;
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m, false, &sem, &bus()).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 10, "7 个执行类 + 3 个脚本库管理(save/list/delete)");
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"serial_save_script"));
+        assert!(names.contains(&"serial_list_scripts"));
+        assert!(names.contains(&"serial_delete_script"));
     }
 
     /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_run_script 应被拒。
@@ -617,7 +686,7 @@ mod tests {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"code":"await sleep(1)"}}}"#;
-        let resp = handle_request(req, &m, false, &sem).await;
+        let resp = handle_request(req, &m, false, &sem, &bus()).await;
         assert_eq!(resp["result"]["isError"], true);
     }
 
@@ -626,7 +695,7 @@ mod tests {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
-        let resp = handle_request(req, &m, false, &sem).await;
+        let resp = handle_request(req, &m, false, &sem, &bus()).await;
         assert!(resp["result"]["content"][0]["text"].is_string());
     }
 
@@ -635,7 +704,7 @@ mod tests {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_status","arguments":{}}}"#;
-        let resp = handle_request(req, &m, false, &sem).await;
+        let resp = handle_request(req, &m, false, &sem, &bus()).await;
         assert_eq!(resp["result"]["isError"], true);
     }
 
@@ -644,7 +713,7 @@ mod tests {
     async fn prompts_include_script_guide() {
         let m = make_manager();
     let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#, &m, false, &sem).await;
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#, &m, false, &sem, &bus()).await;
         let names: Vec<&str> = resp["result"]["prompts"]
             .as_array()
             .unwrap()
@@ -660,6 +729,7 @@ mod tests {
             &m,
             false,
             &sem,
+            &bus(),
         )
         .await;
         let text = resp["result"]["messages"][0]["content"]["text"].as_str().unwrap();
@@ -672,5 +742,160 @@ mod tests {
         assert_eq!(hex_to_bytes("48656C6C6F").unwrap(), b"Hello");
         assert_eq!(hex_to_bytes("48 65").unwrap(), b"He");
         assert!(hex_to_bytes("ABC").is_err());
+    }
+
+    // ===== 脚本库管理(save/list/delete)集成测 =====
+    //
+    // 这几个测试经 SERIAL_STUDIO_CONFIG_DIR 把 scripts.json 落到共享 tempdir,不污染 exe 目录。
+    // 所有此类测试 set 同一路径(幂等),各自用唯一 name 避免内容互踩。生产环境不设此变量。
+
+    fn ensure_test_config_dir() {
+        let dir = std::env::temp_dir().join("ss-mcp-test-scripts");
+        std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("{}-{}-{}", prefix, std::process::id(), n)
+    }
+
+    /// save 不受 enable_scripting 限制:默认 false 也能存(数据管理非执行)。
+    #[tokio::test]
+    async fn save_script_not_blocked_by_enable_scripting() {
+        let m = make_manager();
+        let sem = tokio::sync::Semaphore::new(4);
+        ensure_test_config_dir();
+        let name = unique_name("save");
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        assert_ne!(resp["result"]["isError"], true, "enable_scripting=false 不应拦 save");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("已保存"), "应提示已保存: {}", text);
+    }
+
+    /// 端到端:save(带 code marker)→ list(含 name,不含 code 全文)→ delete(已删除)→ delete(幂等)。
+    #[tokio::test]
+    async fn save_list_delete_roundtrip() {
+        let m = make_manager();
+        let sem = tokio::sync::Semaphore::new(4);
+        ensure_test_config_dir();
+        let name = unique_name("roundtrip");
+        let marker = format!("SECRET-CODE-{}", name);
+        // save:code 里藏唯一 marker,后面验证 list 不泄露 code。
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await send('{}')","description":"e2e"}}}}}}"#,
+            name, marker
+        );
+        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        assert_ne!(resp["result"]["isError"], true);
+
+        // list:含刚保存的 name,但不含 code 全文(marker)。
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#,
+            &m,
+            false,
+            &sem,
+            &bus(),
+        )
+        .await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(&name), "list 应含刚保存的 name");
+        assert!(!text.contains(&marker), "list 不应泄露 code 全文(marker): {}", text);
+
+        // delete:命中 → 已删除。
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_delete_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("已删除"), "删存在的应提示已删除: {}", text);
+
+        // delete 幂等:再删 → 非 isError,提示无需删除。
+        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        assert_ne!(resp["result"]["isError"], true, "删不存在应幂等成功");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("无需删除"), "幂等应提示无需删除: {}", text);
+    }
+
+    /// save 覆盖语义:同名再存,提示"已覆盖"。
+    #[tokio::test]
+    async fn save_script_overwrites() {
+        let m = make_manager();
+        let sem = tokio::sync::Semaphore::new(4);
+        ensure_test_config_dir();
+        let name = unique_name("overwrite");
+        for code in ["v1", "v2"] {
+            let req = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await send('{}')"}}}}}}"#,
+                name, code
+            );
+            let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+            assert_ne!(resp["result"]["isError"], true);
+        }
+        // 第二次应提示已覆盖(list 验证只剩一份)
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#,
+            &m, false, &sem, &bus(),
+        ).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+        let mine: Vec<_> = entries.iter().filter(|e| e["name"].as_str() == Some(&name)).collect();
+        assert_eq!(mine.len(), 1, "覆盖后应只剩一份: {:?}", mine);
+    }
+
+    /// save 缺必填参数(name/code)→ isError。
+    #[tokio::test]
+    async fn save_script_missing_params_errors() {
+        let m = make_manager();
+        let sem = tokio::sync::Semaphore::new(4);
+        // 缺 code
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"x"}}}"#;
+        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        assert_eq!(resp["result"]["isError"], true);
+        // 缺 name
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"code":"x"}}}"#;
+        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// save/delete 命中触发 script_bus 广播;list 不触发;delete 幂等(None)不触发。
+    #[tokio::test]
+    async fn save_delete_broadcast_script_bus() {
+        let m = make_manager();
+        let sem = tokio::sync::Semaphore::new(4);
+        ensure_test_config_dir();
+        let (tx, mut rx) = broadcast::channel::<()>(16);
+        let name = unique_name("bcast");
+
+        // save → 广播
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
+            name
+        );
+        handle_request(&req, &m, false, &sem, &tx).await;
+        assert!(rx.try_recv().is_ok(), "save 应触发 script_bus");
+
+        // list → 不广播(只读)
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#;
+        handle_request(req, &m, false, &sem, &tx).await;
+        assert!(rx.try_recv().is_err(), "list 不应触发 script_bus");
+
+        // delete(命中)→ 广播
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_delete_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        handle_request(&req, &m, false, &sem, &tx).await;
+        assert!(rx.try_recv().is_ok(), "delete 命中应触发 script_bus");
+
+        // delete(幂等 None)→ 不广播
+        handle_request(&req, &m, false, &sem, &tx).await;
+        assert!(rx.try_recv().is_err(), "delete 幂等未变更不应触发 script_bus");
     }
 }
