@@ -706,6 +706,9 @@ button {
   height: 14px;
 }
 .macro-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin-top: 10px;
   padding: 7px 9px;
   font-family: var(--font-mono);
@@ -714,6 +717,25 @@ button {
   border: 1px solid var(--hairline);
   word-break: break-all;
   line-height: 1.5;
+}
+.macro-result__msg {
+  flex: 1;
+  min-width: 0;
+}
+.macro-result__close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.45;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.macro-result__close:hover {
+  opacity: 1;
+  color: var(--danger);
 }
 .macro-result.ok {
   color: var(--link);
@@ -731,9 +753,6 @@ button {
 }
 /* 运行中脚本任务(脚本侧栏):每条运行实例一行,独立停止按钮(per-runId,多任务各停各的)。 */
 .script-task {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin-top: 8px;
   padding: 6px 9px;
   font-family: var(--font-mono);
@@ -742,6 +761,16 @@ button {
   border: 1px solid var(--hairline);
   background: var(--surface-2);
   color: var(--ink-dim);
+}
+.script-task__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.script-task--open {
+  border-color: rgba(126, 231, 135, 0.45);
 }
 .script-task__name {
   flex: 1;
@@ -769,6 +798,44 @@ button {
   color: var(--danger);
   border-color: rgba(229, 83, 75, 0.4);
   background: rgba(229, 83, 75, 0.1);
+}
+/* 脚本结果横幅:有日志时可点击展开/收起本次 runId 的日志历史。 */
+.macro-result--expandable {
+  cursor: pointer;
+  user-select: none;
+}
+.macro-result--expandable:hover {
+  filter: brightness(1.08);
+}
+.macro-result__caret {
+  flex: none;
+  opacity: 0.7;
+}
+/* 脚本 log() 输出列表:横幅下方展开,实时累积,等宽滚动。 */
+.script-log-list {
+  margin-top: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 6px 9px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+}
+.script-log-list__line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.script-log-list--live {
+  margin-top: 6px;
+  border-left: 2px solid rgba(126, 231, 135, 0.5);
+}
+.script-log-list__line--muted {
+  opacity: 0.5;
+  font-style: italic;
 }
 
 /* ============================================================

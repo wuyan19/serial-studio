@@ -9,9 +9,9 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 
 产出目标:一段**自包含、可直接粘贴运行**的 JS,加一两句运行说明。
 
-## 全局 API(只有这 4 个 + 标准 JS)
+## 全局 API(4 个 async 函数 + log + 标准 JS)
 
-脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面 4 个注入的 `async` 函数,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`/`console`。
+脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面 4 个注入的 `async` 函数 + 一个同步 `log`,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`/`console`。
 
 | 调用 | 作用 | 返回 |
 |---|---|---|
@@ -19,6 +19,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 | `await expect(pattern, timeout_ms, [port])` | 用正则 `pattern` 匹配**整行**接收缓冲 | 首条匹配行;**超时无匹配返回空串 `""`** |
 | `await clear([port])` | 清空接收缓冲 | 无 |
 | `await sleep(ms)` | 睡眠 ms 毫秒 | 无 |
+| `log(message)` | 输出一行日志到结果栏(实时,**不中断脚本**;结束点击横幅展开回看) | 无 |
 
 `[port]` 缺省 = 当前活动端口;传端口名(如 `"COM5"`)则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
 
@@ -45,7 +46,7 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 ## 硬约束(违背即出错)
 
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`;不判就把"没收到"当"收到"继续走。
-2. **严禁 `console.log` / `console.*`——沙箱没有 console 对象,写了运行就报 ReferenceError。** 打印变量、调试、回报结果**只能**用 `throw new Error("...")`(消息显示在结果栏;代价是脚本以失败结束,验证完删掉调试用 throw)。生成脚本时绝对不要写 console.log,一律改成 throw。
+2. **打印/进度/调试用 `log("...")`,不要用 `throw` 调试。** `log(message)` 实时输出到结果栏且**不中断脚本**——边跑边打、循环里随便用,结束点击结果横幅展开回看。`throw new Error("...")` 仅用于**中止并报错**(配合第 1 条:没等到就 throw)。**严禁 `console.log`/`console.*`**——沙箱没有 console 对象,写了运行就报 ReferenceError。生成脚本时不要写 console.log;调试/进度/回报一律用 `log`,中止报错才用 `throw`。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
 4. **无总时长上限(可长时间运行,适合复现问题)。** 死循环/卡住可由用户点「停止」按钮秒级中断;`expect` 的 `timeout_ms` 别设太大(常用 500~3000ms),循环要有出口。内存上限 64MiB,超出会被强杀。
 5. **`throw` 正常传播。** `throw new Error("设备未响应")` 让脚本失败并把消息显示出来——这是"中止并报错"的正道(配合第 1 条:没等到就 throw)。
@@ -84,10 +85,10 @@ if (line === "") throw new Error("COM3 未返回 MAC");
 const mac = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/)[0];
 await send("AT+SETMAC=" + mac, "COM5");
 if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
-throw new Error("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
+log("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
 ```
 
-**周期采集**:循环把结果攒进数组,结束后 `throw new Error(arr.join("\n"))` 一次输出(循环里 throw 会立刻中断,故不能边采边抛)。
+**周期采集**:循环里直接 `log("第 " + i + " 轮: " + value)` 边采边打(实时、不中断),不再需要攒数组+结束一次性 throw。
 
 ## 完整示例:AT 设备自检
 
@@ -107,7 +108,7 @@ if (await expect("OK", 1000) === "") throw new Error("关回显失败");
 await send("AT+CSQ");
 const csq = await expect("CSQ:\\s*\\d+", 1500);
 if (csq === "") throw new Error("查询信号失败");
-throw new Error("✅ 自检通过,信号: " + csq);
+log("✅ 自检通过,信号: " + csq);
 ```
 
 ## 输出约定

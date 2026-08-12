@@ -391,7 +391,7 @@ async fn run_script(
     let run_id_for_cleanup = run_id.clone();
     tokio::spawn(async move {
         // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
-        let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, abort).await;
+        let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, &run_id, abort).await;
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
@@ -464,6 +464,13 @@ fn spawn_event_emitter(
                     let _ = app.emit(
                         "serial-error",
                         serde_json::json!({ "message": format!("{}: {}", port, message) }),
+                    );
+                }
+                ss_core::SerialEvent::ScriptLog { run_id, message, .. } => {
+                    // 脚本 log() 输出:按 run_id 路由到对应运行实例的日志区(port 不转发)。
+                    let _ = app.emit(
+                        "script-log",
+                        serde_json::json!({ "run_id": run_id, "message": message }),
                     );
                 }
             }

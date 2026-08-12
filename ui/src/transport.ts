@@ -43,6 +43,8 @@ export interface Transport {
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (name: string, success: boolean, msg: string) => void): () => void;
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
+  /** 脚本 log() 实时输出。前端按 runId 路由到对应运行实例的日志区(MCP 触发的 run_id="" 由调用方过滤)。 */
+  onScriptLog(cb: (runId: string, message: string) => void): () => void;
   onConnectedChange(cb: (connected: boolean) => void): () => void;
   /** 服务版本号 + 是否启用远程脚本执行（关于页 + 脚本 UI 显隐）。本地恒 enableScripting=true。 */
   getVersion(): Promise<{ version: string; enableScripting: boolean }>;
@@ -79,6 +81,7 @@ export class RemoteTransport implements Transport {
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
+    scriptLog: new Set<(runId: string, message: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -153,6 +156,9 @@ export class RemoteTransport implements Transport {
           break;
         case "script_result":
           this.handlers.scriptResult.forEach((cb) => cb(msg.run_id, msg.name, msg.success, msg.message));
+          break;
+        case "script_log":
+          this.handlers.scriptLog.forEach((cb) => cb(msg.run_id, msg.message));
           break;
       }
     };
@@ -252,6 +258,10 @@ export class RemoteTransport implements Transport {
     this.handlers.scriptResult.add(cb);
     return () => { this.handlers.scriptResult.delete(cb); };
   }
+  onScriptLog(cb: (runId: string, message: string) => void) {
+    this.handlers.scriptLog.add(cb);
+    return () => { this.handlers.scriptLog.delete(cb); };
+  }
   onConnectedChange(cb: (connected: boolean) => void) {
     this.handlers.connected.add(cb);
     if (this.ws.readyState === WebSocket.OPEN) cb(true);
@@ -279,6 +289,7 @@ export class LocalTransport implements Transport {
     error: new Set<(msg: string) => void>(),
     macroResult: new Set<(name: string, success: boolean, msg: string) => void>(),
     scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
+    scriptLog: new Set<(runId: string, message: string) => void>(),
     connected: new Set<(c: boolean) => void>(),
   };
 
@@ -327,6 +338,11 @@ export class LocalTransport implements Transport {
             this.handlers.scriptResult.forEach((cb) =>
               cb(e.payload.run_id, e.payload.name, e.payload.success, e.payload.message)
             )
+        )
+      );
+      this.unlisten.push(
+        await listen<{ run_id: string; message: string }>("script-log", (e) =>
+          this.handlers.scriptLog.forEach((cb) => cb(e.payload.run_id, e.payload.message))
         )
       );
       this.unlisten.push(
@@ -434,6 +450,10 @@ export class LocalTransport implements Transport {
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
     this.handlers.scriptResult.add(cb);
     return () => { this.handlers.scriptResult.delete(cb); };
+  }
+  onScriptLog(cb: (runId: string, message: string) => void) {
+    this.handlers.scriptLog.add(cb);
+    return () => { this.handlers.scriptLog.delete(cb); };
   }
   onConnectedChange(cb: (connected: boolean) => void) {
     this.handlers.connected.add(cb);

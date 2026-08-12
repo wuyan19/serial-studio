@@ -25,6 +25,13 @@ pub enum SerialEvent {
     HoldersChanged { port: String, holders: usize },
     /// 串口错误
     Error { port: String, message: String },
+    /// 脚本 `log()` 输出。经 EventBus 流给前端(WS/Tauri 两出口),前端按 `run_id` 路由到对应运行实例。
+    /// MCP 路径不订阅 EventBus,日志静默丢弃(`run_id` 为空)。`port` 标识来源口(多口脚本区分)。
+    ScriptLog {
+        run_id: String,
+        port: String,
+        message: String,
+    },
 }
 
 pub struct EventBus {

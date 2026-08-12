@@ -61,6 +61,8 @@ enum ServerMsg {
     MacroResult { name: String, success: bool, message: String },
     /// run_script 的结果（与 MacroResult 同构）。run_id 供前端按运行实例路由（停止/并发区分）。
     ScriptResult { run_id: String, name: String, success: bool, message: String },
+    /// 脚本 log() 输出(实时)。前端按 run_id 路由到对应运行实例的日志区。port 不转发(前端按 run_id 路由)。
+    ScriptLog { run_id: String, message: String },
     /// version 的直接回复：服务端编译版本 + 是否启用远程脚本执行（前端据此显隐脚本 UI）。
     Version { version: String, enable_scripting: bool },
     /// get_script_skill 的直接回复：脚本编写 SKILL 全文(前端展示 / 复制给外部 Agent)。
@@ -284,6 +286,10 @@ fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
         SerialEvent::Error { port, message } => to_json(ServerMsg::Error {
             message: format!("{}: {}", port, message),
         }),
+        SerialEvent::ScriptLog { run_id, message, .. } => to_json(ServerMsg::ScriptLog {
+            run_id: run_id.clone(),
+            message: message.clone(),
+        }),
     })
 }
 
@@ -448,7 +454,7 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
             tokio::spawn(async move {
                 let _permit = permit; // 持有到脚本结束
                 // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
-                let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, abort).await;
+                let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, &run_id, abort).await;
                 script_runs.lock().unwrap().remove(&run_id_for_cleanup);
                 let msg = match result {
                     Ok(()) => ServerMsg::ScriptResult {
@@ -536,5 +542,24 @@ mod tests {
         assert_eq!(f[0] as usize, port.len());
         assert_eq!(&f[1..1 + port.len()], port.as_bytes());
         assert_eq!(&f[1 + port.len()..], &[0xff]);
+    }
+
+    #[test]
+    fn event_to_msg_script_log_is_text_json() {
+        // 锁定 WS 转发契约:ScriptLog → Text JSON,type=script_log,port 不转发(前端按 run_id 路由)。
+        let evt = SerialEvent::ScriptLog {
+            run_id: "r1".into(),
+            port: "COM5".into(),
+            message: "hello world".into(),
+        };
+        match event_to_msg(&evt).expect("ScriptLog 应转发为 Some") {
+            OutFrame::Text(json) => {
+                assert!(json.contains(r#""type":"script_log""#), "type 字段: {json}");
+                assert!(json.contains(r#""run_id":"r1""#), "run_id: {json}");
+                assert!(json.contains(r#""message":"hello world""#), "message: {json}");
+                assert!(!json.contains("COM5"), "port 不应转发给前端: {json}");
+            }
+            OutFrame::Binary(_) => panic!("ScriptLog 应是 Text(JSON),非 Binary"),
+        }
     }
 }

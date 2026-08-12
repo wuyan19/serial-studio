@@ -250,6 +250,10 @@ export default function App() {
   const [editorError, setEditorError] = useState("");
   const [scripts, setScripts] = useState<Record<string, Script>>({});
   const [scriptResult, setScriptResult] = useState<ScriptResult | null>(null);
+  /** 脚本 log() 输出:runId → 日志行(实时累积)。结果横幅点击展开回看本次运行的日志历史。 */
+  const [scriptLogs, setScriptLogs] = useState<Map<string, string[]>>(new Map());
+  /** 结果横幅展开的 runId(null = 收起);点击横幅切换。 */
+  const [expandedLog, setExpandedLog] = useState<string | null>(null);
   /** 运行中的脚本:runId → {name, devId}。驱动「运行中」行 + 停止按钮(替掉"运行中..."字符串标记,顺带解并发错配)。 */
   const [runningScripts, setRunningScripts] = useState<Map<string, { name: string; devId: string }>>(new Map());
   const [editingScript, setEditingScript] = useState<{ name: string; isNew: boolean } | null>(null);
@@ -455,6 +459,21 @@ export default function App() {
       t.onScriptResult((runId, name, success, message) => {
         if (runId) setRunningScripts((prev) => { const n = new Map(prev); n.delete(runId); return n; });
         setScriptResult({ runId, name, success, message });
+      }),
+      t.onScriptLog((runId, message) => {
+        // 过滤空 runId(MCP 入口 run_id="",防本地内嵌 MCP 污染桌面 UI)。cap:每运行 1000 行 / Map 最近 8 runId。
+        if (!runId) return;
+        setScriptLogs((prev) => {
+          const next = new Map(prev);
+          const arr = (next.get(runId) ?? []).concat(message);
+          next.set(runId, arr.length > 1000 ? arr.slice(arr.length - 1000) : arr);
+          while (next.size > 8) {
+            const oldest = next.keys().next().value;
+            if (oldest === undefined) break;
+            next.delete(oldest);
+          }
+          return next;
+        });
       }),
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1037,6 +1056,7 @@ export default function App() {
     const runId = crypto.randomUUID();
     const { devId, name: portName } = parsePortId(activePort);
     setRunningScripts((prev) => new Map(prev).set(runId, { name, devId }));
+    setExpandedLog(runId); // 运行中默认展开:实时看进度(数据边到边显示);结束自动接管到结果横幅看完整历史
     transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
@@ -1611,17 +1631,65 @@ export default function App() {
                   ))}
                 </div>
               ))}
-              {[...runningScripts.entries()].map(([runId, { name, devId }]) => (
-                <div key={runId} className="script-task">
-                  <span className="script-task__name" title={name}>⟳ {name}</span>
-                  <span className="script-task__status">运行中</span>
-                  <button className="script-task__stop" title="停止脚本" onClick={() => transportsRef.current.get(devId)?.stopScript(runId)}>停止</button>
-                </div>
-              ))}
+              {[...runningScripts.entries()].map(([runId, { name, devId }]) => {
+                const lines = scriptLogs.get(runId) ?? [];
+                return (
+                  <div key={runId} className={`script-task${expandedLog === runId ? " script-task--open" : ""}`}>
+                    <div
+                      className="script-task__head"
+                      onClick={() => setExpandedLog((v) => (v === runId ? null : runId))}
+                      role="button"
+                    >
+                      <span className="script-task__name" title={name}>⟳ {name}</span>
+                      <span className="script-task__status">运行中…</span>
+                      <button
+                        className="script-task__stop"
+                        title="停止脚本"
+                        onClick={(e) => { e.stopPropagation(); transportsRef.current.get(devId)?.stopScript(runId); }}
+                      >停止</button>
+                    </div>
+                    {expandedLog === runId && (
+                      <div className="script-log-list script-log-list--live">
+                        {lines.length === 0 && (
+                          <div className="script-log-list__line script-log-list__line--muted">（等待 log 输出…）</div>
+                        )}
+                        {lines.map((line, i) => (
+                          <div key={i} className="script-log-list__line">{line}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               {scriptResult && (
-                <div className={`macro-result ${scriptResult.success ? "ok" : "err"}`}>
-                  {scriptResult.success ? "✓" : "✗"} {scriptResult.name}: {scriptResult.message}
-                </div>
+                <>
+                  <div
+                    className={`macro-result ${scriptResult.success ? "ok" : "err"}${scriptResult.runId && scriptLogs.has(scriptResult.runId) ? " macro-result--expandable" : ""}`}
+                    onClick={
+                      scriptResult.runId && scriptLogs.has(scriptResult.runId)
+                        ? () => setExpandedLog((v) => (v === scriptResult.runId ? null : scriptResult.runId!))
+                        : undefined
+                    }
+                    role={scriptResult.runId && scriptLogs.has(scriptResult.runId) ? "button" : undefined}
+                  >
+                    <span className="macro-result__msg">{scriptResult.success ? "✓" : "✗"} {scriptResult.name}: {scriptResult.message}</span>
+                    {scriptResult.runId && scriptLogs.has(scriptResult.runId) && (
+                      <span className="macro-result__caret">{expandedLog === scriptResult.runId ? "▴" : "▾"}</span>
+                    )}
+                    <button
+                      className="macro-result__close"
+                      title="关闭"
+                      onClick={(e) => { e.stopPropagation(); setScriptResult(null); setExpandedLog(null); }}
+                    >×</button>
+                  </div>
+                  {scriptResult.runId && expandedLog === scriptResult.runId && (
+                    <div className="script-log-list">
+                      {(scriptLogs.get(scriptResult.runId) ?? []).map((line, i) => (
+                        <div key={i} className="script-log-list__line">{line}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

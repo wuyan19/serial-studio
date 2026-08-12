@@ -525,17 +525,18 @@ const SERIAL_SCRIPT_GUIDE: &str = r#"# Serial Studio 脚本编写指南
 
 serial_run_script 执行一段 JS(QuickJS,顶层可直接 await),跑在指定串口上。能做 if/for/重试等控制流。send/expect/clear 的可选 port 参数可指定其它已打开端口,从而在一个脚本里跨多串口操作。
 
-## 可用全局 async 函数(只有这 4 个 + 标准 JS;无 fetch/require/fs/console,沙箱)
+## 可用全局函数(4 个 async + 同步 log;无 fetch/require/fs/console,沙箱)
 - await send(data, [port])          发文本,自动追加换行。总成功,无返回。
 - await expect(pattern, ms, [port]) 在接收缓冲用正则 pattern 匹配整行,返回首条匹配行。
                                     超时无匹配返回空串 ""(不报错)——必须判断返回值。
 - await clear([port])               清空接收缓冲。
 - await sleep(ms)                   睡眠(与端口无关)。
+- log(message)                      输出一行日志(同步,不中断脚本)。⚠ MCP 同步路径下日志被丢弃,仅桌面/WS 客户端可见——MCP 调试仍需用 throw。
 [port] 可选,缺省=脚本运行端口;传端口名则操作该端口(须已打开)。
 
 ## 必须遵守的约束
 1. 判断 expect 返回值:expect 超时返回 "" 不报错。不判断会把"没收到"当"收到"。用 if (line === "") 识别。
-2. 严禁 console.log/console.*(沙箱无 console 对象,写了运行报 ReferenceError)。打印/调试/回报结果只能 throw new Error("...")——消息显示给用户(脚本以失败结束)。
+2. 打印/进度用 log("...")(同步,不中断脚本,边跑边打);throw new Error("...") 仅用于中止报错。严禁 console.log/console.*(沙箱无 console,写了报 ReferenceError)。⚠ MCP 路径下 log 输出被丢弃(仅桌面/WS 可见),MCP 调试仍需用 throw new Error("debug: ...")。
 3. expect 的 pattern 是正则字符串:写 expect("OK", 1000),不要 expect(/OK/, 1000)(字面量转 "/OK/" 会让正则编译失败)。
 4. 30 秒超时:脚本总执行上限 30s,死循环会被强杀。expect 的 ms 通常 500~3000。
 5. 用户 throw 正常传播:expect 没等到 → throw new Error("原因") 是中止报错的正道。
@@ -572,7 +573,7 @@ for (let i = 1; i <= 3; i++) {
 if (!ok) throw new Error("重试 3 次无响应");
 
 ## 调试
-看变量:throw new Error("debug: " + JSON.stringify(x))。
+看变量:log("debug: " + JSON.stringify(x))。⚠ MCP 路径下 log 被丢弃,MCP 调试仍用 throw new Error("debug: " + JSON.stringify(x))。
 "#;
 
 #[cfg(test)]

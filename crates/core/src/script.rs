@@ -9,7 +9,7 @@
 //! - 内层:[`run_script_inner`] 的 `tokio::time::timeout` + QuickJS interrupt handler(在脚本线程)。
 //! - 外层:[`run_script_with_timeout`] 的 `oneshot` 超时(主线程,兜底防脚本线程卡死)。
 //!
-//! 暴露的全局 async 函数:send / expect / clear / sleep。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
+//! 暴露的全局 async 函数:send / expect / clear / sleep(以及同步函数 log,输出脚本日志)。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
 //!
 //! v1 限制(后续完善):
 //! - 串口原语失败用 tracing 记录、不抛 JS 异常(rquickjs `Async` 闭包的 `Ctx<'js>` 生命周期短于
@@ -17,8 +17,10 @@
 //!   注意:`sleep`/`expect` 的**停止**走另一条路——主动返 `Err(rquickjs::Error)`(无需 Ctx)→ await
 //!   reject → 抛异常中断脚本。这与「原语失败吞错」不冲突(失败是 Ok 路径吞,停止是主动 Err)。
 //! - API 暂为全局函数,后续收敛为 `serial` 对象。
-//! - 不捕获脚本输出,`ScriptResult` 与 `MacroResult` 同构。
+//! - 脚本 `log(msg)` 输出经 EventBus(`SerialEvent::ScriptLog`)流到前端(WS/Tauri 两出口),按 run_id 路由;
+//!   MCP 路径不订阅 EventBus,日志静默丢弃。`ScriptResult` 仍与 `MacroResult` 同构。
 
+use crate::event_bus::SerialEvent;
 use crate::manager::SerialManager;
 use rquickjs::prelude::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Promise};
@@ -112,7 +114,8 @@ pub async fn run_script(
     args: HashMap<String, String>,
 ) -> Result<(), ScriptError> {
     let abort = Arc::new(AtomicBool::new(false));
-    run_script_with_timeout(port, &script.code, manager, Some(DEFAULT_TIMEOUT), args, abort).await
+    // MCP 是同步 JSON-RPC,无实时日志出口;run_id="" → publish 的 ScriptLog 无订阅者被丢(见 event_to_msg 不转发)。
+    run_script_with_timeout(port, &script.code, manager, Some(DEFAULT_TIMEOUT), args, "", abort).await
 }
 
 /// 执行一段 JS 脚本,注入串口原语。
@@ -131,11 +134,13 @@ pub async fn run_script_with_timeout(
     manager: Arc<SerialManager>,
     timeout: Option<Duration>,
     args: HashMap<String, String>,
+    run_id: &str, // 本次运行标识:脚本 log() 输出按此路由到前端(WS/Tauri);MCP 入口传 ""
     abort: Arc<AtomicBool>,
 ) -> Result<(), ScriptError> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
     let code = code.to_string();
+    let run_id = run_id.to_string();
     // 独立 OS 线程 + current_thread runtime:内部 future(含 rquickjs 非 Send)无需跨线程。
     // abort 克隆一份进线程(interrupt handler 用);原 abort 留给尾部 map_aborted 判停止。
     let abort_for_thread = abort.clone();
@@ -147,7 +152,7 @@ pub async fn run_script_with_timeout(
                 .enable_all()
                 .build()
                 .map_err(|e| ScriptError::Engine(format!("创建脚本线程 runtime 失败: {e}")))?;
-            rt.block_on(run_script_inner(port, code, manager, timeout, args, abort_for_thread))
+            rt.block_on(run_script_inner(port, code, manager, timeout, args, run_id, abort_for_thread))
         });
         let result = match std::panic::catch_unwind(run) {
             Ok(r) => r,
@@ -198,6 +203,7 @@ async fn run_script_inner(
     manager: Arc<SerialManager>,
     timeout: Option<Duration>,
     args: HashMap<String, String>,
+    run_id: String, // 脚本 log() 按此路由到前端(WS/Tauri);MCP 传 ""
     abort: Arc<AtomicBool>,
 ) -> Result<(), ScriptError> {
     let deadline = timeout.as_ref().map(|t| Instant::now() + *t);
@@ -325,6 +331,25 @@ async fn run_script_inner(
                     ).map_err(|e| e.to_string())?;
                 }
 
+                // log(message):脚本日志输出(不中断脚本,区别 throw)。同步 publish ScriptLog →
+                // EventBus → 前端(按 run_id 路由)。必须同步:若用 Async 包装,JS 不 await 则 future 不执行→丢失。
+                // MCP 路径 run_id="" 且 server 不订阅 EventBus,日志静默丢弃。
+                {
+                    let mgr = manager.clone();
+                    let rid = run_id.clone();
+                    let dp = port.clone();
+                    globals.set(
+                        "log",
+                        Func::from(move |message: String| {
+                            mgr.event_bus().publish(SerialEvent::ScriptLog {
+                                run_id: rid.clone(),
+                                port: dp.clone(),
+                                message,
+                            });
+                        }),
+                    ).map_err(|e| e.to_string())?;
+                }
+
                 // 注入运行时参数 args(运行收集的值):globalThis.args = { name: value, ... }。
                 // 脚本里 args.<name> 直接读。Object::new 取 ctx,后续 ctx.eval 还要用,故 clone。
                 {
@@ -416,7 +441,7 @@ mod tests {
             if (x !== 1) { throw new Error("控制流失败"); }
         "#;
         let start = Instant::now();
-        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
         // 三个 sleep(20) 真的 await 过(累计 ~60ms);若同步阻塞则不可能达成。
         assert!(
@@ -432,7 +457,7 @@ mod tests {
         let code = r#"while (true) { await sleep(10); }"#;
         let start = Instant::now();
         let result =
-            run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_millis(200)), HashMap::new(), abort_flag()).await;
+            run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_millis(200)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(
             matches!(result, Err(ScriptError::Timeout)),
             "死循环应被超时中断: {:?}",
@@ -473,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn thrown_error_message_is_extracted() {
         let code = r#"throw new Error("test 123");"#;
-        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         match result {
             Err(ScriptError::Script(msg)) => assert_eq!(msg, "test 123"),
             other => panic!("期望 Script(\"test 123\"),得到 {:?}", other),
@@ -485,17 +510,17 @@ mod tests {
     #[tokio::test]
     async fn optional_port_param_arity() {
         // send 缺省 port(默认=绑定端口 COM0,未开则 send 失败被吞,仍 Ok)
-        let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let r = run_script_with_timeout("COM0", r#"await send("x")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(r.is_ok(), "send(data) 缺省 port 应 Ok: {:?}", r);
         // send 显式 port
-        let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let r2 = run_script_with_timeout("COM0", r#"await send("x", "COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(r2.is_ok(), "send(data, port) 显式 port 应 Ok: {:?}", r2);
         // expect 三参(端口未开 → grep_buffer 报错被吞 → 返回空串 → 不 throw)
         let code = r#"const v = await expect("OK", 50, "COM9"); if (v !== "") throw new Error("未开端口应返回空串,得到: " + v);"#;
-        let r3 = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let r3 = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
         // clear 显式 port
-        let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), abort_flag()).await;
+        let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(r4.is_ok(), "clear(port) 应 Ok: {:?}", r4);
     }
 
@@ -506,7 +531,7 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("mac".to_string(), "AA:BB:CC".to_string());
         args.insert("tgt".to_string(), "COM7".to_string());
-        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), args, abort_flag()).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), args, "log-rid", abort_flag()).await;
         match result {
             Err(ScriptError::Script(msg)) => assert_eq!(msg, "mac=AA:BB:CC tgt=COM7"),
             other => panic!("期望 Script(\"mac=AA:BB:CC tgt=COM7\"),得到 {:?}", other),
@@ -527,7 +552,7 @@ mod tests {
         });
         let start = Instant::now();
         let result =
-            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), abort).await;
+            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort).await;
         stopper.await.unwrap();
         assert!(
             matches!(result, Err(ScriptError::Aborted)),
@@ -552,7 +577,7 @@ mod tests {
             abort_clone.store(true, Ordering::Relaxed);
         });
         let start = Instant::now();
-        let result = run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), abort).await;
+        let result = run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort).await;
         stopper.await.unwrap();
         assert!(
             matches!(result, Err(ScriptError::Aborted)),
@@ -580,8 +605,8 @@ mod tests {
             abort_b_stop.store(true, Ordering::Relaxed);
         });
         let (ra, rb) = tokio::join!(
-            run_script_with_timeout("COM0", code_a, mgr(), None, HashMap::new(), abort_a),
-            run_script_with_timeout("COM0", code_b, mgr(), None, HashMap::new(), abort_b),
+            run_script_with_timeout("COM0", code_a, mgr(), None, HashMap::new(), "log-rid", abort_a),
+            run_script_with_timeout("COM0", code_b, mgr(), None, HashMap::new(), "log-rid", abort_b),
         );
         stopper.await.unwrap();
         assert!(
@@ -592,5 +617,53 @@ mod tests {
             matches!(rb, Err(ScriptError::Aborted)),
             "B 应被停止: {:?}", rb
         );
+    }
+
+    /// log(msg) 经 EventBus 发 ScriptLog(按 run_id/port 路由);脚本正常完成不中断(区别 throw)。
+    #[tokio::test]
+    async fn log_publishes_event() {
+        let m = mgr();
+        let mut rx = m.event_bus().subscribe();
+        let code = r#"log("hello"); await sleep(5); log("world");"#;
+        let result = run_script_with_timeout(
+            "COM0",
+            code,
+            m,
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "rid-xyz",
+            abort_flag(),
+        )
+        .await;
+        assert!(result.is_ok(), "log 不应中断脚本: {:?}", result);
+        // 脚本完成时 log 已同步 publish 进 broadcast buffer;try_recv 收全(本测试无其它事件)。
+        let mut logs = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            if let crate::event_bus::SerialEvent::ScriptLog { run_id, port, message } = evt {
+                logs.push((run_id, port, message));
+            }
+        }
+        assert_eq!(
+            logs,
+            vec![
+                ("rid-xyz".to_string(), "COM0".to_string(), "hello".to_string()),
+                ("rid-xyz".to_string(), "COM0".to_string(), "world".to_string()),
+            ],
+            "应收到两条 ScriptLog,run_id/port 正确"
+        );
+    }
+
+    /// MCP 入口 run_script(run_id="")不 panic:log 的 ScriptLog 无订阅者静默丢弃。
+    #[tokio::test]
+    async fn mcp_entry_log_silent() {
+        let m = mgr();
+        let script = Script {
+            description: None,
+            group: None,
+            params: vec![],
+            code: r#"log("x")"#.to_string(),
+        };
+        let result = run_script("COM0", &script, m, HashMap::new()).await;
+        assert!(result.is_ok(), "MCP 入口 log 不应 panic/中断: {:?}", result);
     }
 }
