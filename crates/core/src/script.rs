@@ -289,6 +289,7 @@ async fn run_script_inner(
                 }
 
                 // clear([port]):清空接收缓冲区。port 缺省=脚本绑定端口。
+                // 失败返 Some(msg) → JS 包装层 throw(同 send 模式,绕过 rquickjs 异步异常限制)。
                 {
                     let mgr = manager.clone();
                     let dp = port.clone();
@@ -298,10 +299,14 @@ async fn run_script_inner(
                             let mgr = mgr.clone();
                             let p = port.unwrap_or_else(|| dp.clone());
                             async move {
-                                if let Err(e) = mgr.clear_buffer(&p).await {
-                                    tracing::error!("脚本 clear 失败: {}", e);
+                                match mgr.clear_buffer(&p).await {
+                                    Ok(_) => Ok::<Option<String>, rquickjs::Error>(None),
+                                    Err(e) => {
+                                        tracing::error!("脚本 clear 失败: {}", e);
+                                        let where_ = if p.is_empty() { "未指定端口".to_string() } else { format!("端口 {}", p) };
+                                        Ok(Some(format!("clear 失败({}): {e}", where_)))
+                                    }
                                 }
-                                Ok::<_, rquickjs::Error>(())
                             }
                         })),
                     ).map_err(|e| e.to_string())?;
@@ -373,7 +378,7 @@ async fn run_script_inner(
                 // 让 send/expect/clear 支持缺省 port。sleep 无 port 参数,不包装。
                 ctx.eval::<(), _>(r#"const __send=globalThis.send;globalThis.send=async(d,p)=>{const r=await __send(d,typeof p==="undefined"?null:p);if(r!==undefined) throw new Error(r);};
 const __expect=globalThis.expect;globalThis.expect=async(t,m,p)=>__expect(t,m,typeof p==="undefined"?null:p);
-const __clear=globalThis.clear;globalThis.clear=async(p)=>__clear(typeof p==="undefined"?null:p);"#)
+const __clear=globalThis.clear;globalThis.clear=async(p)=>{const r=await __clear(typeof p==="undefined"?null:p);if(r!==undefined) throw new Error(r);};"#)
                     .map_err(|e| e.to_string())?;
 
                 // JS 异常 → 可读消息:必须在 ctx 还活着时用 .catch(&ctx) 捕获并提取 message。
@@ -525,9 +530,9 @@ mod tests {
         let code = r#"const v = await expect("OK", 50, "COM9"); if (v !== "") throw new Error("未开端口应返回空串,得到: " + v);"#;
         let r3 = run_script_with_timeout("COM0", code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
-        // clear 显式 port
+        // clear 显式 port(未开 → clear 返 Some(fail) → JS 包装 throw)
         let r4 = run_script_with_timeout("COM0", r#"await clear("COM5")"#, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag()).await;
-        assert!(r4.is_ok(), "clear(port) 应 Ok: {:?}", r4);
+        assert!(matches!(r4, Err(ScriptError::Script(ref m)) if m.contains("clear 失败")), "clear(port) 未开应 throw 'clear 失败': {:?}", r4);
     }
 
     /// 运行时参数 args 注入:脚本读 args.<name> 拿到传入值(验证 Object 注入 + ctx 所有权写法)。
