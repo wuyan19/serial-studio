@@ -1543,7 +1543,15 @@ export default function App() {
                   </button>
                   {!macroCollapsed.has(g.name) && g.items.map(([name]) => (
                     <div key={name} className="macro-row">
-                      <button className="macro-run" onClick={() => runMacro(name)} disabled={!activePort}>
+                      <button
+                        className="macro-run"
+                        onClick={() => {
+                          runMacro(name);
+                          // 运行后焦点交还终端:否则焦点留在按钮上,回车会再次触发本按钮(重复运行宏)
+                          activeTerm?.term.focus();
+                        }}
+                        disabled={!activePort}
+                      >
                         <IconPlay />
                         <span className="macro-run__label">{name}</span>
                       </button>
@@ -1617,7 +1625,15 @@ export default function App() {
                   </button>
                   {!scriptCollapsed.has(g.name) && g.items.map(([name]) => (
                     <div key={name} className="macro-row">
-                      <button className="macro-run" onClick={() => runScript(name)} disabled={!activePort}>
+                      <button
+                        className="macro-run"
+                        onClick={() => {
+                          runScript(name);
+                          // 仅在不弹参数框时回焦终端;弹框场景焦点应进对话框(由 modalOpen effect 接管)
+                          if (!scripts[name]?.params?.length) activeTerm?.term.focus();
+                        }}
+                        disabled={!activePort}
+                      >
                         <IconPlay />
                         <span className="macro-run__label">{name}</span>
                       </button>
