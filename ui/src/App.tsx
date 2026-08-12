@@ -1587,7 +1587,7 @@ export default function App() {
                 </div>
               ))}
               {[...macroRuns.entries()].map(([runId, card]) => (
-                <div key={runId} className={card.status === "running" ? "script-task" : undefined}>
+                <div key={runId} className={card.status === "running" ? "script-task" : `script-task script-task--${card.success ? "ok" : "err"}`}>
                   {card.status === "running" ? (
                     <div className="script-task__head" title={`${card.name} 运行中`}>
                       <span className="script-task__name">⟳ {card.name}</span>
@@ -1599,8 +1599,8 @@ export default function App() {
                       >停止</button>
                     </div>
                   ) : (
-                    <div className={`macro-result ${card.success ? "ok" : "err"}`}>
-                      <span className="macro-result__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
+                    <div className="script-task__head">
+                      <span className="script-task__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
                       <button
                         className="macro-result__close"
                         title="关闭"
@@ -1689,7 +1689,7 @@ export default function App() {
               {[...scriptRuns.entries()].map(([runId, card]) => (
                 <div
                   key={runId}
-                  className={card.status === "running" ? `script-task${expandedLog === runId ? " script-task--open" : ""}` : undefined}
+                  className={card.status === "running" ? `script-task${expandedLog === runId ? " script-task--open" : ""}` : `script-task script-task--${card.success ? "ok" : "err"}`}
                 >
                   {card.status === "running" ? (
                     <>
@@ -1720,14 +1720,11 @@ export default function App() {
                   ) : (
                     <>
                       <div
-                        className={`macro-result ${card.success ? "ok" : "err"}${card.logs.length > 0 ? " macro-result--expandable" : ""}`}
+                        className="script-task__head"
                         onClick={card.logs.length > 0 ? () => setExpandedLog((v) => (v === runId ? null : runId)) : undefined}
                         role={card.logs.length > 0 ? "button" : undefined}
                       >
-                        <span className="macro-result__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
-                        {card.logs.length > 0 && (
-                          <span className="macro-result__caret">{expandedLog === runId ? "▴" : "▾"}</span>
-                        )}
+                        <span className="script-task__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
                         <button
                           className="macro-result__close"
                           title="关闭"

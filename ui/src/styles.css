@@ -727,11 +727,12 @@ button {
   border: none;
   background: transparent;
   color: inherit;
-  opacity: 0.45;
-  font-size: var(--fs-sm);
+  opacity: 0.55;
+  font-size: var(--fs-md);
   line-height: 1;
-  padding: 0 2px;
+  padding: 2px 8px;
   cursor: pointer;
+  border-radius: var(--r-sm);
 }
 .macro-result__close:hover {
   opacity: 1;
@@ -772,12 +773,28 @@ button {
 .script-task--open {
   border-color: rgba(126, 231, 135, 0.45);
 }
+/* 结束态:成功绿 / 失败红(边框+字色),迁自原 macro-result ok/err。 */
+.script-task--ok {
+  border-color: rgba(126, 231, 135, 0.45);
+  color: var(--link);
+}
+.script-task--err {
+  border-color: rgba(229, 83, 75, 0.45);
+  color: var(--danger);
+}
 .script-task__name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 结束态结果消息(✓/✗ name: 原因),flex:1 可折行。 */
+.script-task__msg {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  line-height: 1.5;
 }
 .script-task__status {
   flex: none;
