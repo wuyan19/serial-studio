@@ -72,6 +72,25 @@ export interface ScriptResult {
   message: string;
 }
 
+/** 脚本运行卡片:贯穿 running→done(单卡片,并发各自,就地切换)。logs 为 log() 实时累积。 */
+export interface ScriptRunCard {
+  name: string;
+  devId: string;
+  status: "running" | "done";
+  success?: boolean;
+  message?: string;
+  logs: string[];
+}
+
+/** 宏运行卡片:贯穿 running→done(宏无 log,无 logs)。 */
+export interface MacroRunCard {
+  name: string;
+  devId: string;
+  status: "running" | "done";
+  success?: boolean;
+  message?: string;
+}
+
 export interface TermInstance {
   term: Terminal;
   fit: FitAddon;

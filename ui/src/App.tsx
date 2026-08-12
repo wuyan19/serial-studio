@@ -12,6 +12,8 @@ import type {
   RemoteDevice,
   Script,
   ScriptResult,
+  ScriptRunCard,
+  MacroRunCard,
   SerialConfig,
   SrvSettings,
   TermInstance,
@@ -198,9 +200,8 @@ export default function App() {
   // devId 由桶 key 隐含（不进 PortInfo），保后端契约零侵入。多 Transport 共存的核心数据结构。
   const [portsByDev, setPortsByDev] = useState<Record<string, PortInfo[]>>({});
   const [macros, setMacros] = useState<Record<string, Macro>>({});
-  const [macroResult, setMacroResult] = useState<MacroResult | null>(null);
-  /** 运行中的宏:runId → {name, devId}。驱动「运行中」任务行 + 停止按钮(对齐 runningScripts)。 */
-  const [runningMacros, setRunningMacros] = useState<Map<string, { name: string; devId: string }>>(new Map());
+  /** 宏运行卡片:runId → MacroRunCard(贯穿 running→done,并发各自,就地切换)。 */
+  const [macroRuns, setMacroRuns] = useState<Map<string, MacroRunCard>>(new Map());
   // devOnline[devId]：该设备 WS/IPC 是否就绪，驱动折叠卡状态点。
   const [devOnline, setDevOnline] = useState<Record<string, boolean>>({});
   /** 全局连接标志（兼容旧消费方：通道条/Web 远程提示）。本地看 devOnline["local"]，远程看任一就绪。 */
@@ -251,13 +252,10 @@ export default function App() {
   const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
   const [editorError, setEditorError] = useState("");
   const [scripts, setScripts] = useState<Record<string, Script>>({});
-  const [scriptResult, setScriptResult] = useState<ScriptResult | null>(null);
-  /** 脚本 log() 输出:runId → 日志行(实时累积)。结果横幅点击展开回看本次运行的日志历史。 */
-  const [scriptLogs, setScriptLogs] = useState<Map<string, string[]>>(new Map());
-  /** 结果横幅展开的 runId(null = 收起);点击横幅切换。 */
+  /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
+  const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
+  /** 当前展开日志的卡片 runId(null = 收起);一次展开一个卡片。 */
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
-  /** 运行中的脚本:runId → {name, devId}。驱动「运行中」行 + 停止按钮(替掉"运行中..."字符串标记,顺带解并发错配)。 */
-  const [runningScripts, setRunningScripts] = useState<Map<string, { name: string; devId: string }>>(new Map());
   const [editingScript, setEditingScript] = useState<{ name: string; isNew: boolean } | null>(null);
   const [editorScriptName, setEditorScriptName] = useState("");
   const [editorScript, setEditorScript] = useState<Script>({ code: "" });
@@ -412,12 +410,19 @@ export default function App() {
       t.onConnectedChange((conn) => {
         setDevOnline((prev) => ({ ...prev, [devId]: conn }));
         if (conn) t.list();
-        // 断连:清本设备 runningScripts 幽灵(脚本经 owner 清理 abort,但 result 发不回前端)
-        else setRunningScripts((prev) => {
-          const n = new Map(prev);
-          for (const [rid, info] of n) if (info.devId === devId) n.delete(rid);
-          return n;
-        });
+        // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)
+        else {
+          setScriptRuns((prev) => {
+            const n = new Map(prev);
+            for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
+            return n;
+          });
+          setMacroRuns((prev) => {
+            const n = new Map(prev);
+            for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
+            return n;
+          });
+        }
       }),
       t.onData((port, data) => {
         const pid = portIdOf(devId, port);
@@ -458,26 +463,30 @@ export default function App() {
         setTimeout(() => setErrorMsg(""), 5000);
       }),
       t.onMacroResult((runId, name, success, message) => {
-        if (runId) setRunningMacros((prev) => { const n = new Map(prev); n.delete(runId); return n; });
-        setMacroResult({ runId, name, success, message });
+        // 更新对应卡片 running→done(card 不在则忽略,理论上 runMacro 已 set)。
+        if (!runId) return;
+        setMacroRuns((prev) => {
+          const card = prev.get(runId);
+          if (!card) return prev;
+          return new Map(prev).set(runId, { ...card, status: "done", success, message });
+        });
       }),
       t.onScriptResult((runId, name, success, message) => {
-        if (runId) setRunningScripts((prev) => { const n = new Map(prev); n.delete(runId); return n; });
-        setScriptResult({ runId, name, success, message });
+        if (!runId) return;
+        setScriptRuns((prev) => {
+          const card = prev.get(runId);
+          if (!card) return prev;
+          return new Map(prev).set(runId, { ...card, status: "done", success, message });
+        });
       }),
       t.onScriptLog((runId, message) => {
-        // 过滤空 runId(MCP 入口 run_id="",防本地内嵌 MCP 污染桌面 UI)。cap:每运行 1000 行 / Map 最近 8 runId。
+        // 未知 runId 忽略(防 MCP run_id="" 污染);每卡片 logs cap 1000(滚动)。
         if (!runId) return;
-        setScriptLogs((prev) => {
-          const next = new Map(prev);
-          const arr = (next.get(runId) ?? []).concat(message);
-          next.set(runId, arr.length > 1000 ? arr.slice(arr.length - 1000) : arr);
-          while (next.size > 8) {
-            const oldest = next.keys().next().value;
-            if (oldest === undefined) break;
-            next.delete(oldest);
-          }
-          return next;
+        setScriptRuns((prev) => {
+          const card = prev.get(runId);
+          if (!card) return prev;
+          const logs = card.logs.length >= 1000 ? [...card.logs.slice(1), message] : [...card.logs, message];
+          return new Map(prev).set(runId, { ...card, logs });
         });
       }),
     ];
@@ -997,13 +1006,12 @@ export default function App() {
 
   const runMacro = (name: string) => {
     if (!activePort) {
-      setMacroResult({ name, success: false, message: "请先选择并打开一个串口" });
+      setErrorMsg("请先选择并打开一个串口");
       return;
     }
-    setMacroResult(null); // 清旧结果横幅(运行态由 task 行表达,避免旧横幅与新运行并存)
     const runId = crypto.randomUUID();
     const { devId, name: portName } = parsePortId(activePort);
-    setRunningMacros((prev) => new Map(prev).set(runId, { name, devId }));
+    setMacroRuns((prev) => new Map(prev).set(runId, { name, devId, status: "running" }));
     transportsRef.current.get(devId)?.runMacro(name, portName, macros[name], runId);
   };
 
@@ -1057,13 +1065,13 @@ export default function App() {
 
   const doRun = (name: string, args: Record<string, string>) => {
     if (!activePort) {
-      setScriptResult({ name, success: false, message: "请先选择并打开一个串口" });
+      setErrorMsg("请先选择并打开一个串口");
       return;
     }
     const runId = crypto.randomUUID();
     const { devId, name: portName } = parsePortId(activePort);
-    setRunningScripts((prev) => new Map(prev).set(runId, { name, devId }));
-    setExpandedLog(runId); // 运行中默认展开:实时看进度(数据边到边显示);结束自动接管到结果横幅看完整历史
+    setScriptRuns((prev) => new Map(prev).set(runId, { name, devId, status: "running", logs: [] }));
+    setExpandedLog(runId); // 新运行自动展开:实时看进度;结束后同卡片继续展开看完整历史
     transportsRef.current.get(devId)?.runScript(name, portName, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
@@ -1572,29 +1580,30 @@ export default function App() {
                   ))}
                 </div>
               ))}
-              {[...runningMacros.entries()].map(([runId, { name, devId }]) => (
-                <div key={runId} className="script-task">
-                  <div className="script-task__head" title={`${name} 运行中`}>
-                    <span className="script-task__name">⟳ {name}</span>
-                    <span className="script-task__status">运行中…</span>
-                    <button
-                      className="script-task__stop"
-                      title="停止宏"
-                      onClick={() => transportsRef.current.get(devId)?.stopMacro(runId)}
-                    >停止</button>
-                  </div>
+              {[...macroRuns.entries()].map(([runId, card]) => (
+                <div key={runId} className={card.status === "running" ? "script-task" : undefined}>
+                  {card.status === "running" ? (
+                    <div className="script-task__head" title={`${card.name} 运行中`}>
+                      <span className="script-task__name">⟳ {card.name}</span>
+                      <span className="script-task__status">运行中…</span>
+                      <button
+                        className="script-task__stop"
+                        title="停止宏"
+                        onClick={() => transportsRef.current.get(card.devId)?.stopMacro(runId)}
+                      >停止</button>
+                    </div>
+                  ) : (
+                    <div className={`macro-result ${card.success ? "ok" : "err"}`}>
+                      <span className="macro-result__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
+                      <button
+                        className="macro-result__close"
+                        title="关闭"
+                        onClick={() => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; })}
+                      >×</button>
+                    </div>
+                  )}
                 </div>
               ))}
-              {macroResult && (
-                <div className={`macro-result ${macroResult.success ? "ok" : "err"}`}>
-                  <span className="macro-result__msg">{macroResult.success ? "✓" : "✗"} {macroResult.name}: {macroResult.message}</span>
-                  <button
-                    className="macro-result__close"
-                    title="关闭"
-                    onClick={() => setMacroResult(null)}
-                  >×</button>
-                </div>
-              )}
             </>
           )}
 
@@ -1672,66 +1681,69 @@ export default function App() {
                   ))}
                 </div>
               ))}
-              {[...runningScripts.entries()].map(([runId, { name, devId }]) => {
-                const lines = scriptLogs.get(runId) ?? [];
-                return (
-                  <div key={runId} className={`script-task${expandedLog === runId ? " script-task--open" : ""}`}>
-                    <div
-                      className="script-task__head"
-                      onClick={() => setExpandedLog((v) => (v === runId ? null : runId))}
-                      role="button"
-                    >
-                      <span className="script-task__name" title={name}>⟳ {name}</span>
-                      <span className="script-task__status">运行中…</span>
-                      <button
-                        className="script-task__stop"
-                        title="停止脚本"
-                        onClick={(e) => { e.stopPropagation(); transportsRef.current.get(devId)?.stopScript(runId); }}
-                      >停止</button>
-                    </div>
-                    {expandedLog === runId && (
-                      <div className="script-log-list script-log-list--live">
-                        {lines.length === 0 && (
-                          <div className="script-log-list__line script-log-list__line--muted">（等待 log 输出…）</div>
-                        )}
-                        {lines.map((line, i) => (
-                          <div key={i} className="script-log-list__line">{line}</div>
-                        ))}
+              {[...scriptRuns.entries()].map(([runId, card]) => (
+                <div
+                  key={runId}
+                  className={card.status === "running" ? `script-task${expandedLog === runId ? " script-task--open" : ""}` : undefined}
+                >
+                  {card.status === "running" ? (
+                    <>
+                      <div
+                        className="script-task__head"
+                        onClick={() => setExpandedLog((v) => (v === runId ? null : runId))}
+                        role="button"
+                      >
+                        <span className="script-task__name" title={card.name}>⟳ {card.name}</span>
+                        <span className="script-task__status">运行中…</span>
+                        <button
+                          className="script-task__stop"
+                          title="停止脚本"
+                          onClick={(e) => { e.stopPropagation(); transportsRef.current.get(card.devId)?.stopScript(runId); }}
+                        >停止</button>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-              {scriptResult && (
-                <>
-                  <div
-                    className={`macro-result ${scriptResult.success ? "ok" : "err"}${scriptResult.runId && scriptLogs.has(scriptResult.runId) ? " macro-result--expandable" : ""}`}
-                    onClick={
-                      scriptResult.runId && scriptLogs.has(scriptResult.runId)
-                        ? () => setExpandedLog((v) => (v === scriptResult.runId ? null : scriptResult.runId!))
-                        : undefined
-                    }
-                    role={scriptResult.runId && scriptLogs.has(scriptResult.runId) ? "button" : undefined}
-                  >
-                    <span className="macro-result__msg">{scriptResult.success ? "✓" : "✗"} {scriptResult.name}: {scriptResult.message}</span>
-                    {scriptResult.runId && scriptLogs.has(scriptResult.runId) && (
-                      <span className="macro-result__caret">{expandedLog === scriptResult.runId ? "▴" : "▾"}</span>
-                    )}
-                    <button
-                      className="macro-result__close"
-                      title="关闭"
-                      onClick={(e) => { e.stopPropagation(); setScriptResult(null); setExpandedLog(null); }}
-                    >×</button>
-                  </div>
-                  {scriptResult.runId && expandedLog === scriptResult.runId && (
-                    <div className="script-log-list">
-                      {(scriptLogs.get(scriptResult.runId) ?? []).map((line, i) => (
-                        <div key={i} className="script-log-list__line">{line}</div>
-                      ))}
-                    </div>
+                      {expandedLog === runId && (
+                        <div className="script-log-list script-log-list--live">
+                          {card.logs.length === 0 && (
+                            <div className="script-log-list__line script-log-list__line--muted">（等待 log 输出…）</div>
+                          )}
+                          {card.logs.map((line, i) => (
+                            <div key={i} className="script-log-list__line">{line}</div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div
+                        className={`macro-result ${card.success ? "ok" : "err"}${card.logs.length > 0 ? " macro-result--expandable" : ""}`}
+                        onClick={card.logs.length > 0 ? () => setExpandedLog((v) => (v === runId ? null : runId)) : undefined}
+                        role={card.logs.length > 0 ? "button" : undefined}
+                      >
+                        <span className="macro-result__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
+                        {card.logs.length > 0 && (
+                          <span className="macro-result__caret">{expandedLog === runId ? "▴" : "▾"}</span>
+                        )}
+                        <button
+                          className="macro-result__close"
+                          title="关闭"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setScriptRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; });
+                            if (expandedLog === runId) setExpandedLog(null);
+                          }}
+                        >×</button>
+                      </div>
+                      {expandedLog === runId && card.logs.length > 0 && (
+                        <div className="script-log-list">
+                          {card.logs.map((line, i) => (
+                            <div key={i} className="script-log-list__line">{line}</div>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
-                </>
-              )}
+                </div>
+              ))}
             </>
           )}
         </aside>
