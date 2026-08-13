@@ -21,3 +21,9 @@
 # signing keys (never commit)
 /~/
 *.key
+
+/build-signed.ps1
+
+# project-local signing keys copy
+/.tauri/
+*.key.pub
