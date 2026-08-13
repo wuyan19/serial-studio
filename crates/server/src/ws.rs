@@ -10,6 +10,7 @@
 //!     {"action":"run_script","name":"...","port":"COM3","script":{"code":"..."},"run_id":"<uuid>","args":{...}}  # 运行 JS 脚本（受 enable_scripting 限制）
 //!     {"action":"stop_script","run_id":"<uuid>"}                              # 停止运行中的脚本
 //!     {"action":"version"}                                # 查询服务版本（远程/Web 关于页用）
+//!     {"action":"ping"}                                   # 应用层心跳（前端探活，应对服务端强杀不发 Close）
 //!   server → client:
 //!     {"type":"ports","ports":[...]}
 //!     {"type":"data","port":"COM3","data":"...","encoding":"hex"}
@@ -19,6 +20,7 @@
 //!     {"type":"holders","port":"COM3","holders":n}                                 # 持有者数量变化
 //!     {"type":"script_result","run_id":"...","name":"...","success":bool,"message":"..."}  # run_script 的结果（含停止 Aborted）
 //!     {"type":"version","version":"0.1.0","enable_scripting":false}                # version 的直接回复
+//!     {"type":"pong"}                                                                # ping 的应答
 //!     {"type":"ok","message":"..."}
 //!     {"type":"error","message":"..."}
 //!
@@ -69,6 +71,8 @@ enum ServerMsg {
     Version { version: String, enable_scripting: bool },
     /// get_script_skill 的直接回复：脚本编写 SKILL 全文(前端展示 / 复制给外部 Agent)。
     ScriptSkill { text: String },
+    /// 心跳回复：客户端应用层 ping 的应答（浏览器 WS 不能发协议层 ping，由前端自备探活）。
+    Pong,
 }
 
 /// 客户端 → 服务器 消息。
@@ -119,6 +123,8 @@ enum ClientMsg {
     Version,
     /// 拉取脚本编写 SKILL 全文(展示 / 复制给外部 Agent)。
     GetScriptSkill,
+    /// 应用层心跳（浏览器 WS 不暴露协议层 ping，由前端定时发，服务端即时回 Pong）。
+    Ping,
 }
 
 fn default_encoding() -> String {
@@ -130,6 +136,9 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
+    // TODO(心跳对称): 客户端→服务端方向已由前端应用层 ping/pong 探活；反向（服务端探客户端死活）
+    // 当前只靠 ws_rx.next() 返回 None/Err，TCP half-open 下可能数分钟才感知。如需更快回收 session，
+    // 可在此起定时器，空闲超时则主动关闭连接。
     // 每条连接一个会话：用于串口占有份额的归属追踪与断连清理
     let session = SessionId::next();
     tracing::info!("WS 客户端已连接 (session={:?})", session);
@@ -553,6 +562,10 @@ async fn handle_client_msg(text: &str, state: &AppState, out_tx: &mpsc::Sender<O
                     text: crate::SCRIPT_SKILL.into(),
                 }))
                 .await;
+        }
+        ClientMsg::Ping => {
+            // 应用层心跳应答：客户端用 ping/pong 探活（应对服务端强杀不发 Close frame）
+            let _ = out_tx.send(to_json(ServerMsg::Pong)).await;
         }
     }
 }

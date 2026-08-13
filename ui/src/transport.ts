@@ -66,14 +66,37 @@ function decodeDataFrame(buf: ArrayBuffer): { port: string; data: Uint8Array } {
   return { port, data };
 }
 
-/** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）。 */
+/** 心跳 / 重连参数。 */
+const PING_INTERVAL = 10_000;  // 应用层 ping 周期（浏览器 WS API 不暴露协议层 ping，只能自备）
+const PONG_TIMEOUT = 20_000;   // 无任何入站帧超过此时长 → 认为连接已死，主动 close 触发重连
+const RECONNECT_BASE = 1_000;  // 退避基数 1s（服务端秒级重启时第一次重试就赶上）
+const RECONNECT_CAP = 30_000;  // 退避上限
+const STABLE_RESET = 10_000;   // open 后稳定此时长 → 退避归零（防服务端抖动引发快速重连风暴）
+
+/** 在途请求的 resolve/reject 对：断连 / dispose 时统一 reject，防 Promise 永悬。 */
+interface Controller<T> { resolve: (v: T) => void; reject: (e: Error) => void }
+
+/** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）+ 自愈重连 + 心跳。
+ *  服务端重启 / 强杀 / 断电后：指数退避自动重连 → 重连成功重新 list + (由 App 层) 重放开过的端口。 */
 export class RemoteTransport implements Transport {
-  private ws: WebSocket;
-  private openResolver: ((r: AcquiredResult) => void) | null = null;
-  private versionResolver: ((v: { version: string; enableScripting: boolean }) => void) | null = null;
-  private scriptSkillResolver: ((text: string) => void) | null = null;
-  /** WS 连接就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。 */
-  private openPromise: Promise<void>;
+  private host: string;
+  private portNum: number;
+  private ws!: WebSocket;
+  /** open 回复按 port 路由：并发 open（重连后重放多端口）各取各的回复，不串台。
+   *  旧实现是单槽，并发 open 时后写覆盖前写 → 只末个 caller 拿到结果、其余 Promise 永悬。 */
+  private openResolvers = new Map<string, Controller<AcquiredResult>>();
+  private versionController: Controller<{ version: string; enableScripting: boolean }> | null = null;
+  private scriptSkillController: Controller<string> | null = null;
+  /** WS 就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。每次重连重建。 */
+  private openPromise!: Promise<void>;
+  private openResolve: () => void = () => {};
+  /** 主动 dispose 置 true → onclose 不再触发重连。 */
+  private closed = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private handlers = {
     data: new Set<(port: string, data: Uint8Array) => void>(),
     ports: new Set<(p: PortInfo[]) => void>(),
@@ -91,16 +114,49 @@ export class RemoteTransport implements Transport {
   };
 
   constructor(host: string, port: number) {
-    this.ws = new WebSocket(`ws://${host}:${port}/ws`);
-    this.ws.binaryType = "arraybuffer"; // 数据帧 Binary，控制帧 Text
-    // openPromise 在 onopen 触发时 resolve；send() 统一 await 它，把"连上再发"做成不变量，
-    // 调用方无需各自判断连接时机（getVersion 等程序性早调也不会再踩 CONNECTING 抛异常）。
-    this.openPromise = new Promise<void>((resolve) => {
-      this.ws.addEventListener("open", () => resolve(), { once: true });
-    });
-    this.ws.onopen = () => this.handlers.connected.forEach((cb) => cb(true));
-    this.ws.onclose = () => this.handlers.connected.forEach((cb) => cb(false));
-    this.ws.onmessage = (e) => {
+    this.host = host;
+    this.portNum = port;
+    this.connect();
+  }
+
+  /** 建立 WS + 绑事件。构造与每次重连都走这里；openPromise 在此重建供 send() 等待新一轮 open。 */
+  private connect() {
+    if (this.closed) return; // dispose 后漏过 clearTimers 的退避回调不再新建连接
+    const ws = new WebSocket(`ws://${this.host}:${this.portNum}/ws`);
+    ws.binaryType = "arraybuffer"; // 数据帧 Binary，控制帧 Text
+    this.ws = ws;
+    this.openPromise = new Promise<void>((resolve) => { this.openResolve = resolve; });
+    this.wire(ws);
+  }
+
+  /** 绑事件。每个 handler 用捕获的 socket 做 stale 守卫——旧 WS 关闭时不应触发新连接的重连/状态。 */
+  private wire(ws: WebSocket) {
+    ws.onopen = () => {
+      if (this.ws !== ws) return; // stale：这是已废弃的旧连接
+      this.openResolve(); // send() 解除等待
+      this.reconnectAttempts = 0;
+      this.handlers.connected.forEach((cb) => cb(true));
+      this.startHeartbeat(ws);
+      // 稳定连接后归零退避：服务端抖动（连上即断）不会被无限快速重连
+      if (this.stableTimer) clearTimeout(this.stableTimer);
+      this.stableTimer = setTimeout(() => {
+        if (this.ws === ws) this.reconnectAttempts = 0;
+      }, STABLE_RESET);
+    };
+    ws.onclose = () => {
+      if (this.ws !== ws) return; // stale
+      this.rejectPending(new Error("连接已断开"));
+      this.clearTimers();
+      this.handlers.connected.forEach((cb) => cb(false));
+      if (!this.closed) this.scheduleReconnect();
+    };
+    ws.onerror = () => {
+      // 只日志：onclose 必在 onerror 之后触发且只一次，这里再调度重连会双触发
+    };
+    ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
+      // 任意入站帧 = TCP 双向通，等价收到 pong → 清 pong 超时（空闲时才靠显式 ping 探活）
+      this.clearPongTimer();
       // 数据帧 Binary（[port_len][port][data]），控制帧 Text(JSON)
       if (typeof e.data !== "string") {
         const { port, data } = decodeDataFrame(e.data);
@@ -122,17 +178,15 @@ export class RemoteTransport implements Transport {
         case "disconnected":
           this.handlers.disconnected.forEach((cb) => cb(msg.port));
           break;
-        case "acquired":
-          if (this.openResolver) {
-            this.openResolver({
-              port: msg.port,
-              opened: msg.opened,
-              config: msg.config,
-              holders: msg.holders,
-            });
-            this.openResolver = null;
+        case "acquired": {
+          // 按 port 路由：并发 open（重连后重放）各取各的回复，不再串台
+          const c = this.openResolvers.get(msg.port);
+          if (c) {
+            c.resolve({ port: msg.port, opened: msg.opened, config: msg.config, holders: msg.holders });
+            this.openResolvers.delete(msg.port);
           }
           break;
+        }
         case "holders":
           this.handlers.holders.forEach((cb) => cb(msg.port, msg.holders));
           break;
@@ -151,15 +205,15 @@ export class RemoteTransport implements Transport {
           );
           break;
         case "version":
-          if (this.versionResolver) {
-            this.versionResolver({ version: msg.version, enableScripting: !!msg.enable_scripting });
-            this.versionResolver = null;
+          if (this.versionController) {
+            this.versionController.resolve({ version: msg.version, enableScripting: !!msg.enable_scripting });
+            this.versionController = null;
           }
           break;
         case "script_skill":
-          if (this.scriptSkillResolver) {
-            this.scriptSkillResolver(msg.text as string);
-            this.scriptSkillResolver = null;
+          if (this.scriptSkillController) {
+            this.scriptSkillController.resolve(msg.text as string);
+            this.scriptSkillController = null;
           }
           break;
         case "script_result":
@@ -168,12 +222,66 @@ export class RemoteTransport implements Transport {
         case "script_log":
           this.handlers.scriptLog.forEach((cb) => cb(msg.run_id, msg.message));
           break;
+        case "pong":
+          break; // 已由"任意入站帧重置 pong 超时"兜底，显式分支仅作协议标记
       }
     };
   }
 
-  /** 统一发送出口：等 WS open 后再 send，消除裸 ws.send 在 CONNECTING 态抛异常的隐患。 */
+  /** 退避重连：2^n × ±20% jitter，cap 30s，无限重试。终止方式：删设备 / 折叠设备卡 → effect teardown → dispose。 */
+  private scheduleReconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const base = Math.min(RECONNECT_BASE * 2 ** this.reconnectAttempts, RECONNECT_CAP);
+    const jitter = base * (0.8 + Math.random() * 0.4); // ±20% 防多设备同步重连雷暴
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectAttempts++;
+      this.connect();
+    }, jitter);
+  }
+
+  /** 应用层心跳：浏览器 WS 不能发协议层 ping，只能自备 ping/pong 探活（应对服务端强杀/断电不发 Close frame）。 */
+  private startHeartbeat(ws: WebSocket) {
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.pingInterval = setInterval(() => {
+      // 非 OPEN 跳过本轮：重连窗口里 send() 会 await openPromise 挂住，等发出去时 pong 早超时了
+      if (this.ws !== ws || this.ws.readyState !== WebSocket.OPEN) return;
+      // 排一个 pong 超时：下一轮 ping 前若无任何入站帧（pong 或数据）→ 认为连接已死
+      this.clearPongTimer();
+      this.pongTimer = setTimeout(() => {
+        if (this.ws === ws) {
+          try { this.ws.close(); } catch { /* 已关闭 */ }
+          // close() → onclose → scheduleReconnect；此处不再直接调度，否则双触发
+        }
+      }, PONG_TIMEOUT);
+      this.send(JSON.stringify({ action: "ping" }));
+    }, PING_INTERVAL);
+  }
+
+  private clearPongTimer() {
+    if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
+  }
+
+  /** 清所有定时器（心跳 / 退避 / 稳定检测）。onclose 与 dispose 共用。 */
+  private clearTimers() {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.pingInterval) { clearInterval(this.pingInterval); this.pingInterval = null; }
+    this.clearPongTimer();
+    if (this.stableTimer) { clearTimeout(this.stableTimer); this.stableTimer = null; }
+  }
+
+  /** reject 所有在途请求（断连 / dispose），防 getVersion/getScriptSkill/open 的 Promise 永悬。 */
+  private rejectPending(err: Error) {
+    this.openResolvers.forEach((c) => c.reject(err));
+    this.openResolvers.clear();
+    this.versionController?.reject(err);
+    this.versionController = null;
+    this.scriptSkillController?.reject(err);
+    this.scriptSkillController = null;
+  }
+
+  /** 统一发送出口：等 WS open 后再 send，消除裸 ws.send 在 CONNECTING 态抛异常的隐患。重连期间自然等待。 */
   private async send(payload: string) {
+    if (this.closed) throw new Error("transport disposed");
     await this.openPromise;
     this.ws.send(payload);
   }
@@ -186,9 +294,9 @@ export class RemoteTransport implements Transport {
     return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
-    // 先挂 resolver 再发：确保 "acquired" 回复到达时 resolver 已就位（不靠微任务时序）。
-    const result = new Promise<AcquiredResult>((resolve) => {
-      this.openResolver = resolve;
+    // 先挂 controller 再发：确保 "acquired" 回复到达时 controller 已就位（不靠微任务时序）。
+    const result = new Promise<AcquiredResult>((resolve, reject) => {
+      this.openResolvers.set(port, { resolve, reject });
     });
     await this.send(JSON.stringify({ action: "open", port, config }));
     return result;
@@ -219,15 +327,15 @@ export class RemoteTransport implements Transport {
     await this.send(JSON.stringify({ action: "stop_macro", run_id: runId }));
   }
   async getVersion() {
-    const result = new Promise<{ version: string; enableScripting: boolean }>((resolve) => {
-      this.versionResolver = resolve;
+    const result = new Promise<{ version: string; enableScripting: boolean }>((resolve, reject) => {
+      this.versionController = { resolve, reject };
     });
     await this.send(JSON.stringify({ action: "version" }));
     return result;
   }
   async getScriptSkill() {
-    const result = new Promise<string>((resolve) => {
-      this.scriptSkillResolver = resolve;
+    const result = new Promise<string>((resolve, reject) => {
+      this.scriptSkillController = { resolve, reject };
     });
     await this.send(JSON.stringify({ action: "get_script_skill" }));
     return result;
@@ -284,7 +392,12 @@ export class RemoteTransport implements Transport {
   }
 
   dispose() {
-    this.ws.close();
+    // closed 守卫阻止随后 onclose 触发的重连；清所有定时器防旧 transport 在被 effect 丢弃后仍后台重连
+    // （否则内存泄漏 + 旧 session 占着端口不释放，服务端 release_all 只在 WS 真断时触发）。
+    this.closed = true;
+    this.clearTimers();
+    this.rejectPending(new Error("transport disposed"));
+    try { this.ws.close(); } catch { /* 已关闭 */ }
   }
 }
 

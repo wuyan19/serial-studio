@@ -352,6 +352,14 @@ export default function App() {
   const activePort = groups[focusedGroupId]?.activePort ?? "";
   const activeRef = useRef("");
   activeRef.current = activePort;
+  // 镜像 openPorts / disconnectedPorts 到 ref：bindTransport 是空依赖 useCallback（只绑一次），
+  // 其 onConnectedChange 闭包读的是挂载时快照 → 走 ref.current 拿最新值（断开标记 / 重放都依赖）。
+  const openPortsRef = useRef(openPorts);
+  openPortsRef.current = openPorts;
+  const disconnectedPortsRef = useRef(disconnectedPorts);
+  disconnectedPortsRef.current = disconnectedPorts;
+  // reconnectPort 在下方定义，这里先建 ref 占位，定义后同步 current，供 bindTransport 重连后重放调用。
+  const reconnectPortRef = useRef<(pid: PortId) => Promise<void>>(async () => {});
 
   // 焦点 group 被删（坍缩）→ 自愈回退到首个 leaf，保 channel-strip/macro 上下文不指向死 group
   useEffect(() => {
@@ -409,9 +417,16 @@ export default function App() {
       t.onPorts((list) => setPortsByDev((prev) => ({ ...prev, [devId]: list }))),
       t.onConnectedChange((conn) => {
         setDevOnline((prev) => ({ ...prev, [devId]: conn }));
-        if (conn) t.list();
-        // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)
-        else {
+        if (conn) {
+          t.list();
+          // 重连成功：重放本设备开着的端口（首次连上时 disconnectedPorts 为空 → 空操作，天然区分首次/重连）。
+          // 复用 reconnectPort——用原配置 openPort + 成功才清断开标记；失败则 tab 保持断开态待手动重试。
+          const mine = [...disconnectedPortsRef.current].filter(
+            (pid) => parsePortId(pid).devId === devId
+          );
+          for (const pid of mine) reconnectPortRef.current?.(pid);
+        } else {
+          // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)
           setScriptRuns((prev) => {
             const n = new Map(prev);
             for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
@@ -422,6 +437,20 @@ export default function App() {
             for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
             return n;
           });
+          // 标本设备开着的端口为"断开待重连"（重连成功后由上面分支重放）。
+          setDisconnectedPorts((prev) => {
+            const n = new Set(prev);
+            for (const pid of openPortsRef.current)
+              if (parsePortId(pid).devId === devId) n.add(pid);
+            return n;
+          });
+          // 整设备端口 opened 置 false，灭掉端口行假绿灯：WS 断后 portsByDev 不再刷新，会冻在断开前
+          // 的旧状态（p.opened 仍 true → 小灯假绿）。端口行直接读 p.opened，无需改渲染。重连后 t.list() 覆盖。
+          setPortsByDev((prev) =>
+            prev[devId]
+              ? { ...prev, [devId]: prev[devId].map((p) => ({ ...p, opened: false })) }
+              : prev
+          );
         }
       }),
       t.onData((port, data) => {
@@ -991,6 +1020,7 @@ export default function App() {
     const res = await openPort(pid, portConfigs[pid] ?? serialConfig);
     if (res) setDisconnectedPorts((prev) => { const n = new Set(prev); n.delete(pid); return n; });
   };
+  reconnectPortRef.current = reconnectPort;
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
