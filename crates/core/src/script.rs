@@ -56,8 +56,10 @@ impl ScriptError {
     }
 }
 
-/// 默认执行超时。
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// MCP 路径(`serial_run_script`)的执行超时兜底。WS/UI 路径传 None(无限制),不走这里。
+/// MCP 脚本当前无手动停止手段(无 stop 工具 + abort 不外露),此超时是其唯一退出兜底,
+/// 故不可去掉——否则死循环脚本永久占用并发槽。后续加 serial_stop_script 后可重评。
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// 外层 oneshot 兜底超时相对内层的额外宽限(内层 timeout 先生效;此处仅兜底脚本线程卡死)。
 const OUTER_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 /// None 超时路径(WS/Tauri,长跑)的极大兜底:防 rquickjs C-level hang 时调用方永挂、注册表/permit

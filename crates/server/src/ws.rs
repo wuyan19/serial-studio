@@ -201,7 +201,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // 脚本库变更 → 通知客户端重新拉取脚本列表(MCP/Tauri 写入后前端即时刷新)。
     let mut script_rx = state.script_bus.subscribe();
     let out_tx_script = out_tx.clone();
-    let _script_task = tokio::spawn(async move {
+    let script_task = tokio::spawn(async move {
         loop {
             match script_rx.recv().await {
                 Ok(()) => {
@@ -262,6 +262,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // 先停本连接的事件转发，再释放占有份额；末位口才拆毁，事件广播给其它仍在的客户端
     event_task.abort();
     meta_task.abort();
+    script_task.abort();
     state.closers.lock().unwrap().remove(&session);
     // 本 session 启动的脚本跟着停(防 orphan:客户端断连后脚本继续占并发槽,无超时后变无界)
     let orphan_aborts: Vec<Arc<AtomicBool>> = state
