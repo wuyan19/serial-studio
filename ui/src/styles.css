@@ -247,6 +247,7 @@ button {
   letter-spacing: 0.04em;
   cursor: pointer;
   border-radius: var(--r-sm);
+  position: relative; /* 锚定 .group-menu 浮层 */
 }
 .macro-group__head:hover {
   background: var(--surface-2);
@@ -262,6 +263,63 @@ button {
 .macro-group__count {
   color: var(--ink-faint);
   font-weight: 400;
+}
+/* 组头 ⋯ 菜单按钮（默认低调，组头 hover 时显现；重命名态由组件隐藏） */
+.macro-group__menu {
+  flex-shrink: 0;
+  padding: 0 4px;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.macro-group__head:hover .macro-group__menu,
+.macro-group__menu:focus-visible {
+  opacity: 1;
+}
+/* 组操作浮层（绝对定位锚定组头右上） */
+.group-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 4px;
+  z-index: 20;
+  min-width: 124px;
+  padding: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.group-menu__item {
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  text-transform: none;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.group-menu__item:hover {
+  background: var(--surface-2);
+}
+.group-menu__item--danger {
+  color: var(--danger);
+}
+.group-menu__item--danger:hover {
+  background: rgba(229, 83, 75, 0.12);
 }
 /* 串口分组卡标题：本地卡 / 远程设备卡。head 为 div（内含 toggle button + 可选删除 button，
    避免 button 嵌套 button）。复用 macro-group 的 caret/count 子元素样式。 */

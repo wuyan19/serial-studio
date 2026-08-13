@@ -23,8 +23,11 @@ import {
   downloadJson,
   getRemoteFromUrl,
   initConn,
+  dissolveGroup,
   groupBy,
   isTauri,
+  renameGroup,
+  upsertNamed,
   loadConfig,
   loadMacrosLocal,
   loadScriptsLocal,
@@ -44,6 +47,7 @@ import {
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
+  GroupHead,
   GroupView,
   InlineAliasInput,
   MacroEditor,
@@ -1090,7 +1094,12 @@ export default function App() {
       setEditorError(err);
       return;
     }
-    const next = { ...macros, [trimmedName]: editorMacro };
+    const oldKey = editing && !editing.isNew ? editing.name : null;
+    const next = upsertNamed(macros, oldKey, trimmedName, editorMacro);
+    if (!next) {
+      setEditorError("已存在同名宏");
+      return;
+    }
     setMacros(next);
     await persistMacros(next);
     setEditing(null);
@@ -1109,6 +1118,52 @@ export default function App() {
         setMacros(next);
         await persistMacros(next);
         setEditing(null);
+        setConfirmState(null);
+      },
+    });
+  };
+
+  const renameMacroGroup = async (oldName: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return; // 空名忽略（防误解散；解散走 askDissolveMacroGroup）
+    const merged = trimmed !== oldName && Object.values(macros).some((m) => m.group === trimmed);
+    const next = renameGroup(macros, oldName, trimmed);
+    setMacros(next);
+    await persistMacros(next);
+    // 折叠态同步：旧组名 → 新组名（保留折叠）
+    setMacroCollapsed((prev) => {
+      if (!prev.has(oldName)) return prev;
+      const n = new Set(prev);
+      n.delete(oldName);
+      n.add(trimmed);
+      localStorage.setItem("macro-groups-collapsed", JSON.stringify([...n]));
+      return n;
+    });
+    if (merged) {
+      setNotice(`已合并到组「${trimmed}」`);
+      setTimeout(() => setNotice(""), 4000);
+    }
+  };
+
+  const askDissolveMacroGroup = (name: string) => {
+    const count = Object.values(macros).filter((m) => m.group === name).length;
+    setConfirmState({
+      title: "解散分组",
+      icon: <IconAlert />,
+      message: `解散分组「${name}」?其中 ${count} 个宏将移至「未分组」,不会被删除。`,
+      confirmText: "解散",
+      tone: "danger",
+      onConfirm: async () => {
+        const { next } = dissolveGroup(macros, name);
+        setMacros(next);
+        await persistMacros(next);
+        setMacroCollapsed((prev) => {
+          if (!prev.has(name)) return prev;
+          const n = new Set(prev);
+          n.delete(name);
+          localStorage.setItem("macro-groups-collapsed", JSON.stringify([...n]));
+          return n;
+        });
         setConfirmState(null);
       },
     });
@@ -1163,7 +1218,12 @@ export default function App() {
       setEditorScriptError("脚本代码不能为空");
       return;
     }
-    const next = { ...scripts, [trimmedName]: editorScript };
+    const oldKey = editingScript && !editingScript.isNew ? editingScript.name : null;
+    const next = upsertNamed(scripts, oldKey, trimmedName, editorScript);
+    if (!next) {
+      setEditorScriptError("已存在同名脚本");
+      return;
+    }
     setScripts(next);
     await persistScripts(next);
     setEditingScript(null);
@@ -1182,6 +1242,51 @@ export default function App() {
         setScripts(next);
         await persistScripts(next);
         setEditingScript(null);
+        setConfirmState(null);
+      },
+    });
+  };
+
+  const renameScriptGroup = async (oldName: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    const merged = trimmed !== oldName && Object.values(scripts).some((s) => s.group === trimmed);
+    const next = renameGroup(scripts, oldName, trimmed);
+    setScripts(next);
+    await persistScripts(next);
+    setScriptCollapsed((prev) => {
+      if (!prev.has(oldName)) return prev;
+      const n = new Set(prev);
+      n.delete(oldName);
+      n.add(trimmed);
+      localStorage.setItem("script-groups-collapsed", JSON.stringify([...n]));
+      return n;
+    });
+    if (merged) {
+      setNotice(`已合并到组「${trimmed}」`);
+      setTimeout(() => setNotice(""), 4000);
+    }
+  };
+
+  const askDissolveScriptGroup = (name: string) => {
+    const count = Object.values(scripts).filter((s) => s.group === name).length;
+    setConfirmState({
+      title: "解散分组",
+      icon: <IconAlert />,
+      message: `解散分组「${name}」?其中 ${count} 个脚本将移至「未分组」,不会被删除。`,
+      confirmText: "解散",
+      tone: "danger",
+      onConfirm: async () => {
+        const { next } = dissolveGroup(scripts, name);
+        setScripts(next);
+        await persistScripts(next);
+        setScriptCollapsed((prev) => {
+          if (!prev.has(name)) return prev;
+          const n = new Set(prev);
+          n.delete(name);
+          localStorage.setItem("script-groups-collapsed", JSON.stringify([...n]));
+          return n;
+        });
         setConfirmState(null);
       },
     });
@@ -1608,11 +1713,15 @@ export default function App() {
               {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
               {groupBy(Object.entries(macros), (m) => m.group).map((g) => (
                 <div key={g.name} className="macro-group">
-                  <button className="macro-group__head" onClick={() => toggleMacroGroup(g.name)}>
-                    <span className="macro-group__caret">{macroCollapsed.has(g.name) ? "▶" : "▼"}</span>
-                    <span className="macro-group__name">{g.name}</span>
-                    <span className="macro-group__count">{g.items.length}</span>
-                  </button>
+                  <GroupHead
+                    name={g.name}
+                    count={g.items.length}
+                    collapsed={macroCollapsed.has(g.name)}
+                    onToggle={() => toggleMacroGroup(g.name)}
+                    onRename={(n) => renameMacroGroup(g.name, n)}
+                    onDissolve={() => askDissolveMacroGroup(g.name)}
+                    menuHidden={g.name === "未分组"}
+                  />
                   {!macroCollapsed.has(g.name) && g.items.map(([name]) => (
                     <div key={name} className="macro-row">
                       <button
@@ -1709,11 +1818,15 @@ export default function App() {
               {Object.keys(scripts).length === 0 && <p className="sidebar__empty">无脚本（点 ＋ 新增）</p>}
               {groupBy(Object.entries(scripts), (s) => s.group).map((g) => (
                 <div key={g.name} className="macro-group">
-                  <button className="macro-group__head" onClick={() => toggleScriptGroup(g.name)}>
-                    <span className="macro-group__caret">{scriptCollapsed.has(g.name) ? "▶" : "▼"}</span>
-                    <span className="macro-group__name">{g.name}</span>
-                    <span className="macro-group__count">{g.items.length}</span>
-                  </button>
+                  <GroupHead
+                    name={g.name}
+                    count={g.items.length}
+                    collapsed={scriptCollapsed.has(g.name)}
+                    onToggle={() => toggleScriptGroup(g.name)}
+                    onRename={(n) => renameScriptGroup(g.name, n)}
+                    onDissolve={() => askDissolveScriptGroup(g.name)}
+                    menuHidden={g.name === "未分组"}
+                  />
                   {!scriptCollapsed.has(g.name) && g.items.map(([name]) => (
                     <div key={name} className="macro-row">
                       <button

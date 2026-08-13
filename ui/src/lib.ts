@@ -70,6 +70,68 @@ export function groupBy<T>(
   return groups;
 }
 
+// ===== 命名记录的增改与分组操作（宏/脚本共用：名字是 Record key，group 是字段） =====
+
+/**
+ * 重命名/新增一条命名记录：
+ * - oldKey 非空且与新名不同 → 删旧 key（否则改名会变成「复制一份」、旧名残留）。
+ * - 新名为空、或被别的记录占用（非自身）→ 返回 null，调用方据此报错。
+ * 宏/脚本的 save 共用，统一「真重命名 + 重名冲突」语义。
+ */
+export function upsertNamed<T>(
+  rec: Record<string, T>,
+  oldKey: string | null,
+  newKey: string,
+  value: T,
+): Record<string, T> | null {
+  const k = newKey.trim();
+  if (!k) return null;
+  if (k !== oldKey && rec[k] != null) return null;
+  const next = { ...rec };
+  if (oldKey && oldKey !== k) delete next[oldKey];
+  next[k] = value;
+  return next;
+}
+
+/**
+ * 重命名分组：把 group===oldName 的成员 group 字段改为 newName。
+ * - newName 为空 → 原样返回（防止把组名清空误当成解散；解散走 dissolveGroup）。
+ * - 撞已有组名 → 成员并入该组（groupBy 自然合并）。
+ * 组是派生实体（无独立存储），所以「改组名」= 批量改成员字段。
+ */
+export function renameGroup<T extends { group?: string }>(
+  rec: Record<string, T>,
+  oldName: string,
+  newName: string,
+): Record<string, T> {
+  const n = newName.trim();
+  if (!n) return rec;
+  const next: Record<string, T> = {};
+  for (const [k, v] of Object.entries(rec)) next[k] = v.group === oldName ? { ...v, group: n } : v;
+  return next;
+}
+
+/**
+ * 解散分组：把 group===name 的成员 group 置空（移至「未分组」），成员本身保留。
+ * 返回新 map 与受影响成员数（供确认文案用）。组随末个成员而灭——与 renameGroup 对称。
+ */
+export function dissolveGroup<T extends { group?: string }>(
+  rec: Record<string, T>,
+  name: string,
+): { next: Record<string, T>; count: number } {
+  let count = 0;
+  const next: Record<string, T> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (v.group === name) {
+      next[k] = { ...v, group: undefined };
+      count++;
+    } else {
+      next[k] = v;
+    }
+  }
+  return { next, count };
+}
+
 // ===== 端口复合键（devId::name，多 Transport 共存时区分本地/远程同名端口） =====
 
 /** 组装端口复合键：`${devId}::${name}`。串口名不含 `::`，分隔安全。 */

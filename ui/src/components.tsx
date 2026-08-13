@@ -917,6 +917,100 @@ export function InlineAliasInput({
   );
 }
 
+/** 分组标题行：折叠按钮 + 组名(可 inline 重命名) + 计数 + ⋯ 菜单(重命名/解散)。
+ *  宏/脚本侧栏共用，封装组级交互；成员列表由调用方各自渲染。
+ *  head 为 div（内含 ⋯ button 与 inline input，避免 button 嵌 button）——同 .port-group__head 模式。
+ *  局部自管理 menuOpen/renaming 两个 UI 状态，不上升调用方。 */
+export function GroupHead({
+  name,
+  count,
+  collapsed,
+  onToggle,
+  onRename,
+  onDissolve,
+  menuHidden = false,
+}: {
+  name: string;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+  onRename: (newName: string) => void;
+  onDissolve: () => void;
+  /** 隐藏 ⋯ 菜单（「未分组」是聚合组——成员 group 字段为 undefined，重命名/解散无意义） */
+  menuHidden?: boolean;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const headRef = useRef<HTMLDivElement>(null);
+
+  // 菜单/重命名态：点 head 外部收起（InlineAliasInput 的 blur 已自行提交，这里仅兜底关 UI）。
+  useEffect(() => {
+    if (!menuOpen && !renaming) return;
+    const onDown = (e: MouseEvent) => {
+      if (headRef.current && !headRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setRenaming(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuOpen, renaming]);
+
+  return (
+    <div className="macro-group__head" ref={headRef} onClick={renaming ? undefined : onToggle}>
+      <span className="macro-group__caret">{collapsed ? "▶" : "▼"}</span>
+      {renaming ? (
+        <InlineAliasInput
+          initial={name}
+          placeholder="分组名"
+          onCommit={(n) => {
+            setRenaming(false);
+            onRename(n);
+          }}
+          onCancel={() => setRenaming(false)}
+        />
+      ) : (
+        <span className="macro-group__name">{name}</span>
+      )}
+      <span className="macro-group__count">{count}</span>
+      {!renaming && !menuHidden && (
+        <button
+          className="macro-group__menu"
+          title="分组操作"
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuOpen((v) => !v);
+          }}
+        >
+          ⋯
+        </button>
+      )}
+      {menuOpen && (
+        <div className="group-menu" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="group-menu__item"
+            onClick={() => {
+              setMenuOpen(false);
+              setRenaming(true);
+            }}
+          >
+            重命名组
+          </button>
+          <button
+            className="group-menu__item group-menu__item--danger"
+            onClick={() => {
+              setMenuOpen(false);
+              onDissolve();
+            }}
+          >
+            解散组
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ===== 宏批量导出对话框 =====
 
 /** 多选导出宏：勾选若干（或全选）→ 导出单个 JSON（{名: 宏}，可再导入闭环）。
@@ -1852,7 +1946,7 @@ export function MacroEditor({
           </h3>
           <div className="dialog__sub">{isNew ? "新增宏" : name}</div>
           <ConfigRow label="名称">
-            <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
+            <input value={name} onChange={(e) => onName(e.target.value)} className="field" />
           </ConfigRow>
           <ConfigRow label="描述">
             <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
@@ -2001,7 +2095,7 @@ export function ScriptEditor({
           </h3>
           <div className="dialog__sub">{isNew ? "新增脚本" : name}</div>
           <ConfigRow label="名称">
-            <input value={name} onChange={(e) => onName(e.target.value)} disabled={!isNew} className="field" style={{ opacity: isNew ? 1 : 0.5 }} />
+            <input value={name} onChange={(e) => onName(e.target.value)} className="field" />
           </ConfigRow>
           <ConfigRow label="描述">
             <input value={script.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
