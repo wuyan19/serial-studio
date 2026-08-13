@@ -22,7 +22,7 @@ use std::sync::Mutex;
 /// 读写之间的交错在此排队,避免半写状态或文件损坏。
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// 定位 scripts.json 所在目录:见 [`crate::config::config_dir`](公开 API 内直接调用)。
+/// 定位 scripts.json 所在目录:公开 API 内直接调用 [`crate::config::config_dir`]。
 
 fn file_at(dir: &Path) -> PathBuf {
     dir.join("scripts.json")

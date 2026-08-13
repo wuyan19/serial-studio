@@ -279,16 +279,21 @@ export default function App() {
     setMacroCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(g)) next.delete(g); else next.add(g);
-      localStorage.setItem("macro-groups-collapsed", JSON.stringify([...next]));
       return next;
     });
   const toggleScriptGroup = (g: string) =>
     setScriptCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(g)) next.delete(g); else next.add(g);
-      localStorage.setItem("script-groups-collapsed", JSON.stringify([...next]));
       return next;
     });
+  // 折叠态写盘集中于此(单一数据源):各 handler 只 setState,不再就地 setItem。
+  useEffect(() => {
+    localStorage.setItem("macro-groups-collapsed", JSON.stringify([...macroCollapsed]));
+  }, [macroCollapsed]);
+  useEffect(() => {
+    localStorage.setItem("script-groups-collapsed", JSON.stringify([...scriptCollapsed]));
+  }, [scriptCollapsed]);
   /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
   const [portCollapsed, setPortCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("port-groups-collapsed") ?? "[]") as string[]));
   const togglePortGroup = (devId: string) =>
@@ -1129,16 +1134,16 @@ export default function App() {
     const merged = trimmed !== oldName && Object.values(macros).some((m) => m.group === trimmed);
     const next = renameGroup(macros, oldName, trimmed);
     setMacros(next);
-    await persistMacros(next);
-    // 折叠态同步：旧组名 → 新组名（保留折叠）
+    // 折叠态同步:旧组名 → 新组名(保留折叠)。须在 await 前——React 18 在 await 处断批,
+    // 否则折叠的组会先按新名展开、再折回,闪一帧。
     setMacroCollapsed((prev) => {
       if (!prev.has(oldName)) return prev;
       const n = new Set(prev);
       n.delete(oldName);
       n.add(trimmed);
-      localStorage.setItem("macro-groups-collapsed", JSON.stringify([...n]));
       return n;
     });
+    await persistMacros(next);
     if (merged) {
       setNotice(`已合并到组「${trimmed}」`);
       setTimeout(() => setNotice(""), 4000);
@@ -1156,14 +1161,13 @@ export default function App() {
       onConfirm: async () => {
         const { next } = dissolveGroup(macros, name);
         setMacros(next);
-        await persistMacros(next);
         setMacroCollapsed((prev) => {
           if (!prev.has(name)) return prev;
           const n = new Set(prev);
           n.delete(name);
-          localStorage.setItem("macro-groups-collapsed", JSON.stringify([...n]));
           return n;
         });
+        await persistMacros(next);
         setConfirmState(null);
       },
     });
@@ -1253,15 +1257,14 @@ export default function App() {
     const merged = trimmed !== oldName && Object.values(scripts).some((s) => s.group === trimmed);
     const next = renameGroup(scripts, oldName, trimmed);
     setScripts(next);
-    await persistScripts(next);
     setScriptCollapsed((prev) => {
       if (!prev.has(oldName)) return prev;
       const n = new Set(prev);
       n.delete(oldName);
       n.add(trimmed);
-      localStorage.setItem("script-groups-collapsed", JSON.stringify([...n]));
       return n;
     });
+    await persistScripts(next);
     if (merged) {
       setNotice(`已合并到组「${trimmed}」`);
       setTimeout(() => setNotice(""), 4000);
@@ -1279,14 +1282,13 @@ export default function App() {
       onConfirm: async () => {
         const { next } = dissolveGroup(scripts, name);
         setScripts(next);
-        await persistScripts(next);
         setScriptCollapsed((prev) => {
           if (!prev.has(name)) return prev;
           const n = new Set(prev);
           n.delete(name);
-          localStorage.setItem("script-groups-collapsed", JSON.stringify([...n]));
           return n;
         });
+        await persistScripts(next);
         setConfirmState(null);
       },
     });

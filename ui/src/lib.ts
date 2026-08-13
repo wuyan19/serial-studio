@@ -59,7 +59,9 @@ export function groupBy<T>(
   const ungrouped: [string, T][] = [];
   for (const [k, v] of items) {
     const g = getGroup(v)?.trim();
-    if (g) (buckets.get(g) ?? buckets.set(g, []).get(g)!).push([k, v]);
+    // 保留名「未分组」归入 ungrouped:否则它会进具名 bucket，与下面合成的「未分组」组并存，
+    // 产生两条同名组 → 渲染 key={g.name} 碰撞（重命名组为「未分组」时可触发）。
+    if (g && g !== "未分组") (buckets.get(g) ?? buckets.set(g, []).get(g)!).push([k, v]);
     else ungrouped.push([k, v]);
   }
   const groups = [...buckets.entries()]

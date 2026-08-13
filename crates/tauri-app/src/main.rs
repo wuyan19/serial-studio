@@ -315,7 +315,7 @@ async fn force_close_port(
     Ok(())
 }
 
-/// 设置端口别名（""/None = 清除）。写 exe 同目录 ports.json 并广播元数据变更，
+/// 设置端口别名（""/None = 清除）。写配置目录 ports.json 并广播元数据变更，
 /// 让已连的远程 WS 客户端刷新。open 命令不碰磁盘——别名一律走此入口。
 #[tauri::command]
 async fn set_port_alias(

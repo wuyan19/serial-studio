@@ -112,7 +112,7 @@ export interface ConnConfig {
   port: number;
 }
 
-/** 已知的远程设备（持久化于 localStorage，单窗口多远程共存）。
+/** 已知的远程设备（桌面端持久化于配置目录 remotes.json；Web/远程窗口由 connConfig 派生单设备，不持久化）。
  *  id 即 devId，用于端口复合键。 */
 export interface RemoteDevice {
   /** 稳定主键（UUID），作为 devId 用于端口复合键。 */

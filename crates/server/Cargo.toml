@@ -25,7 +25,7 @@ clap = { workspace = true }
 bytes = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
-dirs = "5"
+dirs = "6"
 futures-util = "0.3"
 rust-embed = "8"
 mime_guess = "2"
