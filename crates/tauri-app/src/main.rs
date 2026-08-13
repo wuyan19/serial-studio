@@ -104,7 +104,7 @@ async fn service_status(
     Ok(supervisor.status().await)
 }
 
-/// 加载用户宏（exe 同目录 macros.json）。宏是用户配置，跟着用户走，不存服务端状态。
+/// 加载用户宏（配置目录 macros.json）。宏是用户配置，跟着用户走，不存服务端状态。
 #[tauri::command]
 async fn load_macros() -> Result<std::collections::BTreeMap<String, ss_core::Macro>, String> {
     Ok(ss_server::macros_store::load())
@@ -118,7 +118,19 @@ async fn save_macros(
     ss_server::macros_store::save(&macros)
 }
 
-/// 加载用户脚本(exe 同目录 scripts.json)。与宏一样是用户配置,跟着用户走。
+/// 加载远程设备列表（配置目录 remotes.json）。桌面端持久化，跟着机器走。
+#[tauri::command]
+async fn load_remotes() -> Result<Vec<ss_core::RemoteDevice>, String> {
+    Ok(ss_server::remotes_store::load())
+}
+
+/// 保存远程设备列表到 remotes.json。
+#[tauri::command]
+async fn save_remotes(remotes: Vec<ss_core::RemoteDevice>) -> Result<(), String> {
+    ss_server::remotes_store::save(&remotes)
+}
+
+/// 加载用户脚本(配置目录 scripts.json)。与宏一样是用户配置,跟着用户走。
 #[tauri::command]
 async fn load_scripts() -> Result<std::collections::BTreeMap<String, ss_core::Script>, String> {
     Ok(ss_server::scripts_store::load())
@@ -643,6 +655,8 @@ fn run_gui() {
             service_status,
             load_macros,
             save_macros,
+            load_remotes,
+            save_remotes,
             load_scripts,
             save_scripts,
             get_script_skill,

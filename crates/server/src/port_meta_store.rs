@@ -1,4 +1,4 @@
-//! 端口元数据持久化：exe 同目录 ports.json。
+//! 端口元数据持久化：配置目录 ports.json（系统 app data 目录，见 config::config_dir）。
 //!
 //! 端口元数据（别名等）是**端口所在机器的本地配置**，由前端（Tauri 控制面 invoke
 //! 或 WS action）读写。服务端不持有状态——list 时按需 load，由 lib.rs 的 PortView 组合。
@@ -18,8 +18,7 @@ pub struct PortMeta {
 }
 
 fn path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("ports.json"))
+    Some(crate::config::config_dir()?.join("ports.json"))
 }
 
 /// 读 ports.json（不存在或解析失败 → 空）。
@@ -35,7 +34,7 @@ pub fn load() -> BTreeMap<String, PortMeta> {
 
 /// 写 ports.json。
 pub fn save(map: &BTreeMap<String, PortMeta>) -> Result<(), String> {
-    let p = path().ok_or("无法定位 exe 目录")?;
+    let p = path().ok_or("无法定位配置目录")?;
     let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
     std::fs::write(&p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
     Ok(())

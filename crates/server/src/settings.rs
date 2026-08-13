@@ -1,4 +1,5 @@
-//! 服务器设置：监听地址/端口，持久化到 exe 同目录 settings.json。
+//! 服务器设置：监听地址/端口，持久化到配置目录 settings.json（系统 app data 目录，
+//! 见 config::config_dir；SERIAL_STUDIO_CONFIG_DIR 可覆盖）。
 //!
 //! Tauri 启动时 load() 读，WS save_settings 写。运行中的监听不可热改，
 //! 修改后需重启进程才生效（前端会提示）。
@@ -44,11 +45,9 @@ impl Default for Settings {
     }
 }
 
-/// exe 同目录的 settings.json 路径。
+/// 配置目录下的 settings.json 路径。
 fn settings_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    Some(dir.join("settings.json"))
+    Some(crate::config::config_dir()?.join("settings.json"))
 }
 
 /// 读 settings.json（不存在或解析失败 → 默认）。
@@ -64,7 +63,7 @@ pub fn load() -> Settings {
 
 /// 写 settings.json。
 pub fn save(s: &Settings) -> Result<(), String> {
-    let p = settings_path().ok_or("无法定位 exe 目录")?;
+    let p = settings_path().ok_or("无法定位配置目录")?;
     let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
     std::fs::write(&p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
     Ok(())

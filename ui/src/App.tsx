@@ -27,11 +27,10 @@ import {
   isTauri,
   loadConfig,
   loadMacrosLocal,
-  loadRemotesLocal,
   loadScriptsLocal,
   parsePortId,
   persistMacros,
-  persistRemotesLocal,
+  persistRemotes,
   persistScripts,
   portIdOf,
   saveConfig,
@@ -234,14 +233,15 @@ export default function App() {
   const [pendingPort, setPendingPort] = useState<string | null>(null);
   const [serialConfig, setSerialConfig] = useState<SerialConfig>(loadConfig);
   const [connConfig, setConnConfig] = useState<ConnConfig>(initConn);
-  // 已知远程设备列表：桌面端持久化 localStorage；Web/远程窗口由 connConfig 派生单设备（不持久化）。
+  // 已知远程设备列表：桌面端先空（mount effect 异步 invoke load_remotes 填充，见下）；
+  // Web/远程窗口由 connConfig 派生单设备（不持久化）。
   const [remotes, setRemotes] = useState<RemoteDevice[]>(() =>
-    isLocal ? loadRemotesLocal() : initRemoteFromConn(connConfig),
+    isLocal ? [] : initRemoteFromConn(connConfig),
   );
-  // 展开的远程设备卡（= 需要连接）。桌面端启动时默认全展开 → 自动重连之前的设备；
+  // 展开的远程设备卡（= 需要连接）。桌面端先空（mount effect 加载 remotes 后全展开 → 自动重连）；
   // Web/远程窗口默认展开其唯一设备。
   const [expandedRemotes, setExpandedRemotes] = useState<Set<string>>(() =>
-    isLocal ? new Set(loadRemotesLocal().map((r) => r.id)) : new Set(["remote"]),
+    isLocal ? new Set() : new Set(["remote"]),
   );
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
@@ -629,6 +629,19 @@ export default function App() {
   };
   useEffect(() => {
     reloadScripts();
+  }, []);
+
+  // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）；Web/远程窗口不加载
+  // （由 connConfig 派生单设备）。加载后全展开 → 引用计数 effect 自动重连之前的设备。
+  useEffect(() => {
+    if (!isLocal) return;
+    tauriInvoke<RemoteDevice[]>("load_remotes")
+      .then((loaded) => {
+        setRemotes(loaded);
+        setExpandedRemotes(new Set(loaded.map((r) => r.id)));
+      })
+      .catch((e) => console.error("加载远程设备失败", e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。
@@ -1255,7 +1268,7 @@ export default function App() {
     const dup = remotes.some((r) => r.host === host && r.port === dev.port);
     setRemotes((prev) => {
       const next = [...prev, dev];
-      if (isLocal) persistRemotesLocal(next);
+      if (isLocal) persistRemotes(next);
       return next;
     });
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
@@ -1289,7 +1302,7 @@ export default function App() {
         });
         setRemotes((prev) => {
           const next = prev.filter((r) => r.id !== dev.id);
-          if (isLocal) persistRemotesLocal(next);
+          if (isLocal) persistRemotes(next);
           return next;
         });
         setExpandedRemotes((prev) => {

@@ -53,7 +53,7 @@ cargo check                      # 快速类型检查
 | Crate | 职责与边界 |
 |---|---|
 | `ss-core` (`crates/core`) | 多串口管理引擎。端口占有权、RX 缓冲区、宏执行。**纯运行时——不依赖 axum/clap/tauri,不碰持久化与 UI**,以此保持可测试性。新增此类依赖是回归。 |
-| `ss-server` (`crates/server`) | axum WS/MCP/Telnet + 内嵌 SPA(`rust-embed` 打包 `ui/dist`)。lib + headless bin 双形态,被 Tauri 壳与独立 `ss-server` 共用——"一份后端,两种宿主"。持久化 stores(settings/port_meta/macros)在此层。 |
+| `ss-server` (`crates/server`) | axum WS/MCP/Telnet + 内嵌 SPA(`rust-embed` 打包 `ui/dist`)。lib + headless bin 双形态,被 Tauri 壳与独立 `ss-server` 共用——"一份后端,两种宿主"。持久化 stores(settings/port_meta/macros/scripts/remotes)在此层。 |
 | `serial-studio` (`crates/tauri-app`) | Tauri 壳=控制面。`ServiceSupervisor` 管数据面启停。本地模式下 Tauri IPC 与 axum WS 是同一 core 域的两个出口。 |
 
 ### 串口占有权模型(session 引用计数)
@@ -87,13 +87,17 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 
 `Transport` 接口屏蔽 IPC/WS 协议差异,组件只懂领域(port/bytes/macro)。`LocalTransport`(Tauri invoke + event)与 `RemoteTransport`(WS)两实现,`createTransport()` 按模式选择:远程窗口(`?remote=host:port`)→ WS;Tauri 且非远程 → IPC;否则 Web → WS。模式判定见 `lib.ts::isTauri`/`getRemoteFromUrl`。
 
-### 持久化(三个 JSON,都在 exe 同目录)
+### 持久化(五个 JSON,系统 app data 目录)
+
+配置目录由 `ss_server::config::config_dir()` 统一定位:优先 `SERIAL_STUDIO_CONFIG_DIR` 环境变量(测试钩子 + headless 固定位置),否则系统配置目录下的 `serial-studio/`(macOS=`~/Library/Application Support`、Win=`%APPDATA%`、Linux=`~/.config`)。**不写 exe 同目录**——macOS 升级 .app bundle 覆盖会丢配置。store 是模块级自由函数(`load()/save()`),不归 `AppState`。**不做老配置迁移**(新版从默认/空开始;macOS bundle 内旧配置升级时已物理丢失)。
 
 | 文件 | 内容 | 归属 |
 |---|---|---|
 | `settings.json` | 监听地址 / WS 端口 / Telnet 端口 | 端口所在机器 |
 | `ports.json` | 端口元数据(别名,强制唯一去重) | 端口所在机器;core 只出 `PortInfo` 运行时事实,别名由 server 层 `PortView`(`serde(flatten)`)组合 |
 | `macros.json` | 宏 | 桌面端走 Tauri command;Web 端存浏览器 localStorage(`lib.ts::persistMacros`) |
+| `scripts.json` | 脚本库 | 桌面端走 Tauri command;Web 端 localStorage;MCP 单条 `upsert`/`remove` 经进程内锁 |
+| `remotes.json` | 已知远程设备列表 | 仅桌面端走 Tauri command(`load_remotes`/`save_remotes`);Web/远程窗口由 connConfig 派生单设备,不持久化 |
 
 别名写入的唯一入口是 `set_alias_and_notify`(写 ports.json + 发 meta_bus)。`PortView` 的 `serde(flatten)` 契约要求线上 JSON 扁平为 `{name,opened,holders,alias?}`——改 `PortInfo`/`PortView` 字段要顾全前端 `PortInfo` 接口。
 

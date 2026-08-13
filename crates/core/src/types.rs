@@ -154,6 +154,19 @@ pub struct PortInfo {
     pub disconnected: bool,
 }
 
+/// 已知远程设备（桌面端持久化于 remotes.json；Web/远程窗口由 connConfig 派生单设备，不持久化）。
+/// id 即 devId，用于端口复合键。字段与前端 TS `RemoteDevice` 对齐。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDevice {
+    /// 稳定主键（UUID），作为 devId 用于端口复合键。
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    /// 可选昵称；空则 UI 回退 host:port。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,4 @@
-//! 脚本持久化:exe 同目录 scripts.json。
+//! 脚本持久化:配置目录 scripts.json(系统 app data 目录,见 config::config_dir)。
 //!
 //! 与 macros_store 同构:脚本是用户配置,跟着用户走。服务端不持有脚本状态——
 //! run_script 时前端把整个 Script 对象发来执行。首次运行无文件 → 空。
@@ -22,17 +22,7 @@ use std::sync::Mutex;
 /// 读写之间的交错在此排队,避免半写状态或文件损坏。
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// 测试钩子:设置后 scripts.json 定位到该目录而非 exe 目录。生产环境不设,fallback exe 目录。
-const CONFIG_DIR_ENV: &str = "SERIAL_STUDIO_CONFIG_DIR";
-
-/// 定位 scripts.json 所在目录:优先环境变量覆盖(测试用),否则 exe 同目录(生产)。
-fn exe_dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var(CONFIG_DIR_ENV) {
-        return Some(PathBuf::from(custom));
-    }
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.to_path_buf())
-}
+/// 定位 scripts.json 所在目录:见 [`crate::config::config_dir`](公开 API 内直接调用)。
 
 fn file_at(dir: &Path) -> PathBuf {
     dir.join("scripts.json")
@@ -89,28 +79,28 @@ fn write_locked(p: &Path, map: &BTreeMap<String, Script>) -> Result<(), String> 
     Ok(())
 }
 
-// ===== 公开 API:无目录参数,定位 exe 目录(Tauri / MCP 调用) =====
+// ===== 公开 API:无目录参数,定位配置目录(Tauri / MCP 调用) =====
 
 /// 读 scripts.json(不存在或解析失败 → 空)。
 pub fn load() -> BTreeMap<String, Script> {
-    exe_dir().map(|d| load_from(&d)).unwrap_or_default()
+    crate::config::config_dir().map(|d| load_from(&d)).unwrap_or_default()
 }
 
 /// 全量写 scripts.json(前端 Tauri 用:内存权威整张覆盖)。
 pub fn save(map: &BTreeMap<String, Script>) -> Result<(), String> {
-    let dir = exe_dir().ok_or("无法定位 exe 目录")?;
+    let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
     save_to(&dir, map)
 }
 
 /// 插入/覆盖单个脚本,返回旧值(覆盖时 Some,新建时 None)。供 MCP 等无状态调用方。
 pub fn upsert(name: &str, script: Script) -> Result<Option<Script>, String> {
-    let dir = exe_dir().ok_or("无法定位 exe 目录")?;
+    let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
     upsert_in(&dir, name, script)
 }
 
 /// 删除单个脚本,返回被删值(无此名 None,幂等不报错)。
 pub fn remove(name: &str) -> Result<Option<Script>, String> {
-    let dir = exe_dir().ok_or("无法定位 exe 目录")?;
+    let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
     remove_in(&dir, name)
 }
 

@@ -3,9 +3,11 @@
 //! 抽成 lib 是为了让 Tauri app（GUI 模式）和独立 ss-server bin（headless 模式）
 //! 共用同一套路由——方案 B 的核心：一份后端，两种宿主。
 
+pub mod config;
 mod mcp;
 pub mod macros_store;
 pub mod port_meta_store;
+pub mod remotes_store;
 pub mod scripts_store;
 pub mod settings;
 pub mod supervisor;

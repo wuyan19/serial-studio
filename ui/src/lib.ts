@@ -210,20 +210,25 @@ export async function persistScripts(scripts: Record<string, Script>) {
 }
 
 const REMOTES_KEY = "serial-studio-remotes";
-export function loadRemotesLocal(): RemoteDevice[] {
-  try {
-    const raw = localStorage.getItem(REMOTES_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {
-    /* ignore */
-  }
-  return [];
-}
 export function persistRemotesLocal(remotes: RemoteDevice[]) {
   try {
     localStorage.setItem(REMOTES_KEY, JSON.stringify(remotes));
   } catch {
     /* ignore */
+  }
+}
+
+/** 持久化远程设备列表：Tauri → invoke save_remotes；Web → localStorage。
+ * 仅桌面端真正落盘到 remotes.json（Web/远程窗口 remotes 由 connConfig 派生，不调此函数）。 */
+export async function persistRemotes(remotes: RemoteDevice[]) {
+  if (isTauri()) {
+    try {
+      await tauriInvoke("save_remotes", { remotes });
+    } catch (e) {
+      console.error("保存远程设备失败", e);
+    }
+  } else {
+    persistRemotesLocal(remotes);
   }
 }
 
