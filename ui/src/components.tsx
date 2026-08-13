@@ -2377,7 +2377,9 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
           <p className="about__tagline">
             多形态串口通信工具
             <br />
-            <span className="pip">本地 / 远程</span> 双模式 · Tauri + WebSocket
+            <span className="pip">本地 / 远程</span> 双模式 · Tauri + MCP & WebSocket
+            <br />
+            <span className="pip">MCP Url</span> http://IP:PORT/mcp
           </p>
           <button className="btn btn--primary" onClick={onClose} autoFocus>
             关闭
