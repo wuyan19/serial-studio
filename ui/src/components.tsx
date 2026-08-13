@@ -36,6 +36,15 @@ import {
   subscribeBindings,
 } from "./shortcuts";
 import {
+  checkUpdate,
+  downloadAndInstall,
+  isLocalDesktop,
+  openReleasesPage,
+  supportsAutoInstall,
+  type Update,
+  type UpdateStatus,
+} from "./updater";
+import {
   IconAlert,
   IconBolt,
   IconCode,
@@ -2365,6 +2374,26 @@ export function ActivityIcon({ icon, title, active, onClick }: { icon: React.Rea
 
 export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
   useEscClose(onClose);
+  const local = isLocalDesktop(); // 仅本地桌面模式渲染检查更新（Web/远程窗口不显示）
+  const [status, setStatus] = useState<UpdateStatus>({ state: "idle" });
+  const [update, setUpdate] = useState<Update | null>(null);
+
+  async function onCheck() {
+    setStatus({ state: "checking" });
+    const { status: s, update: u } = await checkUpdate();
+    setStatus(s);
+    setUpdate(u);
+  }
+
+  async function onInstall() {
+    if (!update) return;
+    setStatus({ state: "downloading", percent: 0 });
+    const s = await downloadAndInstall(update, (p) =>
+      setStatus({ state: "downloading", percent: p }),
+    );
+    setStatus(s);
+  }
+
   return (
     <div className="dialog-overlay">
       <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -2381,6 +2410,45 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
             <br />
             <span className="pip">MCP Url</span> http://IP:PORT/mcp
           </p>
+
+          {local && (
+            <div className="about__update">
+              {status.state === "idle" && (
+                <button className="btn" onClick={onCheck}>检查更新</button>
+              )}
+              {status.state === "checking" && <p className="about__update-msg">检查中…</p>}
+              {status.state === "upToDate" && <p className="about__update-msg">已是最新版本</p>}
+              {status.state === "available" && (
+                <div className="about__update-available">
+                  <p>发现新版本 {status.version}</p>
+                  {supportsAutoInstall() ? (
+                    <button className="btn btn--primary" onClick={onInstall}>下载并重启</button>
+                  ) : (
+                    /* macOS 未公证：自动安装后 Gatekeeper 拦到打不开 → 只引导手动下载 */
+                    <button className="btn btn--primary" onClick={openReleasesPage}>前往下载</button>
+                  )}
+                </div>
+              )}
+              {status.state === "downloading" && (
+                <div className="about__update-progress">
+                  <div className="about__progress">
+                    <div className="about__progress-fill" style={{ width: `${status.percent ?? 0}%` }} />
+                  </div>
+                  <p className="about__update-msg">下载中 {status.percent ?? 0}%</p>
+                </div>
+              )}
+              {status.state === "downloadComplete" && (
+                <p className="about__update-msg">下载完成，即将重启…</p>
+              )}
+              {status.state === "failed" && (
+                <div className="about__update-available">
+                  <p className="about__update-msg">更新失败：{status.message}</p>
+                  <button className="btn" onClick={openReleasesPage}>前往下载</button>
+                </div>
+              )}
+            </div>
+          )}
+
           <button className="btn btn--primary" onClick={onClose} autoFocus>
             关闭
           </button>

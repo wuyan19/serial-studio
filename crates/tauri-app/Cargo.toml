@@ -20,6 +20,12 @@ axum = { workspace = true }
 # devtools 不在 release 启用：debug 构建由 Tauri 自动开启（cargo tauri dev 照常 F12），
 # release 不带 F12，既省体积也避免线上可调试。
 tauri = { version = "2", features = [] }
+# 在线升级（仅桌面壳注册；headless 路径不注册）：updater 自更新 + process 重启 +
+# os 判定平台（macOS 不自动安装）+ opener 打开 Release 页（macOS/失败回退）。
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-os = "2"
+tauri-plugin-opener = "2"
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

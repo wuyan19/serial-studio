@@ -94,6 +94,11 @@ The release artifact is `serial-studio.exe`.
 >   ```
 > - **Windows** — SmartScreen warns; click *More info → Run anyway*.
 
+> **Updates:** Windows and Linux builds self-update in-app (Help → About → Check for updates).
+> **macOS does not auto-update** — without Apple notarization, a self-replaced `.app` gets
+> re-blocked by Gatekeeper, so grab the new `.dmg` from the
+> [Releases](https://github.com/wuyan19/serial-studio/releases) page manually.
+
 ## ⚙️ Configuration
 
 Runtime config lives next to the binary:

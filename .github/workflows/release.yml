@@ -29,7 +29,7 @@ jobs:
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
           - platform: ubuntu-22.04
-            args: ""
+            args: "--bundles appimage" # deb 不支持自动更新 → 改 AppImage
           - platform: windows-latest
             args: ""
 
@@ -67,6 +67,10 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 在线升级签名：检测到此环境变量 + createUpdaterArtifacts:true，
+          # tauri-action 自动产出 .sig 并生成 latest.json 上传到 Release。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/tauri-app
           tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -74,6 +78,8 @@ jobs:
           releaseBody: "Serial Studio ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }} — 草稿，发布前请人工核对产物。详见 README。"
           releaseDraft: true
           prerelease: false
+          # Windows 同时打 nsis+msi：让 latest.json 确定性指向 nsis（体积小、更新体验好）
+          updaterJsonPreferNsisLazyDownload: true
           args: ${{ matrix.args }}
 
       - name: Upload portable .exe (Windows · 非安装直运行)

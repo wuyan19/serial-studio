@@ -571,6 +571,13 @@ fn run_headless() -> anyhow::Result<()> {
 /// GUI：Tauri 窗口 + Supervisor 管理服务（支持热重启）。
 fn run_gui() {
     tauri::Builder::default()
+        // 在线升级四件套（仅 GUI 壳；headless 的 run_headless 不注册）：
+        //  updater 自更新、process 安装后 relaunch、os 判平台（macOS 不自动安装）、
+        //  opener 打开 Release 页（macOS 发现新版 / 任一平台更新失败的回退）。
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_opener::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let app = window.app_handle();

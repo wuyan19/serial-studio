@@ -17,3 +17,7 @@
 
 # mcporter 本地配置（项目级 server 定义，不入库）
 /config
+
+# signing keys (never commit)
+/~/
+*.key

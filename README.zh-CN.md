@@ -92,6 +92,10 @@ release 产物为 `serial-studio.exe`。
 >   ```
 > - **Windows** —— SmartScreen 提示，点「更多信息 → 仍要运行」。
 
+> **关于更新：** Windows 与 Linux 版本支持应用内自动更新（帮助 → 关于 → 检查更新）。
+> **macOS 不支持自动更新** —— 未经 Apple 公证的 app 自更新替换后会被 Gatekeeper 再次拦截，
+> 请到 [Releases](https://github.com/wuyan19/serial-studio/releases) 页手动下载新 `.dmg`。
+
 ## ⚙️ 配置
 
 运行时配置放在二进制同目录：
