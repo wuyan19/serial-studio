@@ -27,3 +27,5 @@
 # project-local signing keys copy
 /.tauri/
 *.key.pub
+
+/build-signed.mjs
