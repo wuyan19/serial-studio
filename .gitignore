@@ -18,14 +18,9 @@
 # mcporter 本地配置（项目级 server 定义，不入库）
 /config
 
-# signing keys (never commit)
-/~/
-*.key
-
-/build-signed.ps1
-
-# project-local signing keys copy
+# 签名密钥（私钥/公钥，绝不入库）
 /.tauri/
-*.key.pub
+*.key*
 
+# 本地签名构建脚本（含密码，不入库）
 /build-signed.mjs
