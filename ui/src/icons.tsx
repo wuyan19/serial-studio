@@ -152,6 +152,34 @@ export function IconClose({ className }: IconProps) {
   );
 }
 
+// ===== 窗口控制(自绘标题栏,Win/Linux 用;mac 走原生红绿灯) =====
+
+export function IconWinMin({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M5 12h14" />
+    </Svg>
+  );
+}
+
+export function IconWinMax({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </Svg>
+  );
+}
+
+/** 还原:两层错位方框 */
+export function IconWinRestore({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="5" y="8" width="11" height="11" rx="1" />
+      <path d="M9 8V6a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-2" />
+    </Svg>
+  );
+}
+
 export function IconChevronUp({ className }: IconProps) {
   return (
     <Svg className={className}>

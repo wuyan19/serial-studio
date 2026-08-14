@@ -52,6 +52,52 @@ fn main() {
 
 // ===== 控制面：Tauri 命令（前端 invoke，不经 WS）=====
 
+/// 在光标处弹出窗口原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。
+/// 自绘标题栏后系统头没了，右键菜单由此补回（VS Code 同款体验）。仅 Windows；
+/// mac/Linux 无此习惯，stub no-op（前端无感）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn show_system_menu(window: tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMenu, PostMessageW, SendMessageW, SetForegroundWindow,
+        TrackPopupMenu, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL, WM_SYSCOMMAND,
+    };
+    let Ok(h) = window.hwnd() else { return };
+    // tauri(windows crate) HWND → windows-sys HWND(同为 *mut c_void 包裹)
+    let hwnd = h.0 as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return;
+        }
+        let menu = GetSystemMenu(hwnd, 0);
+        if menu.is_null() {
+            return;
+        }
+        // TrackPopupMenu 经典配方(Raymond Chen)：前后配 SetForegroundWindow/WM_NULL，
+        // 否则菜单一闪而过或点外面不消失
+        SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        );
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+        if cmd != 0 {
+            SendMessageW(hwnd, WM_SYSCOMMAND, cmd as usize, 0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn show_system_menu() {}
+
 #[tauri::command]
 async fn get_settings() -> Result<Settings, String> {
     Ok(ss_server::settings::load())
@@ -624,6 +670,18 @@ fn run_gui() {
             let supervisor = Arc::new(ServiceSupervisor::new(state.clone()));
             let settings = ss_server::settings::load();
 
+            // 自绘标题栏(仅 Windows 去系统装饰,前端 TitleBar 自绘窗口按钮/拖拽/右键菜单)。
+            // 不用 tauri.<platform>.conf.json 覆盖:平台配置对数组是整体替换(非按索引合并),
+            // 会静默丢 title/尺寸/dragDropEnabled——窗口字段保持单一事实源(基础 conf)。
+            // macOS 走 titleBarStyle=Overlay 保留原生红绿灯;Linux 保留系统装饰
+            // (无装饰 GTK 窗口没有边缘 resize 把手,不可拖边调大小)。
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_decorations(false);
+                }
+            }
+
             // 窗口级 state 必须在 spawn_event_emitter 之前 manage：
             // emitter 的 DataReceived 分支用 try_state::<PortChannels>()
             app.manage(SessionRegistry::default());
@@ -678,6 +736,7 @@ fn run_gui() {
             stop_script,
             stop_macro,
             save_json_file,
+            show_system_menu,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

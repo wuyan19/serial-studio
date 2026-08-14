@@ -68,6 +68,7 @@ import {
   validateMacro,
 } from "./components";
 import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow } from "./components/sidebar";
+import { TitleBar } from "./components/titlebar";
 import {
   IconAlert,
   IconBolt,
@@ -1120,6 +1121,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* 自绘标题栏:仅 Tauri 桌面(本地/远程窗口);Web 模式浏览器自带窗口管理 */}
+      {isTauri() && <TitleBar />}
+      <div className="app__body">
       {/* 活动栏：44px 窄竖条 */}
       <div className="activity-bar">
         <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
@@ -1553,6 +1557,7 @@ export default function App() {
           onCancel={() => scriptLib.setEditing(null)}
         />
       )}
+      </div>
     </div>
   );
 }

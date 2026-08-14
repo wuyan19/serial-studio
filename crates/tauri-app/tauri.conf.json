@@ -16,7 +16,8 @@
         "width": 1200,
         "height": 800,
         "resizable": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "titleBarStyle": "Overlay"
       }
     ],
     "security": {

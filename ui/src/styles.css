@@ -112,8 +112,75 @@ button {
    ============================================================ */
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   overflow: hidden;
+}
+/* 标题栏之下的三栏主体(活动栏/侧栏/主区) */
+.app__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------- 自绘标题栏(Win/Linux 带窗口按钮;mac Overlay 只留拖拽区+红绿灯安全区) ---------- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  flex-shrink: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hairline-soft);
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 标题与安全区不接事件——点击落到标题栏本体,拖动/双击/右键判定(e.target === currentTarget)才成立 */
+.titlebar__traffic,
+.titlebar__title {
+  pointer-events: none;
+}
+/* mac 红绿灯安全区:Overlay 模式原生按钮悬浮于左上 */
+.titlebar__traffic {
+  width: 8px;
+}
+.titlebar[data-mac="true"] .titlebar__traffic {
+  width: 78px;
+}
+.titlebar__title {
+  flex: 1;
+  padding-left: 10px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+.titlebar__controls {
+  display: flex;
+  align-self: stretch;
+}
+.titlebar__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  border: 0;
+  background: none;
+  color: var(--ink-dim);
+  cursor: default;
+}
+.titlebar__btn:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.titlebar__btn:active {
+  background: var(--surface-2);
+}
+.titlebar__btn--close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+.titlebar__btn-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* ---------- activity bar ---------- */
