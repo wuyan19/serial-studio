@@ -733,6 +733,7 @@ export function SearchBar({
         className={`searchbar__input${error ? " searchbar__input--err" : ""}`}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
+        autoCapitalize="off"
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
@@ -795,7 +796,7 @@ export function SerialConfigDialog({
         </h3>
         <div className="dialog__sub">{port}</div>
         <ConfigRow label="别名">
-          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，描述此端口连接的设备" className="field" />
+          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，描述此端口连接的设备" className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="波特率">
           <select value={config.baud_rate} onChange={(e) => onChange({ ...config, baud_rate: Number(e.target.value) })} className="field-select">
@@ -906,6 +907,8 @@ export function InlineAliasInput({
       ref={inputRef}
       className="alias-inline"
       value={value}
+      autoCapitalize="off"
+      spellCheck={false}
       onChange={(e) => setValue(e.target.value)}
       placeholder={placeholder}
       // 点击不冒泡到 .port-item / .tab，避免编辑中触发切换端口
@@ -1230,10 +1233,10 @@ export function SettingsPanel({
           <>
             <div className="dialog__group-label">连接（前端 → 服务器）</div>
             <ConfigRow label="主机">
-              <input autoFocus value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" />
+              <input autoFocus value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" autoCapitalize="off" spellCheck={false} />
             </ConfigRow>
             <ConfigRow label="端口">
-              <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" />
+              <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
             </ConfigRow>
             <p className="dialog__hint">改连别的远程 Serial Studio 服务</p>
             {shortcutEntry}
@@ -1254,13 +1257,13 @@ export function SettingsPanel({
             {srv ? (
               <>
                 <ConfigRow label="监听地址">
-                  <input autoFocus value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" />
+                  <input autoFocus value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" autoCapitalize="off" spellCheck={false} />
                 </ConfigRow>
                 <ConfigRow label="WS 端口">
-                  <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" />
+                  <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
                 </ConfigRow>
                 <ConfigRow label="Telnet 端口">
-                  <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" />
+                  <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
                 </ConfigRow>
                 <ConfigRow label="远程脚本">
                   <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
@@ -1541,6 +1544,8 @@ export function MacroPalette({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKey}
+          autoCapitalize="off"
+          spellCheck={false}
         />
         <div className="palette__list">
           {filtered.length === 0 && <div className="palette__empty">无匹配宏</div>}
@@ -1650,6 +1655,8 @@ export function ScriptPalette({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKey}
+          autoCapitalize="off"
+          spellCheck={false}
         />
         <div className="palette__list">
           {filtered.length === 0 && <div className="palette__empty">无匹配脚本</div>}
@@ -1754,6 +1761,8 @@ export function PortPalette({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKey}
+          autoCapitalize="off"
+          spellCheck={false}
         />
         <div className="palette__list">
           {filtered.length === 0 && <div className="palette__empty">无匹配串口</div>}
@@ -1955,13 +1964,13 @@ export function MacroEditor({
           </h3>
           <div className="dialog__sub">{isNew ? "新增宏" : name}</div>
           <ConfigRow label="名称">
-            <input value={name} onChange={(e) => onName(e.target.value)} className="field" />
+            <input value={name} onChange={(e) => onName(e.target.value)} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
           </ConfigRow>
           <ConfigRow label="描述">
-            <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+            <input value={macro.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" autoCapitalize="off" spellCheck={false} />
           </ConfigRow>
           <ConfigRow label="分组">
-            <input value={macro.group ?? ""} list="macro-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" />
+            <input value={macro.group ?? ""} list="macro-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
             <datalist id="macro-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
           </ConfigRow>
         </div>
@@ -2104,13 +2113,13 @@ export function ScriptEditor({
           </h3>
           <div className="dialog__sub">{isNew ? "新增脚本" : name}</div>
           <ConfigRow label="名称">
-            <input value={name} onChange={(e) => onName(e.target.value)} className="field" />
+            <input value={name} onChange={(e) => onName(e.target.value)} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
           </ConfigRow>
           <ConfigRow label="描述">
-            <input value={script.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" />
+            <input value={script.description ?? ""} onChange={(e) => setDesc(e.target.value)} placeholder="可选" className="field" autoCapitalize="off" spellCheck={false} />
           </ConfigRow>
           <ConfigRow label="分组">
-            <input value={script.group ?? ""} list="script-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" />
+            <input value={script.group ?? ""} list="script-groups" onChange={(e) => setGroup(e.target.value)} placeholder="可选" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
             <datalist id="script-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
           </ConfigRow>
         </div>
@@ -2126,6 +2135,7 @@ export function ScriptEditor({
             onChange={(e) => setCode(e.target.value)}
             className="field script-editor__code"
             spellCheck={false}
+            autoCapitalize="off"
             placeholder="// 在此编写 JS 脚本…"
             style={{
               fontFamily: "var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)",
@@ -2204,21 +2214,21 @@ function ParamEditor({ param, onChange, onRemove }: {
   return (
     <div className="param-editor">
       <input className="field param-editor__name" value={param.name}
-        onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="name(args 取此键)" />
+        onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="name(args 取此键)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
       <input className="field param-editor__label" value={param.label ?? ""}
-        onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" />
+        onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" autoCapitalize="off" spellCheck={false} />
       <select className="field param-editor__type" value={param.type}
         onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
         <option value="string">string</option>
         <option value="select">select</option>
       </select>
       <input className="field param-editor__default" value={param.default ?? ""}
-        onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省值(可选)" />
+        onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省值(可选)" autoCapitalize="off" spellCheck={false} />
       <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数"><IconTrash /></button>
       {isSelect && (
         <textarea className="field param-editor__options" rows={2}
           value={(param.options ?? []).join("\n")}
-          onChange={(e) => onChange({ ...param, options: e.target.value.split("\n") })}
+          onChange={(e) => onChange({ ...param, options: e.target.value.split("\n") })} autoCapitalize="off" spellCheck={false}
           placeholder="选项(每行一个)" />
       )}
     </div>
@@ -2320,7 +2330,7 @@ function StepEditor({
       <div className="step-body">
         {step.type === "send" && (
           <>
-            <textarea value={step.data} onChange={(e) => onChange({ ...step, data: e.target.value })} placeholder="发送内容" rows={1} className="field-textarea" />
+            <textarea value={step.data} onChange={(e) => onChange({ ...step, data: e.target.value })} placeholder="发送内容" rows={1} className="field-textarea" autoCapitalize="off" spellCheck={false} />
             <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6, flexWrap: "wrap" }}>
               <label className="inline-label">
                 格式
@@ -2339,7 +2349,7 @@ function StepEditor({
         {step.type === "delay" && (
           <label className="inline-label">
             等待
-            <input type="number" value={step.ms} onChange={(e) => onChange({ ...step, ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 84, margin: "0 6px" }} />
+            <input type="number" value={step.ms} onChange={(e) => onChange({ ...step, ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 84, margin: "0 6px" }} autoCapitalize="off" spellCheck={false} />
             毫秒
           </label>
         )}
@@ -2347,11 +2357,11 @@ function StepEditor({
           <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap" }}>
             <label className="inline-label" style={{ flex: 1, minWidth: 140, flexDirection: "column", alignItems: "stretch" }}>
               等待匹配
-              <input value={step.pattern} onChange={(e) => onChange({ ...step, pattern: e.target.value })} placeholder="正则 / 子串" className="field" style={{ display: "block", marginTop: 4 }} />
+              <input value={step.pattern} onChange={(e) => onChange({ ...step, pattern: e.target.value })} placeholder="正则 / 子串" className="field" style={{ display: "block", marginTop: 4 }} autoCapitalize="off" spellCheck={false} />
             </label>
             <label className="inline-label">
               超时
-              <input type="number" value={step.timeout_ms} onChange={(e) => onChange({ ...step, timeout_ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 74, margin: "0 6px" }} />
+              <input type="number" value={step.timeout_ms} onChange={(e) => onChange({ ...step, timeout_ms: Number(e.target.value) })} min={1} className="field" style={{ display: "inline-block", width: 74, margin: "0 6px" }} autoCapitalize="off" spellCheck={false} />
               ms
             </label>
           </div>
@@ -2518,13 +2528,13 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
         </h3>
         <div className="dialog__sub">连接远程 Serial Studio 服务</div>
         <ConfigRow label="地址">
-          <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" />
+          <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="端口">
-          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" />
+          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="昵称">
-          <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" />
+          <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <p className="dialog__hint">将作为远程设备卡加入串口列表，展开即按需连接。</p>
         <div className="btn-row">
@@ -2567,7 +2577,7 @@ export function ScriptRunParamsDialog({ scriptName, params, onConfirm, onCancel 
               </select>
             ) : (
               <input className="field" value={values[p.name] ?? ""}
-                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} />
+                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} autoCapitalize="off" spellCheck={false} />
             )}
           </ConfigRow>
         ))}
