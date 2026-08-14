@@ -7,7 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { ISearchDecorationOptions } from "@xterm/addon-search";
 import type { Group, PaneHalf, TermInstance } from "../types";
-import { parsePortId } from "../lib";
+import { copyText, parsePortId } from "../lib";
 import { getTheme, subscribe, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings } from "../shortcuts";
@@ -16,61 +16,64 @@ import { InlineAliasInput, PortLabel } from "./primitives";
 
 // ===== 终端视图 =====
 
-/** xterm 主题：仪器风——teal(RX) 光标、graphite 画布，ANSI 色映射到信号调色板。 */
-const TERM_THEME: ITheme = {
-  background: "#0e1014",
-  foreground: "#dde5ef",
-  cursor: "#4fd6c2",
-  cursorAccent: "#0e1014",
-  selectionBackground: "rgba(79,214,194,0.22)",
-  black: "#0e1014",
-  brightBlack: "#5c6270",
-  red: "#e5534b",
-  brightRed: "#f2a65a",
-  green: "#7ee787",
-  brightGreen: "#9cf0a6",
-  yellow: "#e3b341",
-  brightYellow: "#f2cc60",
-  blue: "#5ba3d0",
-  brightBlue: "#7fbfdd",
-  magenta: "#c792ea",
-  brightMagenta: "#d6a8f0",
-  cyan: "#4fd6c2",
-  brightCyan: "#7be3d4",
-  white: "#e6e9ef",
-  brightWhite: "#ffffff",
+/** xterm 配色映射（按主题查表；canvas 不吃 CSS 变量，故每主题一份）。
+ *  新增主题：theme.ts::THEMES 登记后在此加一条。 */
+const TERM_THEMES: Record<Theme, ITheme> = {
+  /** 暗色：仪器风——teal(RX) 光标、graphite 画布，ANSI 色映射到信号调色板。 */
+  dark: {
+    background: "#0e1014",
+    foreground: "#dde5ef",
+    cursor: "#4fd6c2",
+    cursorAccent: "#0e1014",
+    selectionBackground: "rgba(79,214,194,0.22)",
+    black: "#0e1014",
+    brightBlack: "#5c6270",
+    red: "#e5534b",
+    brightRed: "#f2a65a",
+    green: "#7ee787",
+    brightGreen: "#9cf0a6",
+    yellow: "#e3b341",
+    brightYellow: "#f2cc60",
+    blue: "#5ba3d0",
+    brightBlue: "#7fbfdd",
+    magenta: "#c792ea",
+    brightMagenta: "#d6a8f0",
+    cyan: "#4fd6c2",
+    brightCyan: "#7be3d4",
+    white: "#e6e9ef",
+    brightWhite: "#ffffff",
+  },
+  /** 亮色：象牙底 + 深石墨字 + 深青光标。 */
+  light: {
+    background: "#fbfaf5",
+    foreground: "#2c2f36",
+    cursor: "#0c7f73",
+    cursorAccent: "#fbfaf5",
+    selectionBackground: "rgba(12,127,115,0.18)",
+    black: "#fbfaf5",
+    brightBlack: "#8b9099",
+    red: "#c8392f",
+    brightRed: "#b06a16",
+    green: "#187a43",
+    brightGreen: "#1f9352",
+    yellow: "#9a6b0c",
+    brightYellow: "#b07e0a",
+    blue: "#2563a0",
+    brightBlue: "#3b78b8",
+    magenta: "#9b4d96",
+    brightMagenta: "#a85aa6",
+    cyan: "#0c7f73",
+    brightCyan: "#0d9b8a",
+    white: "#2c2f36",
+    brightWhite: "#23262b",
+  },
 };
 
 const MONO_STACK =
   "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', Consolas, ui-monospace, monospace";
 
-/** 亮色 xterm 配色：象牙底 + 深石墨字 + 深青光标。canvas 不吃 CSS 变量，故单独定义。 */
-const TERM_THEME_LIGHT: ITheme = {
-  background: "#fbfaf5",
-  foreground: "#2c2f36",
-  cursor: "#0c7f73",
-  cursorAccent: "#fbfaf5",
-  selectionBackground: "rgba(12,127,115,0.18)",
-  black: "#fbfaf5",
-  brightBlack: "#8b9099",
-  red: "#c8392f",
-  brightRed: "#b06a16",
-  green: "#187a43",
-  brightGreen: "#1f9352",
-  yellow: "#9a6b0c",
-  brightYellow: "#b07e0a",
-  blue: "#2563a0",
-  brightBlue: "#3b78b8",
-  magenta: "#9b4d96",
-  brightMagenta: "#a85aa6",
-  cyan: "#0c7f73",
-  brightCyan: "#0d9b8a",
-  white: "#2c2f36",
-  brightWhite: "#23262b",
-};
-
 function termThemeFor(t: Theme): ITheme {
-  return t === "light" ? TERM_THEME_LIGHT : TERM_THEME;
+  return TERM_THEMES[t];
 }
 
 export function TermView({
@@ -137,6 +140,7 @@ export function TermView({
       // 会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新。看最新输出用滚轮滚到底 / ⌘+End。
       scrollOnUserInput: false,
       minimumContrastRatio: 4.5, // WCAG AA：兜底所有 ANSI 着色文本对比度（提纯前景之外的第二道闸）
+      rightClickSelectsWord: true, // PuTTY 式右键选词（选中即复制配合，双通道取词）
     });
     const fit = new FitAddon();
     const search = new SearchAddon();
@@ -176,6 +180,13 @@ export function TermView({
     fitRef.current = fit;
     termRef.current = term;
     onReady({ term, fit, search });
+    // 选中即复制（VS Code copyOnSelection 同款）：拖选/双击/右键选词一完成就写系统剪贴板。
+    // hasSelection 守卫：取消选择（点空白）触发同一事件，此时不动剪贴板（否则被清空）。
+    const selDisposable = term.onSelectionChange(() => {
+      if (!term.hasSelection()) return;
+      const text = term.getSelection();
+      if (text) void copyText(text);
+    });
     const disposable = term.onData((data) => {
       // 发命令(回车)后回到底部看回显：scrollOnUserInput=false 已停用"任意输入跳底"(连 Ctrl 也误触)，
       // 这里只对回车显式滚底；Ctrl 等修饰键单独按不再误触。滚到底后回显到达会自然跟随。
@@ -193,6 +204,7 @@ export function TermView({
     return () => {
       clearTimeout(timer);
       disposable.dispose();
+      selDisposable.dispose();
       term.dispose();
       fitRef.current = null;
       termRef.current = null;
@@ -495,24 +507,27 @@ export function GroupView({
 
 // ===== 终端内搜索（Ctrl+F） =====
 
-/** 搜索高亮配色（xterm 要求纯 #RRGGBB，故按主题各给一组，跟着 token 的青系）。 */
-function searchDecorations(t: Theme): ISearchDecorationOptions {
-  if (t === "light") {
-    return {
-      matchBackground: "#cce3df",
-      activeMatchBackground: "#7fc7bd",
-      activeMatchBorder: "#0c7f73",
-      matchOverviewRuler: "#cce3df",
-      activeMatchColorOverviewRuler: "#0c7f73",
-    };
-  }
-  return {
+/** 搜索高亮配色映射（xterm 要求纯 #RRGGBB，故按主题各给一组，跟着 token 的青系）。
+ *  新增主题：在此加一条。 */
+const SEARCH_DECORATIONS: Record<Theme, ISearchDecorationOptions> = {
+  dark: {
     matchBackground: "#1c4a45",
     activeMatchBackground: "#11837a",
     activeMatchBorder: "#4fd6c2",
     matchOverviewRuler: "#1c4a45",
     activeMatchColorOverviewRuler: "#4fd6c2",
-  };
+  },
+  light: {
+    matchBackground: "#cce3df",
+    activeMatchBackground: "#7fc7bd",
+    activeMatchBorder: "#0c7f73",
+    matchOverviewRuler: "#cce3df",
+    activeMatchColorOverviewRuler: "#0c7f73",
+  },
+};
+
+function searchDecorations(t: Theme): ISearchDecorationOptions {
+  return SEARCH_DECORATIONS[t];
 }
 
 export function SearchBar({

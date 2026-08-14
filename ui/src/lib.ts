@@ -317,6 +317,36 @@ export async function persistRemotes(remotes: RemoteDevice[]) {
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
+/** 复制文本到系统剪贴板（终端选中即复制用）。
+ *  navigator.clipboard 只在安全上下文存在（Tauri 的 tauri/https.localhost、Web 的 localhost ✓；
+ *  局域网 http://192.168.x.x 访问 Web 版 ✗），缺失或失败时降级 execCommand（已废弃但
+ *  Chromium/WebKit 均仍支持，恰好覆盖非安全上下文）。返回是否成功。 */
+export async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      /* 落到兜底 */
+    }
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // 移出视口 + 防滚动穿透;readonly 防 iOS 弹键盘(本项目桌面为主,防御性保留)
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.setAttribute("readonly", "");
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 /** 下载 / 保存 JSON 文件。
  * - Tauri 桌面端：弹原生保存对话框（用户选位置 + 文件名），写文件。返回 false = 用户取消。
  * - Web：浏览器 blob 下载到下载文件夹（无取消概念，返回 true）。
