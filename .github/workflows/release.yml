@@ -89,3 +89,43 @@ jobs:
         run: |
           cp target/release/serial-studio.exe target/release/serial-studio-portable-x64.exe
           gh release upload --clobber "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" target/release/serial-studio-portable-x64.exe
+
+  # tauri-action 生成的 latest.json 有两类下载地址问题:
+  # 1) updaterJsonPreferNsisLazyDownload 使 url 指向 api.github.com 资产端点——
+  #    匿名限流(60 次/h/IP)返回 403 Forbidden,且国内直连 api.github.com 不通;
+  # 2) 即便是 github.com/.../releases/download 直链,国内直连同样不稳。
+  # 本 job 在全部矩阵完成、latest.json 汇齐后,把 url 统一改写为 ghproxy 镜像再覆盖上传。
+  mirror-updater-urls:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rewrite latest.json download URLs to ghproxy mirror
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          gh release download "$TAG" --pattern latest.json --output latest.json
+          python3 - <<'PY'
+          import json, subprocess, os
+          tag, repo = os.environ["TAG"], os.environ["GITHUB_REPOSITORY"]
+          d = json.load(open("latest.json"))
+          # asset id → 文件名(api 端点 url 无文件名,经 release 资产清单反查)
+          out = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", '.assets[] | "\\(.id) \\(.name)"']
+          ).decode()
+          assets = dict(line.split(" ", 1) for line in out.splitlines())
+          prefix = "https://ghproxy.net/https://github.com/"
+          for k, v in d["platforms"].items():
+              u = v["url"]
+              if "/assets/" in u:  # api.github.com 资产端点 → 该 tag 的 releases/download 直链
+                  aid = u.rsplit("/", 1)[-1]
+                  if aid not in assets:
+                      raise SystemExit(f"asset id {aid} 在 release 中无对应文件")
+                  u = f"https://github.com/{repo}/releases/download/{tag}/{assets[aid]}"
+              if not u.startswith("https://ghproxy.net/"):
+                  v["url"] = "https://ghproxy.net/" + u
+          json.dump(d, open("latest.json", "w"), indent=2, ensure_ascii=False)
+          print("改写完成:", {k: v["url"].rsplit('/', 1)[-1] for k, v in d["platforms"].items()})
+          PY
+          gh release upload "$TAG" latest.json --clobber
