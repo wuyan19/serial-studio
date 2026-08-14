@@ -83,10 +83,16 @@ import {
   IconMoon,
   IconSun,
 } from "./icons";
-import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
+import { getTheme, nextThemeLabel, subscribe, toggleTheme, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
+
+/** 主题切换按钮图标（按主题查表；新增主题在 theme.ts 登记后在此加一条）。 */
+const THEME_ICONS: Record<Theme, React.ReactNode> = {
+  dark: <IconMoon className="act-icon__svg" />,
+  light: <IconSun className="act-icon__svg" />,
+};
 
 /** 把 SerialConfig 渲染成仪器读数字符串：115200 8N1 · LF */
 function formatConfig(c: SerialConfig): string {
@@ -1124,8 +1130,8 @@ export default function App() {
         <div className="activity-bar__spacer" />
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
         <ActivityIcon
-          icon={theme === "dark" ? <IconMoon className="act-icon__svg" /> : <IconSun className="act-icon__svg" />}
-          title={theme === "dark" ? "切换亮色模式" : "切换暗色模式"}
+          icon={THEME_ICONS[theme]}
+          title={`切换到 ${nextThemeLabel(theme)}`}
           active={false}
           onClick={toggleTheme}
         />

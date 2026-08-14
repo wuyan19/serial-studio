@@ -97,6 +97,7 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 - **`library.tsx`(`useNamedLibrary<T>`)**:宏/脚本两个命名库的泛型实现(编辑/保存/删除/分组/导入/折叠持久化),差异面由 `LibrarySpec` 注入(App 内 `MACRO_SPEC`/`SCRIPT_SPEC`,模块级常量保引用稳定)。新增第三种命名库复用此 hook,勿再复制。
 - **`components/` 目录**:primitives(原语)/ term(终端+分栏)/ dialogs / palettes / editors / sidebar(三个活动面板)/ run-cards,App 只从 barrel `components/index.ts` 导入。
 - 宏/脚本运行卡片共用 `RunCards`(hasLogs 区分有无日志展开)。
+- **主题**:注册表在 `theme.ts::THEMES`(toggle 循环切换,CSS token + `<html data-theme>` 骨架)。新增主题单点接入清单:`THEMES` 登记 → `styles.css` 加 `:root[data-theme="xxx"]` token 覆盖块(含 `index.html` 首帧背景色与 id 数组,两处无法 import 注册表需手动同步)→ `components/term.tsx` 的 `TERM_THEMES`/`SEARCH_DECORATIONS` 各一条 → `App.tsx` 的 `THEME_ICONS` 一条。
 
 ### 持久化(五个 JSON,系统 app data 目录)
 

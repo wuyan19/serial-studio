@@ -14,15 +14,18 @@
     <style>
       html, body, #root { margin: 0; height: 100%; }
       html { background: #14161a; color-scheme: dark; }
+      /* 新增主题:在此加首帧背景色规则(防白闪),与 styles.css 的 token 覆盖块对应 */
       html[data-theme="light"] { background: #f4f2ec; color-scheme: light; }
     </style>
     <script>
       // 首帧前定主题，避免闪烁。优先用户选择，否则跟随系统。
+      // 主题 id 数组与 src/theme.ts 的 THEMES 注册表手动同步(内联脚本先于 bundle 执行,无法 import)。
       (function () {
+        var ids = ["dark", "light"];
         try {
           var s = localStorage.getItem("serial-studio-theme");
           var t =
-            s === "light" || s === "dark"
+            ids.indexOf(s) >= 0
               ? s
               : window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
               ? "light"

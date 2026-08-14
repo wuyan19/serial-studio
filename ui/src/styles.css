@@ -2172,6 +2172,10 @@ button {
 
 /* ============================================================
    Light mode — warm ivory "datasheet" chassis.
+   【新增主题】仿此块做 `:root[data-theme="xxx"]` token 覆盖,并在
+   theme.ts::THEMES / term.tsx 的 TERM_THEMES 与 SEARCH_DECORATIONS /
+   App.tsx 的 THEME_ICONS / index.html(id 数组 + 首帧背景色)各加一条;
+   本块之外的散落 light 特例(搜 `data-theme="light"`,约 10 处)需一并审计。
    信号对(RX teal / TX amber)在白底加深以保证对比度。
    ============================================================ */
 :root {
