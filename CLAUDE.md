@@ -29,6 +29,10 @@ cargo test                       # 全 workspace
 cargo test -p ss-core            # 单 crate
 cargo test -p ss-core acquire_first_opens    # 单个测试
 cargo check                      # 快速类型检查
+
+# 前端——纯函数/reducer 单测(vitest):pane-tree / lib / shortcuts / store
+npm test --prefix ui
+npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错误,以此为准)
 ```
 
 > 注意:`cargo tauri` 命令针对 `crates/tauri-app`(release.yml 用 `projectPath: crates/tauri-app`)。从仓库根目录跑 `cargo tauri dev/build` 依赖 Tauri CLI 自动定位配置;若失败,进 `crates/tauri-app` 再跑。
@@ -85,7 +89,14 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 
 ### 前端 Transport 抽象(`ui/src/transport.ts`)
 
-`Transport` 接口屏蔽 IPC/WS 协议差异,组件只懂领域(port/bytes/macro)。`LocalTransport`(Tauri invoke + event)与 `RemoteTransport`(WS)两实现,`createTransport()` 按模式选择:远程窗口(`?remote=host:port`)→ WS;Tauri 且非远程 → IPC;否则 Web → WS。模式判定见 `lib.ts::isTauri`/`getRemoteFromUrl`。
+`Transport` 接口屏蔽 IPC/WS 协议差异,组件只懂领域(port/bytes/macro)。`LocalTransport`(Tauri invoke + event)与 `RemoteTransport`(WS)两实现,继承 `TransportEventBase` 共用 on* 事件目录(新增事件只改 `TransportEventsMap` + 基类,勿在两实现各抄一份)。运行形态判定唯一入口 `lib.ts::getMode()`("local" | "remote-window" | "web"),勿在别处重组 `isTauri`/`getRemoteFromUrl`。
+
+### 前端状态与组件分层
+
+- **`store.ts`(会话 reducer,纯函数可单测)**:transport 事件回调读写的领域状态(portsByDev/devOnline/openPorts/disconnectedPorts/portConfigs/groups/layout/focusedGroupId)全在此。事件回调只 `dispatch`(永不 stale);副作用(终端实例清理、transport 调用)留在 App 回调。焦点自愈、layout 坍缩等不变量在 reducer 内维护。
+- **`library.tsx`(`useNamedLibrary<T>`)**:宏/脚本两个命名库的泛型实现(编辑/保存/删除/分组/导入/折叠持久化),差异面由 `LibrarySpec` 注入(App 内 `MACRO_SPEC`/`SCRIPT_SPEC`,模块级常量保引用稳定)。新增第三种命名库复用此 hook,勿再复制。
+- **`components/` 目录**:primitives(原语)/ term(终端+分栏)/ dialogs / palettes / editors / sidebar(三个活动面板)/ run-cards,App 只从 barrel `components/index.ts` 导入。
+- 宏/脚本运行卡片共用 `RunCards`(hasLogs 区分有无日志展开)。
 
 ### 持久化(五个 JSON,系统 app data 目录)
 
