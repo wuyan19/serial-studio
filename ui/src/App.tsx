@@ -512,6 +512,8 @@ export default function App() {
           if (!card) return prev;
           return new Map(prev).set(runId, { ...card, status: "done", success, message });
         });
+        // 成功结果 3s 后自动消失;失败保留(× 手动关),避免错过错误。
+        if (success) setTimeout(() => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; }), 3000);
       }),
       t.onScriptResult((runId, name, success, message) => {
         if (!runId) return;
