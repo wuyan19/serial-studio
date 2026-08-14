@@ -1418,20 +1418,77 @@ button {
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* 脚本参数编辑行:name/标签/类型/缺省 一行排列,select 的选项 textarea 折到下一行 */
-.param-editor {
+/* 脚本参数编辑卡片:字段行 + select 的选项 chip 列表(视觉语言同宏步骤卡) */
+.param-card {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  margin-bottom: 7px;
+  background: var(--surface-2);
+}
+.param-card__row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
 }
-.param-editor .field { margin: 0; }
-.param-editor__name { flex: 1 1 120px; }
-.param-editor__label { flex: 1 1 100px; }
-.param-editor__type { flex: 0 0 auto; }
-.param-editor__default { flex: 1 1 100px; }
-.param-editor__options { flex: 1 1 100%; width: 100%; }
+.param-card .field { margin: 0; }
+.param-card__name { flex: 1 1 130px; font-family: var(--font-mono); }
+.param-card__label { flex: 1 1 100px; }
+.param-card__type { flex: 0 0 auto; }
+.param-card__default { flex: 1 1 110px; }
+.param-card__options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.param-card__options-label {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.param-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px 1px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-3);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  line-height: 1.7;
+}
+.param-chip__x {
+  border: 0;
+  background: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 999px;
+}
+.param-chip__x:hover {
+  color: var(--danger);
+  background: var(--surface-2);
+}
+.param-chip-add {
+  border: 1px dashed var(--hairline);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-dim);
+  font-size: 12px;
+  padding: 3px 10px;
+  width: 140px;
+  outline: none;
+}
+.param-chip-add:focus {
+  border-color: var(--rx);
+  border-style: solid;
+  color: var(--ink);
+}
 .macro-editor__add { align-self: flex-start; }
 /* Shortcuts 对话框：标题/按钮固定，快捷键列表超高滚动（同 macro-editor 模式） */
 .dialog--shortcuts {

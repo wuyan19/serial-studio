@@ -366,7 +366,7 @@ export function ScriptEditor({
           <div className="dialog__group-label" style={{ marginTop: 12 }}>
             参数(运行时收集,脚本用 args.键名 读取)
           </div>
-          <div className="script-editor__hint">string=文本框;select=下拉(options 每行一个)。无参数则直接运行不弹窗。</div>
+          <div className="script-editor__hint">string=文本框;select=下拉(选项以 chip 方式添加/移除,缺省从选项中选)。无参数则直接运行不弹窗。</div>
           {(script.params ?? []).map((p, i) => (
             <ParamEditor key={i} param={p} onChange={(np) => setParam(i, np)} onRemove={() => removeParam(i)} />
           ))}
@@ -422,32 +422,73 @@ export function ScriptEditor({
   );
 }
 
-/** 脚本参数编辑行:name / 标签 / 类型(string|select) / 缺省 / select 选项。 */
+/** 脚本参数编辑卡片:字段行(键名/标签/类型/缺省)+ select 型的选项 chip 列表。
+ *  选项:输入回车(或失焦)添加、点 × 移除;已有选项时缺省改从下拉里选,杜绝无效缺省。 */
 function ParamEditor({ param, onChange, onRemove }: {
   param: ScriptParam;
   onChange: (p: ScriptParam) => void;
   onRemove: () => void;
 }) {
   const isSelect = param.type === "select";
+  const options = param.options ?? [];
+  const [optInput, setOptInput] = useState("");
+  const addOption = () => {
+    const v = optInput.trim();
+    setOptInput("");
+    if (!v || options.includes(v)) return; // 空/重复静默忽略
+    onChange({ ...param, options: [...options, v] });
+  };
+  const removeOption = (v: string) =>
+    // 移除的恰是缺省值时一并清缺省,否则下拉残留无效项
+    onChange({
+      ...param,
+      options: options.filter((o) => o !== v),
+      default: param.default === v ? undefined : param.default,
+    });
   return (
-    <div className="param-editor">
-      <input className="field param-editor__name" value={param.name}
-        onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="name(args 取此键)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
-      <input className="field param-editor__label" value={param.label ?? ""}
-        onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" autoCapitalize="off" spellCheck={false} />
-      <select className="field param-editor__type" value={param.type}
-        onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
-        <option value="string">string</option>
-        <option value="select">select</option>
-      </select>
-      <input className="field param-editor__default" value={param.default ?? ""}
-        onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省值(可选)" autoCapitalize="off" spellCheck={false} />
-      <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数"><IconTrash /></button>
+    <div className="param-card">
+      <div className="param-card__row">
+        <input className="field param-card__name" value={param.name}
+          onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="键名(args.键名)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+        <input className="field param-card__label" value={param.label ?? ""}
+          onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+        <select className="field param-card__type" value={param.type}
+          onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
+          <option value="string">string</option>
+          <option value="select">select</option>
+        </select>
+        {isSelect && options.length > 0 ? (
+          <select className="field param-card__default" value={param.default ?? ""}
+            onChange={(e) => onChange({ ...param, default: e.target.value || undefined })}>
+            <option value="">缺省(可选)</option>
+            {options.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        ) : (
+          <input className="field param-card__default" value={param.default ?? ""}
+            onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省(可选)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+        )}
+        <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数"><IconTrash /></button>
+      </div>
       {isSelect && (
-        <textarea className="field param-editor__options" rows={2}
-          value={(param.options ?? []).join("\n")}
-          onChange={(e) => onChange({ ...param, options: e.target.value.split("\n") })} autoCapitalize="off" spellCheck={false}
-          placeholder="选项(每行一个)" />
+        <div className="param-card__options">
+          <span className="param-card__options-label">选项</span>
+          {options.map((o) => (
+            <span key={o} className="param-chip">
+              {o}
+              <button className="param-chip__x" onClick={() => removeOption(o)} title={`移除 ${o}`}>×</button>
+            </span>
+          ))}
+          <input className="param-chip-add" value={optInput}
+            onChange={(e) => setOptInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault(); // 别把回车带给对话框(误触保存)
+                addOption();
+              }
+            }}
+            onBlur={addOption}
+            placeholder="输入后回车添加" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+        </div>
       )}
     </div>
   );
