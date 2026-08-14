@@ -6,6 +6,16 @@ export function isTauri(): boolean {
   return !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 }
 
+/** 运行形态（唯一判定点，勿在别处重组 isTauri/getRemoteFromUrl）：
+ *  - local        = Tauri 桌面壳的本地模式（IPC 直连本机服务）
+ *  - remote-window= Tauri 壳内的远程窗口（?remote=host:port，WS 连远程服务）
+ *  - web          = 浏览器打开 ss-server 页面（WS 连同源/已存连接） */
+export type RunMode = "local" | "remote-window" | "web";
+export function getMode(): RunMode {
+  if (getRemoteFromUrl()) return "remote-window";
+  return isTauri() ? "local" : "web";
+}
+
 export async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
@@ -206,9 +216,16 @@ export function getRemoteFromUrl(): ConnConfig | null {
   return host && port ? { host, port } : null;
 }
 
-/** 初始连接：远程窗口（?remote）> 本地模式（Tauri 连本机服务）> Web（loadConn） */
+/** 初始连接：远程窗口（?remote）> 本地模式（Tauri 连本机服务）> Web（loadConn）。按形态单点分流。 */
 export function initConn(): ConnConfig {
-  return getRemoteFromUrl() ?? (isTauri() ? { host: "127.0.0.1", port: 18700 } : loadConn());
+  switch (getMode()) {
+    case "remote-window":
+      return getRemoteFromUrl()!;
+    case "local":
+      return { host: "127.0.0.1", port: 18700 };
+    default:
+      return loadConn();
+  }
 }
 
 const MACROS_KEY = "serial-studio-macros";

@@ -1,6 +1,6 @@
 import type { Macro, PortInfo, Script, SerialConfig } from "./types";
 import { Channel } from "@tauri-apps/api/core";
-import { getRemoteFromUrl, isTauri, loadConn, tauriInvoke } from "./lib";
+import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
 
 /** acquire 结果：区分首开与附加（附加时 config 为端口实际配置，请求的配置被忽略）。 */
 export interface AcquiredResult {
@@ -76,9 +76,104 @@ const STABLE_RESET = 10_000;   // open 后稳定此时长 → 退避归零（防
 /** 在途请求的 resolve/reject 对：断连 / dispose 时统一 reject，防 Promise 永悬。 */
 interface Controller<T> { resolve: (v: T) => void; reject: (e: Error) => void }
 
+// ===== 事件目录（单一数据源） =====
+
+/** Transport 事件回调签名目录。新增事件：此处加签名 + TransportEvents 加 on* 方法，
+ *  两个实现（Local/Remote）自动获得——此前 handlers 表与 on* 方法族在两实现各抄一份，
+ *  每加一个事件要改 4 处。 */
+export interface TransportEventsMap {
+  data: (port: string, data: Uint8Array) => void;
+  ports: (ports: PortInfo[]) => void;
+  opened: (port: string) => void;
+  closed: (port: string) => void;
+  disconnected: (port: string) => void;
+  holders: (port: string, holders: number) => void;
+  metaChanged: () => void;
+  scriptsChanged: () => void;
+  error: (msg: string) => void;
+  macroResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
+  scriptResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
+  scriptLog: (runId: string, message: string) => void;
+  connected: (connected: boolean) => void;
+}
+
+type HandlerSets = { [K in keyof TransportEventsMap]: Set<TransportEventsMap[K]> };
+
+/** on* 方法族 + 订阅集合的共用底座（Local/Remote 继承）。 */
+abstract class TransportEventBase {
+  protected handlers: HandlerSets = {
+    data: new Set(),
+    ports: new Set(),
+    opened: new Set(),
+    closed: new Set(),
+    disconnected: new Set(),
+    holders: new Set(),
+    metaChanged: new Set(),
+    scriptsChanged: new Set(),
+    error: new Set(),
+    macroResult: new Set(),
+    scriptResult: new Set(),
+    scriptLog: new Set(),
+    connected: new Set(),
+  };
+
+  onData(cb: TransportEventsMap["data"]) {
+    this.handlers.data.add(cb);
+    return () => { this.handlers.data.delete(cb); };
+  }
+  onPorts(cb: TransportEventsMap["ports"]) {
+    this.handlers.ports.add(cb);
+    return () => { this.handlers.ports.delete(cb); };
+  }
+  onPortOpened(cb: TransportEventsMap["opened"]) {
+    this.handlers.opened.add(cb);
+    return () => { this.handlers.opened.delete(cb); };
+  }
+  onPortClosed(cb: TransportEventsMap["closed"]) {
+    this.handlers.closed.add(cb);
+    return () => { this.handlers.closed.delete(cb); };
+  }
+  onPortDisconnected(cb: TransportEventsMap["disconnected"]) {
+    this.handlers.disconnected.add(cb);
+    return () => { this.handlers.disconnected.delete(cb); };
+  }
+  onHolders(cb: TransportEventsMap["holders"]) {
+    this.handlers.holders.add(cb);
+    return () => { this.handlers.holders.delete(cb); };
+  }
+  onError(cb: TransportEventsMap["error"]) {
+    this.handlers.error.add(cb);
+    return () => { this.handlers.error.delete(cb); };
+  }
+  onMetaChanged(cb: TransportEventsMap["metaChanged"]) {
+    this.handlers.metaChanged.add(cb);
+    return () => { this.handlers.metaChanged.delete(cb); };
+  }
+  onScriptsChanged(cb: TransportEventsMap["scriptsChanged"]) {
+    this.handlers.scriptsChanged.add(cb);
+    return () => { this.handlers.scriptsChanged.delete(cb); };
+  }
+  onMacroResult(cb: TransportEventsMap["macroResult"]) {
+    this.handlers.macroResult.add(cb);
+    return () => { this.handlers.macroResult.delete(cb); };
+  }
+  onScriptResult(cb: TransportEventsMap["scriptResult"]) {
+    this.handlers.scriptResult.add(cb);
+    return () => { this.handlers.scriptResult.delete(cb); };
+  }
+  onScriptLog(cb: TransportEventsMap["scriptLog"]) {
+    this.handlers.scriptLog.add(cb);
+    return () => { this.handlers.scriptLog.delete(cb); };
+  }
+  onConnectedChange(cb: TransportEventsMap["connected"]) {
+    this.handlers.connected.add(cb);
+    return () => { this.handlers.connected.delete(cb); };
+  }
+}
+
 /** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）+ 自愈重连 + 心跳。
  *  服务端重启 / 强杀 / 断电后：指数退避自动重连 → 重连成功重新 list + (由 App 层) 重放开过的端口。 */
-export class RemoteTransport implements Transport {
+export class RemoteTransport extends TransportEventBase implements Transport {
   private host: string;
   private portNum: number;
   private ws!: WebSocket;
@@ -97,23 +192,9 @@ export class RemoteTransport implements Transport {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
-  private handlers = {
-    data: new Set<(port: string, data: Uint8Array) => void>(),
-    ports: new Set<(p: PortInfo[]) => void>(),
-    opened: new Set<(port: string) => void>(),
-    closed: new Set<(port: string) => void>(),
-    disconnected: new Set<(port: string) => void>(),
-    holders: new Set<(port: string, holders: number) => void>(),
-    metaChanged: new Set<() => void>(),
-    scriptsChanged: new Set<() => void>(),
-    error: new Set<(msg: string) => void>(),
-    macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
-    scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
-    scriptLog: new Set<(runId: string, message: string) => void>(),
-    connected: new Set<(c: boolean) => void>(),
-  };
 
   constructor(host: string, port: number) {
+    super();
     this.host = host;
     this.portNum = port;
     this.connect();
@@ -341,54 +422,11 @@ export class RemoteTransport implements Transport {
     return result;
   }
 
-  onData(cb: (port: string, data: Uint8Array) => void) {
-    this.handlers.data.add(cb);
-    return () => { this.handlers.data.delete(cb); };
-  }
-  onPortOpened(cb: (port: string) => void) {
-    this.handlers.opened.add(cb);
-    return () => { this.handlers.opened.delete(cb); };
-  }
-  onPortClosed(cb: (port: string) => void) {
-    this.handlers.closed.add(cb);
-    return () => { this.handlers.closed.delete(cb); };
-  }
-  onPortDisconnected(cb: (port: string) => void) {
-    this.handlers.disconnected.add(cb);
-    return () => { this.handlers.disconnected.delete(cb); };
-  }
-  onHolders(cb: (port: string, holders: number) => void) {
-    this.handlers.holders.add(cb);
-    return () => { this.handlers.holders.delete(cb); };
-  }
-  onError(cb: (msg: string) => void) {
-    this.handlers.error.add(cb);
-    return () => { this.handlers.error.delete(cb); };
-  }
-  onMetaChanged(cb: () => void) {
-    this.handlers.metaChanged.add(cb);
-    return () => { this.handlers.metaChanged.delete(cb); };
-  }
-  onScriptsChanged(cb: () => void) {
-    this.handlers.scriptsChanged.add(cb);
-    return () => { this.handlers.scriptsChanged.delete(cb); };
-  }
-  onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
-    this.handlers.macroResult.add(cb);
-    return () => { this.handlers.macroResult.delete(cb); };
-  }
-  onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
-    this.handlers.scriptResult.add(cb);
-    return () => { this.handlers.scriptResult.delete(cb); };
-  }
-  onScriptLog(cb: (runId: string, message: string) => void) {
-    this.handlers.scriptLog.add(cb);
-    return () => { this.handlers.scriptLog.delete(cb); };
-  }
-  onConnectedChange(cb: (connected: boolean) => void) {
-    this.handlers.connected.add(cb);
+  override onConnectedChange(cb: (connected: boolean) => void) {
+    const un = super.onConnectedChange(cb);
+    // 订阅即回报当前状态：晚订阅者（重连期间挂载的组件）能立即拿到“已连接”
     if (this.ws.readyState === WebSocket.OPEN) cb(true);
-    return () => { this.handlers.connected.delete(cb); };
+    return un;
   }
 
   dispose() {
@@ -402,28 +440,13 @@ export class RemoteTransport implements Transport {
 }
 
 /** IPC 实现（本地模式）：Tauri invoke 命令 + event 监听。绕过 WS，进程内直连。 */
-export class LocalTransport implements Transport {
+export class LocalTransport extends TransportEventBase implements Transport {
   private unlisten: Array<() => void> = [];
   /** per-port 字节流通道。Channel 无需 unlisten，关闭走 close_port_stream 摘除。 */
   private streamChannels = new Map<string, Channel<ArrayBuffer>>();
-  private handlers = {
-    data: new Set<(port: string, data: Uint8Array) => void>(),
-    ports: new Set<(p: PortInfo[]) => void>(),
-    opened: new Set<(port: string) => void>(),
-    closed: new Set<(port: string) => void>(),
-    disconnected: new Set<(port: string) => void>(),
-    holders: new Set<(port: string, holders: number) => void>(),
-    metaChanged: new Set<() => void>(),
-    scriptsChanged: new Set<() => void>(),
-    error: new Set<(msg: string) => void>(),
-    macroResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
-    scriptResult: new Set<(runId: string | undefined, name: string, success: boolean, msg: string) => void>(),
-    scriptLog: new Set<(runId: string, message: string) => void>(),
-    connected: new Set<(c: boolean) => void>(),
-  };
 
   constructor() {
-    this.handlers.connected.forEach((cb) => cb(true));
+    super();
     this.setupEvents();
   }
 
@@ -551,54 +574,10 @@ export class LocalTransport implements Transport {
     return tauriInvoke<string>("get_script_skill");
   }
 
-  onData(cb: (port: string, data: Uint8Array) => void) {
-    this.handlers.data.add(cb);
-    return () => { this.handlers.data.delete(cb); };
-  }
-  onPortOpened(cb: (port: string) => void) {
-    this.handlers.opened.add(cb);
-    return () => { this.handlers.opened.delete(cb); };
-  }
-  onPortClosed(cb: (port: string) => void) {
-    this.handlers.closed.add(cb);
-    return () => { this.handlers.closed.delete(cb); };
-  }
-  onPortDisconnected(cb: (port: string) => void) {
-    this.handlers.disconnected.add(cb);
-    return () => { this.handlers.disconnected.delete(cb); };
-  }
-  onHolders(cb: (port: string, holders: number) => void) {
-    this.handlers.holders.add(cb);
-    return () => { this.handlers.holders.delete(cb); };
-  }
-  onError(cb: (msg: string) => void) {
-    this.handlers.error.add(cb);
-    return () => { this.handlers.error.delete(cb); };
-  }
-  onMetaChanged(cb: () => void) {
-    this.handlers.metaChanged.add(cb);
-    return () => { this.handlers.metaChanged.delete(cb); };
-  }
-  onScriptsChanged(cb: () => void) {
-    this.handlers.scriptsChanged.add(cb);
-    return () => { this.handlers.scriptsChanged.delete(cb); };
-  }
-  onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
-    this.handlers.macroResult.add(cb);
-    return () => { this.handlers.macroResult.delete(cb); };
-  }
-  onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void) {
-    this.handlers.scriptResult.add(cb);
-    return () => { this.handlers.scriptResult.delete(cb); };
-  }
-  onScriptLog(cb: (runId: string, message: string) => void) {
-    this.handlers.scriptLog.add(cb);
-    return () => { this.handlers.scriptLog.delete(cb); };
-  }
-  onConnectedChange(cb: (connected: boolean) => void) {
-    this.handlers.connected.add(cb);
+  override onConnectedChange(cb: (connected: boolean) => void) {
+    const un = super.onConnectedChange(cb);
     cb(true); // IPC 永远已连接
-    return () => { this.handlers.connected.delete(cb); };
+    return un;
   }
 
   dispose() {
@@ -609,10 +588,9 @@ export class LocalTransport implements Transport {
   }
 }
 
-/** 按模式创建 Transport：本地 → IPC；远程/Web → WS */
+/** 按运行形态创建 Transport：本地 → IPC；远程窗口/Web → WS。形态判定唯一入口 getMode()。 */
 export function createTransport(): Transport {
-  const remote = getRemoteFromUrl();
-  if (isTauri() && !remote) return new LocalTransport();
-  const { host, port } = remote ? remote : loadConn();
+  if (getMode() === "local") return new LocalTransport();
+  const { host, port } = getRemoteFromUrl() ?? loadConn();
   return new RemoteTransport(host, port);
 }

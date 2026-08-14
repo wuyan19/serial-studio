@@ -1,36 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   ActionId,
   ConnConfig,
-  Group,
   Macro,
-  MacroResult,
   PaneHalf,
   PaneNode,
   PortId,
   PortInfo,
   RemoteDevice,
   Script,
-  ScriptResult,
   ScriptRunCard,
   MacroRunCard,
   SerialConfig,
   SrvSettings,
   TermInstance,
 } from "./types";
-import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
+import { leafGroupIds } from "./pane-tree";
 import {
+  DEFAULT_CONFIG,
   downloadJson,
-  getRemoteFromUrl,
+  getMode,
   initConn,
-  dissolveGroup,
-  groupBy,
   isTauri,
-  renameGroup,
-  upsertNamed,
   loadConfig,
-  loadMacrosLocal,
-  loadScriptsLocal,
   parsePortId,
   persistMacros,
   persistRemotes,
@@ -40,6 +32,15 @@ import {
   saveConn,
   tauriInvoke,
 } from "./lib";
+import { initialSession, sessionReducer } from "./store";
+import {
+  isMacroLike,
+  isScriptLike,
+  loadMacros,
+  loadScripts,
+  type LibrarySpec,
+  useNamedLibrary,
+} from "./library";
 import { LocalTransport, RemoteTransport, type Transport } from "./transport";
 import {
   AboutDialog,
@@ -47,9 +48,7 @@ import {
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
-  GroupHead,
   GroupView,
-  InlineAliasInput,
   MacroEditor,
   MacroPalette,
   ScriptPalette,
@@ -57,6 +56,7 @@ import {
   newStep,
   PortLabel,
   RemoteDialog,
+  RunCards,
   ScriptEditor,
   ScriptRunParamsDialog,
   ScriptSkillDialog,
@@ -67,22 +67,17 @@ import {
   TermView,
   validateMacro,
 } from "./components";
+import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow } from "./components/sidebar";
 import {
   IconAlert,
   IconBolt,
   IconClose,
   IconCode,
-  IconEdit,
-  IconExport,
   IconGear,
   IconGlobe,
   IconInfo,
-  IconImport,
-  IconPlay,
   IconPlug,
-  IconPlus,
   IconPower,
-  IconRefresh,
   IconSliders,
   IconTrash,
   IconMoon,
@@ -140,51 +135,31 @@ function Leds({ port, activityRef }: { port: string; activityRef: React.MutableR
   );
 }
 
-/** 对象是否像一个 Macro（有 steps 数组）。 */
-function isMacroLike(v: unknown): v is Macro {
-  return !!v && typeof v === "object" && Array.isArray((v as { steps?: unknown }).steps);
-}
-function uniqueMacroName(base: string, taken: Record<string, unknown>): string {
-  if (!taken[base]) return base;
-  let i = 2;
-  while (taken[`${base} ${i}`]) i++;
-  return `${base} ${i}`;
-}
-/** 导入 JSON → [名称, 宏]：兼容 {"名称": 宏} 记录 与 单个宏对象。 */
-function parseImportedMacros(data: unknown, existing: Record<string, Macro>): [string, Macro][] {
-  if (isMacroLike(data)) return [[uniqueMacroName("导入的宏", existing), data]];
-  if (data && typeof data === "object") {
-    const out: [string, Macro][] = [];
-    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
-      if (isMacroLike(v)) out.push([k, v]);
-    }
-    return out;
-  }
-  return [];
-}
+/** 宏库差异面（模块级常量：仅依赖导入，引用稳定，供 useNamedLibrary 挂载加载不重跑）。 */
+const MACRO_SPEC: LibrarySpec<Macro> = {
+  label: "宏",
+  isItemLike: isMacroLike,
+  validateItem: (m) => validateMacro(m),
+  newItem: () => ({ description: "", steps: [newStep("send")] }),
+  importBase: "导入的宏",
+  importHint: '导入失败：未找到有效宏（需 {"名称": {steps:[...]}} 或单个宏）',
+  collapsedKey: "macro-groups-collapsed",
+  load: loadMacros,
+  persist: persistMacros,
+};
 
-/** 对象是否像一个 Script（有 code 字符串）。 */
-function isScriptLike(v: unknown): v is Script {
-  return !!v && typeof v === "object" && typeof (v as { code?: unknown }).code === "string";
-}
-function uniqueScriptName(base: string, taken: Record<string, unknown>): string {
-  if (!taken[base]) return base;
-  let i = 2;
-  while (taken[`${base} ${i}`]) i++;
-  return `${base} ${i}`;
-}
-/** 导入 JSON → [名称, 脚本]：兼容 {"名称": 脚本} 记录 与 单个脚本对象。 */
-function parseImportedScripts(data: unknown, existing: Record<string, Script>): [string, Script][] {
-  if (isScriptLike(data)) return [[uniqueScriptName("导入的脚本", existing), data]];
-  if (data && typeof data === "object") {
-    const out: [string, Script][] = [];
-    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
-      if (isScriptLike(v)) out.push([k, v]);
-    }
-    return out;
-  }
-  return [];
-}
+/** 脚本库差异面。 */
+const SCRIPT_SPEC: LibrarySpec<Script> = {
+  label: "脚本",
+  isItemLike: isScriptLike,
+  validateItem: (s) => (s.code.trim() ? null : "脚本代码不能为空"),
+  newItem: () => ({ code: "// 在此写 JS 脚本\n" }),
+  importBase: "导入的脚本",
+  importHint: '导入失败：未找到有效脚本（需 {"名称": {code:"..."}} 或单个脚本）',
+  collapsedKey: "script-groups-collapsed",
+  load: loadScripts,
+  persist: persistScripts,
+};
 
 /** Web/远程窗口：把单连接配置派生为单设备列表（id 固定 "remote"，无 localStorage 持久化）。 */
 function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
@@ -197,28 +172,23 @@ function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
  * 仪器风布局：活动栏 + 可收起次侧栏 + 通道条 + 主终端区。
  */
 export default function App() {
-  const isRemote = !!getRemoteFromUrl();
-  const isLocal = isTauri() && !isRemote;
-  // portsByDev：按设备域分桶的端口列表（key=devId）。本地 devId="local"，远程=设备 UUID/窗口 "remote"。
-  // devId 由桶 key 隐含（不进 PortInfo），保后端契约零侵入。多 Transport 共存的核心数据结构。
-  const [portsByDev, setPortsByDev] = useState<Record<string, PortInfo[]>>({});
-  const [macros, setMacros] = useState<Record<string, Macro>>({});
+  // 运行形态（唯一判定点 lib.ts::getMode）：本地桌面 / 远程窗口 / Web
+  const mode = getMode();
+  const isRemote = mode === "remote-window";
+  const isLocal = mode === "local";
+  // ===== 会话状态（reducer）：transport 事件回调会读写的领域状态统一于此。
+  // 事件回调只 dispatch（永不 stale），不再需要 per-state 的 ref 镜像。见 store.ts。
+  const [session, dispatch] = useReducer(sessionReducer, initialSession);
+  const { portsByDev, devOnline, openPorts, disconnectedPorts, portConfigs, groups, layout, focusedGroupId } = session;
+  // 唯一的快照镜像：bindTransport（空依赖、只绑一次）读最新会话状态用（重连重放的端口清单）。
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   /** 宏运行卡片:runId → MacroRunCard(贯穿 running→done,并发各自,就地切换)。 */
   const [macroRuns, setMacroRuns] = useState<Map<string, MacroRunCard>>(new Map());
-  // devOnline[devId]：该设备 WS/IPC 是否就绪，驱动折叠卡状态点。
-  const [devOnline, setDevOnline] = useState<Record<string, boolean>>({});
+  // devOnline[devId]：该设备 WS/IPC 是否就绪，驱动折叠卡状态点（reducer 内）。
   /** 全局连接标志（兼容旧消费方：通道条/Web 远程提示）。本地看 devOnline["local"]，远程看任一就绪。 */
   const connected = isLocal ? !!devOnline["local"] : Object.values(devOnline).some(Boolean);
-  const [openPorts, setOpenPorts] = useState<PortId[]>([]);
-  /** 设备断开(USB 拔出)但 tab 保留的端口——可手动重连。区别于主动关(从 openPorts 移除)。 */
-  const [disconnectedPorts, setDisconnectedPorts] = useState<Set<PortId>>(new Set());
-  const [portConfigs, setPortConfigs] = useState<Record<string, SerialConfig>>({});
-  /** editor-group 分栏：每个 group = 标签栏 + 终端区。端口唯一归属一个 group（不扇出）。
-   *  单 group（layout 单叶）时 openPorts == groups[g1].ports，行为同单视图。多 group 见后续 Phase。 */
-  const groupIdSeq = useRef(1);
-  const [groups, setGroups] = useState<Record<string, Group>>(() => ({ g1: { id: "g1", ports: [], activePort: "" } }));
-  const [layout, setLayout] = useState<PaneNode>(() => createRoot("g1"));
-  const [focusedGroupId, setFocusedGroupId] = useState("g1");
+  /** editor-group 分栏：每个 group = 标签栏 + 终端区。端口唯一归属一个 group（不扇出）。reducer 内。 */
   /** 拖拽分栏时的落点高亮（{overGroupId, overHalf} | null；onDragEnd/Leave 清）。 */
   const [dropHint, setDropHint] = useState<{ overGroupId: string; overHalf: PaneHalf } | null>(null);
   /** group 终端容器 DOM 集合（GroupView 上报）。TermView 经 DOM reparent 挪入对应容器，
@@ -251,19 +221,10 @@ export default function App() {
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [editing, setEditing] = useState<{ name: string; isNew: boolean } | null>(null);
-  const [editorName, setEditorName] = useState("");
-  const [editorMacro, setEditorMacro] = useState<Macro>({ steps: [] });
-  const [editorError, setEditorError] = useState("");
-  const [scripts, setScripts] = useState<Record<string, Script>>({});
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
   const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
   /** 当前展开日志的卡片 runId(null = 收起);一次展开一个卡片。 */
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
-  const [editingScript, setEditingScript] = useState<{ name: string; isNew: boolean } | null>(null);
-  const [editorScriptName, setEditorScriptName] = useState("");
-  const [editorScript, setEditorScript] = useState<Script>({ code: "" });
-  const [editorScriptError, setEditorScriptError] = useState("");
   type ActivityView = "ports" | "macros" | "scripts" | null;
   const [activity, setActivity] = useState<ActivityView>(null);
   /** 侧栏宽度(可拖动调整,localStorage 持久化,clamp 180–480)。 */
@@ -272,28 +233,6 @@ export default function App() {
     return saved >= 180 && saved <= 480 ? saved : 240;
   });
   const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
-  /** 侧栏分组折叠状态(收起的组名集合,localStorage 持久化)。 */
-  const [macroCollapsed, setMacroCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("macro-groups-collapsed") ?? "[]") as string[]));
-  const [scriptCollapsed, setScriptCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("script-groups-collapsed") ?? "[]") as string[]));
-  const toggleMacroGroup = (g: string) =>
-    setMacroCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(g)) next.delete(g); else next.add(g);
-      return next;
-    });
-  const toggleScriptGroup = (g: string) =>
-    setScriptCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(g)) next.delete(g); else next.add(g);
-      return next;
-    });
-  // 折叠态写盘集中于此(单一数据源):各 handler 只 setState,不再就地 setItem。
-  useEffect(() => {
-    localStorage.setItem("macro-groups-collapsed", JSON.stringify([...macroCollapsed]));
-  }, [macroCollapsed]);
-  useEffect(() => {
-    localStorage.setItem("script-groups-collapsed", JSON.stringify([...scriptCollapsed]));
-  }, [scriptCollapsed]);
   /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
   const [portCollapsed, setPortCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("port-groups-collapsed") ?? "[]") as string[]));
   const togglePortGroup = (devId: string) =>
@@ -324,6 +263,78 @@ export default function App() {
     tone?: "primary" | "danger";
     onConfirm: () => void;
   } | null>(null);
+
+  // ===== 宏/脚本库（泛型 useNamedLibrary，差异面见 MACRO_SPEC/SCRIPT_SPEC）=====
+  // ui 三件套：确认弹窗 / 轻提示 / 错误横幅（库内部行为与文案由此触达宿主）。
+  const libNotify = useCallback((msg: string, ms = 4000) => {
+    setNotice(msg);
+    setTimeout(() => setNotice(""), ms);
+  }, []);
+  const libError = useCallback((msg: string, ms = 5000) => {
+    setErrorMsg(msg);
+    setTimeout(() => setErrorMsg(""), ms);
+  }, []);
+  // 库内确认(删除/解散)onConfirm 完成后自动关弹窗——对齐重构前各 handler 末尾的 setConfirmState(null)
+  const libConfirm = useCallback((s: {
+    title: string;
+    icon?: React.ReactNode;
+    message: string;
+    confirmText?: string;
+    tone?: "primary" | "danger";
+    onConfirm: () => void | Promise<void>;
+  }) => {
+    setConfirmState({
+      ...s,
+      onConfirm: async () => {
+        await s.onConfirm();
+        setConfirmState(null);
+      },
+    });
+  }, []);
+  const libUI = useMemo(
+    () => ({ confirm: libConfirm, notify: libNotify, error: libError }),
+    [libConfirm, libNotify, libError]
+  );
+  const macroLib = useNamedLibrary(MACRO_SPEC, libUI);
+  const scriptLib = useNamedLibrary(SCRIPT_SPEC, libUI);
+  // 解构成 JSX 原名，侧栏/编辑器零改动
+  const {
+    items: macros,
+    editing,
+    editorName,
+    editorItem: editorMacro,
+    editorError,
+    setEditorName,
+    setEditorItem: setEditorMacro,
+    openEditor: openMacroEditor,
+    saveDef: saveMacroDef,
+    askDelete: deleteMacro,
+    renameItemGroup: renameMacroGroup,
+    askDissolve: askDissolveMacroGroup,
+    importFile: onImportFile,
+    collapsed: macroCollapsed,
+    toggleGroup: toggleMacroGroup,
+    groupNames: macroGroupNames,
+  } = macroLib;
+  const {
+    items: scripts,
+    editing: editingScript,
+    editorName: editorScriptName,
+    setEditorName: setEditorScriptName,
+    editorItem: editorScript,
+    setEditorItem: setEditorScript,
+    editorError: editorScriptError,
+    openEditor: openScriptEditor,
+    saveDef: saveScriptDef,
+    askDelete: deleteScript,
+    renameItemGroup: renameScriptGroup,
+    askDissolve: askDissolveScriptGroup,
+    importFile: onImportScripts,
+    collapsed: scriptCollapsed,
+    toggleGroup: toggleScriptGroup,
+    groupNames: scriptGroupNames,
+    reload: reloadScripts,
+  } = scriptLib;
   /** 正在编辑别名的端口 + 触发位置（null = 未编辑）。
    *  where 必要：打开端口同时在「端口列表」和「tab 栏」两处出现，若都只按 port 判定，
    *  两处会各挂一个 InlineAliasInput 互抢焦点、随即互触 blur 全部关闭（表现为进不去编辑态）。
@@ -346,35 +357,12 @@ export default function App() {
   const terminalsRef = useRef<Map<string, TermInstance>>(new Map());
   const importInputRef = useRef<HTMLInputElement>(null);
   const scriptImportInputRef = useRef<HTMLInputElement>(null);
-  const focusedGroupIdRef = useRef("g1");
-  focusedGroupIdRef.current = focusedGroupId;
   /** 端口 → 所属 group 反查（每 render 重建；端口唯一归属一个 group）。 */
   const groupOfPort: Map<string, string> = new Map();
   for (const g of Object.values(groups)) for (const p of g.ports) groupOfPort.set(p, g.id);
-  // 镜像到 ref：prunePort 经 onPortClosed 调用是 stale 闭包（transport effect 只绑一次），
-  // 必须读 ref.current 拿最新值，否则用挂载时的空 Map → gid 永远 undefined → 远端关端口留僵尸 tab
-  const groupOfPortRef = useRef(groupOfPort);
-  groupOfPortRef.current = groupOfPort;
-  const groupsRef = useRef(groups);
-  groupsRef.current = groups;
   /** 全局活动端口 = 聚焦 group 的活动端口（派生）。channel-strip / macro / 搜索等消费者零改动。 */
   const activePort = groups[focusedGroupId]?.activePort ?? "";
-  const activeRef = useRef("");
-  activeRef.current = activePort;
-  // 镜像 openPorts / disconnectedPorts 到 ref：bindTransport 是空依赖 useCallback（只绑一次），
-  // 其 onConnectedChange 闭包读的是挂载时快照 → 走 ref.current 拿最新值（断开标记 / 重放都依赖）。
-  const openPortsRef = useRef(openPorts);
-  openPortsRef.current = openPorts;
-  const disconnectedPortsRef = useRef(disconnectedPorts);
-  disconnectedPortsRef.current = disconnectedPorts;
-  // reconnectPort 在下方定义，这里先建 ref 占位，定义后同步 current，供 bindTransport 重连后重放调用。
-  const reconnectPortRef = useRef<(pid: PortId) => Promise<void>>(async () => {});
 
-  // 焦点 group 被删（坍缩）→ 自愈回退到首个 leaf，保 channel-strip/macro 上下文不指向死 group
-  useEffect(() => {
-    const leaves = leafGroupIds(layout);
-    if (leaves.length && !leaves.includes(focusedGroupId)) setFocusedGroupId(leaves[0]);
-  }, [layout, focusedGroupId]);
   // dev 不变量校验：INV-1 端口唯一归属、INV-3 layout 叶子集 == groups 键集
   useEffect(() => {
     if (!(import.meta as any).env?.DEV) return;
@@ -389,12 +377,10 @@ export default function App() {
       console.error("[INV-3] layout 叶子 != groups:", leaves, gkeys);
     }
   }, [groups, layout]);
-  /** 快捷键处理器表：每 render 用最新闭包刷新；dispatch 经 ref 读，菜单/action 闭包不陈旧。
+  /** 快捷键处理器表：每 render 用最新闭包刷新；dispatchAction 经 ref 读，菜单/action 闭包不陈旧。
    *  Partial：terminal 作用域（zoom）不经此 dispatch（在 xterm handler 内自处理）。 */
   const handlersRef = useRef<Partial<Record<ActionId, (arg?: string) => void>>>({});
-  /** 任一模态打开 → 抑制全局快捷键（不抢对话框裸 Enter/Esc、不抢输入）。 */
-  const modalOpenRef = useRef(false);
-  const dispatch = useCallback((action: ActionId, arg?: string) => {
+  const dispatchAction = useCallback((action: ActionId, arg?: string) => {
     handlersRef.current[action]?.(arg);
   }, []);
   /** per-port 字节流活动时间戳——驱动 TX/RX LED。 */
@@ -419,23 +405,56 @@ export default function App() {
     return counts;
   }, [groups]);
 
-  /** 把 Transport 的所有事件绑到指定 devId：onData/onPortClosed 用 portIdOf 还原复合键，
-   *  onPorts 写入 portsByDev[devId] 桶，onConnectedChange 写 devOnline[devId]。返回取消函数。 */
+  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
+   *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
+  const openPort = useCallback(async (pid: PortId, config: SerialConfig) => {
+    const { devId, name } = parsePortId(pid);
+    try {
+      const res = await transportsRef.current.get(devId)?.open(name, config);
+      if (!res) return undefined;
+      // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
+      dispatch({ type: "port_acquired", pid, config: res.config });
+      if (!res.opened) {
+        // 附加到已开端口：请求的 config 被忽略，告知实际配置
+        const c = res.config;
+        setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。`);
+        setTimeout(() => setNotice(""), 6000);
+      }
+      return res;
+    } catch (e) {
+      setErrorMsg(String(e));
+      setTimeout(() => setErrorMsg(""), 5000);
+      return undefined;
+    }
+  }, []);
+
+  /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
+   *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
+  const prunePort = useCallback((pid: PortId) => {
+    terminalsRef.current.delete(pid);
+    activityRef.current.delete(pid);
+    dispatch({ type: "prune_port", pid });
+  }, []);
+
+  /** 把 Transport 的所有事件绑到指定 devId。事件回调只 dispatch（永不 stale），
+   *  重连重放经 sessionRef 读最新会话状态。返回取消函数。 */
   const bindTransport = useCallback((devId: string, t: Transport): (() => void)[] => {
     return [
-      t.onPorts((list) => setPortsByDev((prev) => ({ ...prev, [devId]: list }))),
+      t.onPorts((list) => dispatch({ type: "ports_listed", devId, ports: list })),
       t.onConnectedChange((conn) => {
-        setDevOnline((prev) => ({ ...prev, [devId]: conn }));
+        dispatch({ type: "dev_online", devId, online: conn });
         if (conn) {
           t.list();
-          // 重连成功：重放本设备开着的端口（首次连上时 disconnectedPorts 为空 → 空操作，天然区分首次/重连）。
-          // 复用 reconnectPort——用原配置 openPort + 成功才清断开标记；失败则 tab 保持断开态待手动重试。
-          const mine = [...disconnectedPortsRef.current].filter(
-            (pid) => parsePortId(pid).devId === devId
-          );
-          for (const pid of mine) reconnectPortRef.current?.(pid);
+          // 重连成功：重放本设备断开待重连的端口（首次连上时集合为空 → 空操作，天然区分首次/重连）。
+          // 配置取 acquire 时记录的 portConfigs（断开待重连的端口必有记录），失败则 tab 保持断开态待手动重试。
+          const st = sessionRef.current;
+          for (const pid of st.disconnectedPorts) {
+            if (parsePortId(pid).devId !== devId) continue;
+            void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
+          }
         } else {
-          // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)
+          // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)。
+          // 端口"断开待重连"标记与端口行灭灯由 reducer(dev_online=false)处理。
           setScriptRuns((prev) => {
             const n = new Map(prev);
             for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
@@ -446,20 +465,6 @@ export default function App() {
             for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
             return n;
           });
-          // 标本设备开着的端口为"断开待重连"（重连成功后由上面分支重放）。
-          setDisconnectedPorts((prev) => {
-            const n = new Set(prev);
-            for (const pid of openPortsRef.current)
-              if (parsePortId(pid).devId === devId) n.add(pid);
-            return n;
-          });
-          // 整设备端口 opened 置 false，灭掉端口行假绿灯：WS 断后 portsByDev 不再刷新，会冻在断开前
-          // 的旧状态（p.opened 仍 true → 小灯假绿）。端口行直接读 p.opened，无需改渲染。重连后 t.list() 覆盖。
-          setPortsByDev((prev) =>
-            prev[devId]
-              ? { ...prev, [devId]: prev[devId].map((p) => ({ ...p, opened: false })) }
-              : prev
-          );
         }
       }),
       t.onData((port, data) => {
@@ -471,13 +476,7 @@ export default function App() {
         t.list();
         // 端口重新可用(本会话 reopen 或别处)→ 清该 tab 断开标记。保留占有权方案下
         // holder 真在、物理层已重建,清红是正确的(非上一版的"假绿")。
-        const pid = portIdOf(devId, port);
-        setDisconnectedPorts((prev) => {
-          if (!prev.has(pid)) return prev;
-          const n = new Set(prev);
-          n.delete(pid);
-          return n;
-        });
+        dispatch({ type: "port_opened_evt", devId, port });
       }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
@@ -487,8 +486,7 @@ export default function App() {
       t.onPortDisconnected((port) => {
         // 设备物理断开:保留 tab(scrollback 可继续看),仅标"已断开"待手动重连。
         // 不动 openPorts/terminalsRef/groups——重连后 onData 自动接回同一 term。
-        const pid = portIdOf(devId, port);
-        setDisconnectedPorts((prev) => new Set(prev).add(pid));
+        dispatch({ type: "port_disconnected_evt", devId, port });
         t.list();
       }),
       t.onHolders(() => t.list()),
@@ -534,8 +532,7 @@ export default function App() {
         });
       }),
     ];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openPort, prunePort, reloadScripts]);
 
   // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
   // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。
@@ -569,11 +566,7 @@ export default function App() {
       map.get(id)?.dispose();
       map.delete(id);
       addrMap.delete(id);
-      setDevOnline((prev) => {
-        const n = { ...prev };
-        delete n[id];
-        return n;
-      });
+      dispatch({ type: "teardown_dev", devId: id });
     };
     const create = (d: RemoteDevice) => {
       const t = new RemoteTransport(d.host, d.port);
@@ -618,28 +611,6 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, []);
-
-  // 宏加载：Tauri → invoke load_macros；Web → localStorage 回退
-  useEffect(() => {
-    if (isTauri()) {
-      tauriInvoke<Record<string, Macro>>("load_macros").then(setMacros).catch((e) => console.error("加载宏失败", e));
-    } else {
-      setMacros(loadMacrosLocal());
-    }
-  }, []);
-
-  // 脚本加载/重载：Tauri → invoke load_scripts；Web → localStorage 回退。
-  // 抽成函数供 mount + scriptsChanged 广播复用(MCP/Tauri 写入后即时刷新,不必重启)。
-  const reloadScripts = () => {
-    if (isTauri()) {
-      tauriInvoke<Record<string, Script>>("load_scripts").then(setScripts).catch((e) => console.error("加载脚本失败", e));
-    } else {
-      setScripts(loadScriptsLocal());
-    }
-  };
-  useEffect(() => {
-    reloadScripts();
   }, []);
 
   // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）；Web/远程窗口不加载
@@ -709,38 +680,9 @@ export default function App() {
   // 主题：订阅 theme 模块，切换时刷新按钮图标
   useEffect(() => subscribe(setThemeState), []);
 
-  // 全局快捷键：单一 capture listener——combo 查 global 表 → dispatch。
-  // 焦点在输入控件或任一模态打开时抑制（不抢对话框裸 Enter/Esc、不抢输入）。
+  // 全局快捷键：单一 capture listener——combo 查 global 表 → dispatchAction。
+  // 定义移至 modalOpen 计算之后（任一模态打开时不挂 listener，天然抑制——不抢对话框裸 Enter/Esc、不抢输入）。
   // 桌面若该 combo 已是菜单 accelerator，OS 先于 webview 拦截，listener 本就不会收到。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      // 焦点在表单控件时跳过（不抢输入）；但 xterm 聚焦时 e.target 是隐藏的
-      // .xterm-helper-textarea（终端的输入/IME 代理），那属于“终端聚焦”而非“填表”，
-      // 必须放行——否则终端一聚焦，所有全局快捷键失效。
-      if (
-        t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.tagName === "SELECT" ||
-          t.isContentEditable) &&
-        !t.closest(".xterm")
-      ) {
-        return;
-      }
-      if (modalOpenRef.current) return;
-      const combo = eventToCombo(e);
-      if (!combo) return;
-      const hit = findAction(combo, "global");
-      if (hit) {
-        e.preventDefault();
-        e.stopPropagation();
-        dispatch(hit.id, hit.arg);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [dispatch]);
 
   // 原生菜单（B 层）暂不启用：Windows 上建菜单会占一条菜单栏，而所有全局快捷键已由
   // 上面的 listener 覆盖（菜单只是同一批动作的第二入口，属冗余）。要恢复原生菜单 /
@@ -751,37 +693,6 @@ export default function App() {
   useEffect(() => {
     setSearchOpen(false);
   }, [activePort]);
-
-  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。 */
-  const openPort = async (pid: PortId, config: SerialConfig) => {
-    const { devId, name } = parsePortId(pid);
-    try {
-      const res = await transportsRef.current.get(devId)?.open(name, config);
-      if (!res) return undefined;
-      // 成功占有（首开或附加）：创建本会话的终端标签，并记录端口实际配置供通道条展示
-      setOpenPorts((prev) => (prev.includes(pid) ? prev : [...prev, pid]));
-      // 进聚焦 group 并设为活动端口（端口唯一归属：openPort 是新开，此前不在任何 group）
-      const fg = focusedGroupIdRef.current;
-      setGroups((g) => {
-        const cur = g[fg];
-        if (!cur) return g;
-        const ports = cur.ports.includes(pid) ? cur.ports : [...cur.ports, pid];
-        return { ...g, [fg]: { ...cur, ports, activePort: pid } };
-      });
-      setPortConfigs((prev) => ({ ...prev, [pid]: res.config }));
-      if (!res.opened) {
-        // 附加到已开端口：请求的 config 被忽略，告知实际配置
-        const c = res.config;
-        setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。`);
-        setTimeout(() => setNotice(""), 6000);
-      }
-      return res;
-    } catch (e) {
-      setErrorMsg(String(e));
-      setTimeout(() => setErrorMsg(""), 5000);
-      return undefined;
-    }
-  };
 
   /** 打开对话框确认：先 open，仅首开（opened=true）才落别名——与串口参数同逻辑（附加时别名忽略）。 */
   const confirmOpen = async (config: SerialConfig, alias: string) => {
@@ -809,38 +720,7 @@ export default function App() {
     }
   };
 
-  /** 从分栏与端口清单移除端口（关端口共用：用户主动关 closePort + 远端被关 onPortClosed）。
-   *  所属 group 的 ports 移除 + activePort 回退；group 空（且非唯一根）→ 删 group + removeLeaf 坍缩，
-   *  focused 回退交给 effect 自愈。全用函数式 setState，transport effect 的 stale 闭包调用也安全。 */
-  const prunePort = (pid: PortId) => {
-    const gid = groupOfPortRef.current.get(pid);
-    setOpenPorts((prev) => prev.filter((p) => p !== pid));
-    setPortConfigs((prev) => {
-      if (!prev[pid]) return prev;
-      const next = { ...prev };
-      delete next[pid];
-      return next;
-    });
-    terminalsRef.current.delete(pid);
-    activityRef.current.delete(pid);
-    if (!gid) return; // 不在任何 group（异常）——上面已清端口清单/实例
-    setGroups((g) => {
-      const cur = g[gid];
-      if (!cur) return g;
-      const ports = cur.ports.filter((p) => p !== pid);
-      if (ports.length > 0) return { ...g, [gid]: { ...cur, ports, activePort: cur.activePort === pid ? ports[ports.length - 1] : cur.activePort } };
-      // group 空：唯一根保留为空 group（承接下次 openPort，否则 layout 仍指向它、focused 也指向它，
-      // 重开端口进不去 → 端口在线却不显示）；多 group 才删（layout 坍缩见下）
-      if (Object.keys(g).length <= 1) return { ...g, [gid]: { ...cur, ports: [], activePort: "" } };
-      const next = { ...g };
-      delete next[gid];
-      return next;
-    });
-    // group 空（关的是该 group 唯一/末个端口）且非唯一根 → layout 坍缩。读 groupsRef（最新，避 stale）
-    if ((groupsRef.current[gid]?.ports.length ?? 0) <= 1) {
-      setLayout((tree) => (leafGroupIds(tree).length <= 1 ? tree : removeLeaf(tree, gid) ?? tree));
-    }
-  };
+  /** 关端口：释放占有权 + 移除 tab（prune_port 全量状态变更在 reducer，prunePort 补清终端资源）。 */
   const closePort = (pid: PortId) => {
     // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
     if (aliasEdit?.port === pid) setAliasEdit(null);
@@ -873,15 +753,8 @@ export default function App() {
     });
   };
 
-  const switchPort = (port: string) => {
-    // 在聚焦 group 内切活动端口（activePort 由 groups[focused].activePort 派生）
-    const fg = focusedGroupIdRef.current;
-    setGroups((g) => {
-      const cur = g[fg];
-      if (!cur || !cur.ports.includes(port)) return g;
-      return { ...g, [fg]: { ...cur, activePort: port } };
-    });
-  };
+  /** 在聚焦 group 内切活动端口（activePort 由 groups[focused].activePort 派生）。 */
+  const switchPort = (port: string) => dispatch({ type: "switch_tab", groupId: focusedGroupId, port });
 
   // 标签页切换快捷键：Ctrl+Alt+1..9 直达、Ctrl+Alt+←/→ 循环。复用 switchPort +
   // 聚焦新终端（TermView display 切换不销毁，term 实例常驻 terminalsRef，可立即 focus）。
@@ -907,73 +780,21 @@ export default function App() {
 
   /** 在指定 group 内切活动端口 + 聚焦该 group（点 group 内 tab 触发）。
    *  与 switchPort（快捷键用，作用于聚焦 group）的区别：本函数接受 groupId 并聚焦它。 */
-  const switchTabInGroup = (groupId: string, port: string) => {
-    setGroups((g) => {
-      const cur = g[groupId];
-      if (!cur || !cur.ports.includes(port)) return g;
-      return { ...g, [groupId]: { ...cur, activePort: port } };
-    });
-    setFocusedGroupId(groupId);
-  };
+  const switchTabInGroup = (groupId: string, port: string) =>
+    dispatch({ type: "switch_tab", groupId, port });
 
   /** 拖 tab 到某 group 终端区半区：新建 group（装该 port）并在目标 group 处分裂。
    *  half=left/right→row，up/down→col；right/down→新 group 在后（side=end）。
-   *  port 从源 group 迁出；源 group 空（且非自分裂）→ removeLeaf 坍缩移除。
-   *  newId 在 updater 外生成（单次 ++，避 strict mode double-invoke updater 重复 ++）。 */
-  const dropHalf = (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => {
-    const src = groups[srcGroupId];
-    if (!src || !src.ports.includes(port)) return;
-    // 落到空 group：直接搬进去，不分裂（否则空格子累积、永不坍缩）
-    if ((groups[dstGroupId]?.ports.length ?? 0) === 0) {
-      movePort(port, srcGroupId, dstGroupId);
-      return;
-    }
-    // 拖自己唯一 tab 到自己半区：结果只是空 group + 单 tab group，无分栏意义，跳过（也避免产生空格子）
-    if (srcGroupId === dstGroupId && src.ports.length === 1) return;
-    const newId = "g" + ++groupIdSeq.current;
-    const srcPorts = src.ports.filter((p) => p !== port);
-    const srcEmpty = srcPorts.length === 0;
-    setGroups((g) => {
-      const cur = g[srcGroupId];
-      if (!cur) return g;
-      const next: Record<string, Group> = { ...g, [newId]: { id: newId, ports: [port], activePort: port } };
-      if (srcEmpty && srcGroupId !== dstGroupId) delete next[srcGroupId];
-      else next[srcGroupId] = { ...cur, ports: srcPorts, activePort: cur.activePort === port ? srcPorts[srcPorts.length - 1] : cur.activePort };
-      return next;
-    });
-    setLayout((tree) => {
-      const dir = half === "left" || half === "right" ? "row" : "col";
-      const side = half === "right" || half === "down" ? "end" : "start";
-      let t: PaneNode = splitLeaf(tree, dstGroupId, { type: "leaf", groupId: newId }, dir, side);
-      if (srcEmpty && srcGroupId !== dstGroupId) t = removeLeaf(t, srcGroupId) ?? t;
-      return t;
-    });
-    setFocusedGroupId(newId);
-  };
+   *  port 从源 group 迁出；源 group 空（且非自分裂）→ 坍缩移除。newId 生成在 reducer（确定性）。 */
+  const dropHalf = (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) =>
+    dispatch({ type: "drop_half", port, srcGroupId, dstGroupId, half });
   const onDragOverHalf = (groupId: string, half: PaneHalf) => setDropHint({ overGroupId: groupId, overHalf: half });
   const onPaneDragLeave = () => setDropHint(null);
 
   /** 拖 tab 到另一 group 的标签栏：迁移 port 归属（源移除、目标追加 + 设其 activePort）。
-   *  源 group 空 → removeLeaf 坍缩。TermView 经 portal 不 remount → scrollback 保留。 */
-  const movePort = (port: string, srcGroupId: string, dstGroupId: string) => {
-    if (srcGroupId === dstGroupId) return;
-    const src = groups[srcGroupId];
-    const dst = groups[dstGroupId];
-    if (!src || !dst || !src.ports.includes(port) || dst.ports.includes(port)) return;
-    const srcEmpty = src.ports.length === 1; // 只有这一个 → 迁出后空
-    setGroups((g) => {
-      const s = g[srcGroupId];
-      const d = g[dstGroupId];
-      if (!s || !d || d.ports.includes(port)) return g;
-      const sp = s.ports.filter((p) => p !== port);
-      const next: Record<string, Group> = { ...g, [dstGroupId]: { ...d, ports: [...d.ports, port], activePort: port } };
-      if (sp.length === 0) delete next[srcGroupId];
-      else next[srcGroupId] = { ...s, ports: sp, activePort: s.activePort === port ? sp[sp.length - 1] : s.activePort };
-      return next;
-    });
-    if (srcEmpty) setLayout((tree) => removeLeaf(tree, srcGroupId) ?? tree);
-    setFocusedGroupId(dstGroupId);
-  };
+   *  源 group 空 → 坍缩。TermView 经 portal 不 remount → scrollback 保留。逻辑全在 reducer。 */
+  const movePort = (port: string, srcGroupId: string, dstGroupId: string) =>
+    dispatch({ type: "move_port", port, srcGroupId, dstGroupId });
 
   /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例)，leaf→GroupView(标签栏+终端区)。 */
   const renderPane = (node: PaneNode) => {
@@ -1013,7 +834,7 @@ export default function App() {
         onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
         onCommitAlias={commitAlias}
         onCancelAlias={() => setAliasEdit(null)}
-        onFocusGroup={() => setFocusedGroupId(node.groupId)}
+        onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
         onWrite={(p, data) => {
           touch(p, "tx");
           const { devId, name } = parsePortId(p);
@@ -1039,12 +860,10 @@ export default function App() {
     );
   };
 
-  /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term),成功后清断开标记。 */
-  const reconnectPort = async (pid: PortId) => {
-    const res = await openPort(pid, portConfigs[pid] ?? serialConfig);
-    if (res) setDisconnectedPorts((prev) => { const n = new Set(prev); n.delete(pid); return n; });
-  };
-  reconnectPortRef.current = reconnectPort;
+  /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term)。成功即 port_acquired,
+   *  断开标记由 reducer 一并清除(失败保持断开态待手动重试)。 */
+  const reconnectPort = (pid: PortId) =>
+    openPort(pid, portConfigs[pid] ?? DEFAULT_CONFIG);
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
@@ -1077,104 +896,6 @@ export default function App() {
     transportsRef.current.get(devId)?.runMacro(name, portName, macros[name], runId);
   };
 
-  const openMacroEditor = (name: string | null) => {
-    if (name && macros[name]) {
-      setEditing({ name, isNew: false });
-      setEditorName(name);
-      setEditorMacro(JSON.parse(JSON.stringify(macros[name])));
-    } else {
-      setEditing({ name: "", isNew: true });
-      setEditorName("");
-      setEditorMacro({ description: "", steps: [newStep("send")] });
-    }
-    setEditorError("");
-  };
-
-  const saveMacroDef = async () => {
-    const trimmedName = editorName.trim();
-    if (!trimmedName) {
-      setEditorError("宏名不能为空");
-      return;
-    }
-    const err = validateMacro(editorMacro);
-    if (err) {
-      setEditorError(err);
-      return;
-    }
-    const oldKey = editing && !editing.isNew ? editing.name : null;
-    const next = upsertNamed(macros, oldKey, trimmedName, editorMacro);
-    if (!next) {
-      setEditorError("已存在同名宏");
-      return;
-    }
-    setMacros(next);
-    await persistMacros(next);
-    setEditing(null);
-  };
-
-  const deleteMacro = (name: string) => {
-    setConfirmState({
-      title: "删除宏",
-      icon: <IconTrash />,
-      message: `删除宏 "${name}"？此操作不可恢复。`,
-      confirmText: "删除",
-      tone: "danger",
-      onConfirm: async () => {
-        const next = { ...macros };
-        delete next[name];
-        setMacros(next);
-        await persistMacros(next);
-        setEditing(null);
-        setConfirmState(null);
-      },
-    });
-  };
-
-  const renameMacroGroup = async (oldName: string, newName: string) => {
-    const trimmed = newName.trim();
-    if (!trimmed) return; // 空名忽略（防误解散；解散走 askDissolveMacroGroup）
-    const merged = trimmed !== oldName && Object.values(macros).some((m) => m.group === trimmed);
-    const next = renameGroup(macros, oldName, trimmed);
-    setMacros(next);
-    // 折叠态同步:旧组名 → 新组名(保留折叠)。须在 await 前——React 18 在 await 处断批,
-    // 否则折叠的组会先按新名展开、再折回,闪一帧。
-    setMacroCollapsed((prev) => {
-      if (!prev.has(oldName)) return prev;
-      const n = new Set(prev);
-      n.delete(oldName);
-      n.add(trimmed);
-      return n;
-    });
-    await persistMacros(next);
-    if (merged) {
-      setNotice(`已合并到组「${trimmed}」`);
-      setTimeout(() => setNotice(""), 4000);
-    }
-  };
-
-  const askDissolveMacroGroup = (name: string) => {
-    const count = Object.values(macros).filter((m) => m.group === name).length;
-    setConfirmState({
-      title: "解散分组",
-      icon: <IconAlert />,
-      message: `解散分组「${name}」?其中 ${count} 个宏将移至「未分组」,不会被删除。`,
-      confirmText: "解散",
-      tone: "danger",
-      onConfirm: async () => {
-        const { next } = dissolveGroup(macros, name);
-        setMacros(next);
-        setMacroCollapsed((prev) => {
-          if (!prev.has(name)) return prev;
-          const n = new Set(prev);
-          n.delete(name);
-          return n;
-        });
-        await persistMacros(next);
-        setConfirmState(null);
-      },
-    });
-  };
-
   const doRun = (name: string, args: Record<string, string>) => {
     // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
     // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
@@ -1199,173 +920,6 @@ export default function App() {
       return;
     }
     doRun(name, {});
-  };
-
-  const openScriptEditor = (name: string | null) => {
-    if (name && scripts[name]) {
-      setEditingScript({ name, isNew: false });
-      setEditorScriptName(name);
-      setEditorScript(JSON.parse(JSON.stringify(scripts[name])));
-    } else {
-      setEditingScript({ name: "", isNew: true });
-      setEditorScriptName("");
-      setEditorScript({ code: "// 在此写 JS 脚本\n" });
-    }
-    setEditorScriptError("");
-  };
-
-  const saveScriptDef = async () => {
-    const trimmedName = editorScriptName.trim();
-    if (!trimmedName) {
-      setEditorScriptError("脚本名不能为空");
-      return;
-    }
-    if (!editorScript.code.trim()) {
-      setEditorScriptError("脚本代码不能为空");
-      return;
-    }
-    const oldKey = editingScript && !editingScript.isNew ? editingScript.name : null;
-    const next = upsertNamed(scripts, oldKey, trimmedName, editorScript);
-    if (!next) {
-      setEditorScriptError("已存在同名脚本");
-      return;
-    }
-    setScripts(next);
-    await persistScripts(next);
-    setEditingScript(null);
-  };
-
-  const deleteScript = (name: string) => {
-    setConfirmState({
-      title: "删除脚本",
-      icon: <IconTrash />,
-      message: `删除脚本 "${name}"？此操作不可恢复。`,
-      confirmText: "删除",
-      tone: "danger",
-      onConfirm: async () => {
-        const next = { ...scripts };
-        delete next[name];
-        setScripts(next);
-        await persistScripts(next);
-        setEditingScript(null);
-        setConfirmState(null);
-      },
-    });
-  };
-
-  const renameScriptGroup = async (oldName: string, newName: string) => {
-    const trimmed = newName.trim();
-    if (!trimmed) return;
-    const merged = trimmed !== oldName && Object.values(scripts).some((s) => s.group === trimmed);
-    const next = renameGroup(scripts, oldName, trimmed);
-    setScripts(next);
-    setScriptCollapsed((prev) => {
-      if (!prev.has(oldName)) return prev;
-      const n = new Set(prev);
-      n.delete(oldName);
-      n.add(trimmed);
-      return n;
-    });
-    await persistScripts(next);
-    if (merged) {
-      setNotice(`已合并到组「${trimmed}」`);
-      setTimeout(() => setNotice(""), 4000);
-    }
-  };
-
-  const askDissolveScriptGroup = (name: string) => {
-    const count = Object.values(scripts).filter((s) => s.group === name).length;
-    setConfirmState({
-      title: "解散分组",
-      icon: <IconAlert />,
-      message: `解散分组「${name}」?其中 ${count} 个脚本将移至「未分组」,不会被删除。`,
-      confirmText: "解散",
-      tone: "danger",
-      onConfirm: async () => {
-        const { next } = dissolveGroup(scripts, name);
-        setScripts(next);
-        setScriptCollapsed((prev) => {
-          if (!prev.has(name)) return prev;
-          const n = new Set(prev);
-          n.delete(name);
-          return n;
-        });
-        await persistScripts(next);
-        setConfirmState(null);
-      },
-    });
-  };
-
-  /** 导入宏：读 JSON 文件，合并入库（重名/无效跳过），Tauri/Web 均落 persistMacros。 */
-  const onImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      const entries = parseImportedMacros(data, macros);
-      if (entries.length === 0) {
-        setErrorMsg('导入失败：未找到有效宏（需 {"名称": {steps:[...]}} 或单个宏）');
-        setTimeout(() => setErrorMsg(""), 6000);
-        return;
-      }
-      const next = { ...macros };
-      let added = 0;
-      let skipped = 0;
-      for (const [n, m] of entries) {
-        if (next[n] || validateMacro(m)) {
-          skipped++;
-          continue;
-        }
-        next[n] = m;
-        added++;
-      }
-      if (added > 0) {
-        setMacros(next);
-        await persistMacros(next);
-      }
-      setNotice(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或无效）` : ""}。`);
-      setTimeout(() => setNotice(""), 5000);
-    } catch (err) {
-      setErrorMsg("导入失败：" + String(err));
-      setTimeout(() => setErrorMsg(""), 6000);
-    }
-  };
-
-  /** 导入脚本：读 JSON 文件，合并入库（重名/空 code 跳过），Tauri/Web 均落 persistScripts。 */
-  const onImportScripts = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      const entries = parseImportedScripts(data, scripts);
-      if (entries.length === 0) {
-        setErrorMsg('导入失败：未找到有效脚本（需 {"名称": {code:"..."}} 或单个脚本）');
-        setTimeout(() => setErrorMsg(""), 6000);
-        return;
-      }
-      const next = { ...scripts };
-      let added = 0;
-      let skipped = 0;
-      for (const [n, s] of entries) {
-        if (next[n] || !s.code.trim()) {
-          skipped++;
-          continue;
-        }
-        next[n] = s;
-        added++;
-      }
-      if (added > 0) {
-        setScripts(next);
-        await persistScripts(next);
-      }
-      setNotice(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或空代码）` : ""}。`);
-      setTimeout(() => setNotice(""), 5000);
-    } catch (err) {
-      setErrorMsg("导入失败：" + String(err));
-      setTimeout(() => setErrorMsg(""), 6000);
-    }
   };
 
   /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。同地址已存在则轻提示。 */
@@ -1404,11 +958,7 @@ export default function App() {
         transportsRef.current.get(dev.id)?.dispose();
         transportsRef.current.delete(dev.id);
         remoteAddrRef.current.delete(dev.id);
-        setDevOnline((prev) => {
-          const n = { ...prev };
-          delete n[dev.id];
-          return n;
-        });
+        dispatch({ type: "teardown_dev", devId: dev.id });
         setRemotes((prev) => {
           const next = prev.filter((r) => r.id !== dev.id);
           if (isLocal) persistRemotes(next);
@@ -1431,11 +981,7 @@ export default function App() {
     transportsRef.current.get(dev.id)?.dispose();
     transportsRef.current.delete(dev.id);
     remoteAddrRef.current.delete(dev.id);
-    setDevOnline((prev) => {
-      const n = { ...prev };
-      delete n[dev.id];
-      return n;
-    });
+    dispatch({ type: "teardown_dev", devId: dev.id });
     setExpandedRemotes((prev) => {
       const n = new Set(prev);
       n.add(dev.id);
@@ -1484,11 +1030,10 @@ export default function App() {
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
 
-  // 快捷键处理器表（每 render 刷新最新闭包；dispatch 经 handlersRef 读，不陈旧）。
+  // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
     "search.open": () => {
-      const p = activeRef.current;
-      if (p && terminalsRef.current.has(p)) setSearchOpen(true);
+      if (activePort && terminalsRef.current.has(activePort)) setSearchOpen(true);
     },
     "theme.toggle": toggleTheme,
     "port.refresh": refreshPorts,
@@ -1502,8 +1047,7 @@ export default function App() {
     "activity.toggle-macros": () => setActivity(activity === "macros" ? null : "macros"),
     "activity.toggle-scripts": () => setActivity(activity === "scripts" ? null : "scripts"),
     "port.close-active": () => {
-      const p = activeRef.current;
-      if (p) closePort(p);
+      if (activePort) closePort(activePort);
     },
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),
@@ -1526,13 +1070,44 @@ export default function App() {
     scriptPaletteOpen ||
     portPaletteOpen
   );
-  modalOpenRef.current = modalOpen;
 
-  // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)
+  // 全局快捷键 listener：模态打开时不挂（天然抑制），关闭后重挂。capture 阶段拦截。
+  useEffect(() => {
+    if (modalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 焦点在表单控件时跳过（不抢输入）；但 xterm 聚焦时 e.target 是隐藏的
+      // .xterm-helper-textarea（终端的输入/IME 代理），那属于“终端聚焦”而非“填表”，
+      // 必须放行——否则终端一聚焦，所有全局快捷键失效。
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable) &&
+        !t.closest(".xterm")
+      ) {
+        return;
+      }
+      const combo = eventToCombo(e);
+      if (!combo) return;
+      const hit = findAction(combo, "global");
+      if (hit) {
+        e.preventDefault();
+        e.stopPropagation();
+        dispatchAction(hit.id, hit.arg);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [dispatchAction, modalOpen]);
+
+  // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)。
+  // deps 只有 modalOpen:仅在模态关闭那一拍触发;闭包里的 activePort 即当时的活动端口。
   useEffect(() => {
     if (modalOpen) return;
     const id = window.setTimeout(() => {
-      terminalsRef.current.get(activeRef.current)?.term.focus();
+      terminalsRef.current.get(activePort)?.term.focus();
     }, 0);
     return () => window.clearTimeout(id);
   }, [modalOpen]);
@@ -1584,337 +1159,124 @@ export default function App() {
           )}
 
           {activity === "ports" && (
-            <>
-              <div className="section-head">
-                <h4 className="section-head__title">PORTS</h4>
-                <button className="icon-btn" onClick={() => refreshPorts()} title="刷新">
-                  <IconRefresh />
-                </button>
-              </div>
-              {portGroups.map((grp) => {
-                const dev = grp.devId === "local" ? null : remotes.find((r) => r.id === grp.devId);
-                return (
-                <div key={grp.devId} className="macro-group">
-                  <div className="port-group__head">
-                    <button className="port-group__toggle" onClick={() => togglePortGroup(grp.devId)}>
-                      <span className={`dot ${grp.online ? "on" : "off"}`} />
-                      <span className="macro-group__caret">{portCollapsed.has(grp.devId) ? "▶" : "▼"}</span>
-                      <span className="port-group__name">{grp.label}</span>
-                    </button>
-                    <div className="port-group__actions">
-                      <span className="port-group__count">{grp.ports.length}</span>
-                      {/* 按钮区固定占位(46px)：本地卡无按钮也占位，使 count 列在所有卡上对齐 */}
-                      <div className="port-group__btns">
-                        {dev && (
-                          <>
-                            {grp.online !== true && (
-                              <button className="port-group__action" title="重连设备" onClick={() => reconnectRemote(dev)}><IconRefresh /></button>
-                            )}
-                            <button className="port-group__action port-group__action--danger" title="删除设备" onClick={() => removeRemote(dev)}><IconTrash /></button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  {!portCollapsed.has(grp.devId) &&
-                    (grp.ports.length === 0 ? (
-                      <p className="sidebar__empty">{grp.online === false ? "未连接" : "无可用端口"}</p>
-                    ) : (
-                      grp.ports.map((p) => {
-                        const pid = portIdOf(grp.devId, p.name);
-                        const isActive = pid === activePort;
-                        const editingThis = aliasEdit?.port === pid && aliasEdit?.where === "list";
-                        const canForce = grp.devId === "local" && p.opened;
-                        return (
-                          <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
-                            <div
-                              className="port-item"
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => {
-                                if (!editingThis) triggerPort(pid);
-                              }}
-                              onKeyDown={(e) => {
-                                if (editingThis) return;
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  triggerPort(pid);
-                                }
-                              }}
-                            >
-                              <span className={`port-item__dot${p.opened ? " open" : ""}`} />
-                              <span className="port-item__name">
-                                {editingThis ? (
-                                  <InlineAliasInput
-                                    initial={p.alias ?? ""}
-                                    placeholder={`为 ${p.name} 设置别名`}
-                                    onCommit={(alias) => commitAlias(pid, alias)}
-                                    onCancel={() => setAliasEdit(null)}
-                                  />
-                                ) : (
-                                  <PortLabel name={p.name} alias={p.alias} />
-                                )}
-                              </span>
-                              {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
-                            </div>
-                            <button
-                              className="port-item__edit"
-                              title={`设置 ${p.name} 别名`}
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => setAliasEdit({ port: pid, where: "list" })}
-                            >
-                              <IconEdit />
-                            </button>
-                            {canForce && (
-                              <button
-                                className="port-item__force"
-                                title={`强制关闭 ${p.name}（断开远程）`}
-                                onClick={() => forceClosePort(pid)}
-                              >
-                                <IconPower />
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })
-                    ))}
-                </div>
-              );
-              })}
-            </>
+            <PortsPanel
+              portGroups={portGroups}
+              remotes={remotes}
+              portCollapsed={portCollapsed}
+              onTogglePortGroup={togglePortGroup}
+              activePort={activePort}
+              aliasEditPort={aliasEdit?.where === "list" ? aliasEdit.port : null}
+              onSetAliasEdit={(pid) => setAliasEdit({ port: pid, where: "list" })}
+              onTriggerPort={triggerPort}
+              onCommitAlias={commitAlias}
+              onCancelAlias={() => setAliasEdit(null)}
+              onForceClose={forceClosePort}
+              onReconnectRemote={reconnectRemote}
+              onRemoveRemote={removeRemote}
+              onRefresh={() => refreshPorts()}
+            />
           )}
 
           {activity === "macros" && (
-            <>
-              <div className="section-head">
-                <h4 className="section-head__title">
-                  MACROS{activePort && <span className="accent">→ {activePort}</span>}
-                </h4>
-                <div className="section-head__actions">
-                  <button className="icon-btn" onClick={() => importInputRef.current?.click()} title="导入宏">
-                    <IconImport />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    onClick={() => setExportMacrosOpen(true)}
-                    disabled={Object.keys(macros).length === 0}
-                    title="导出宏（可多选 / 全选）"
-                  >
-                    <IconExport />
-                  </button>
-                  <button className="icon-btn" onClick={() => openMacroEditor(null)} title="新增宏">
-                    <IconPlus />
-                  </button>
-                </div>
-                <input
-                  ref={importInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  style={{ display: "none" }}
-                  onChange={onImportFile}
+            <NamedLibraryPanel
+              title={<>MACROS{activePort && <span className="accent">→ {activePort}</span>}</>}
+              items={macros}
+              hasItems={Object.keys(macros).length > 0}
+              collapsed={macroCollapsed}
+              onToggleGroup={toggleMacroGroup}
+              onRenameGroup={renameMacroGroup}
+              onDissolveGroup={askDissolveMacroGroup}
+              importRef={importInputRef}
+              onImportFile={onImportFile}
+              onExport={() => setExportMacrosOpen(true)}
+              exportTitle="导出宏（可多选 / 全选）"
+              onNew={() => openMacroEditor(null)}
+              newItemLabel="宏"
+              emptyHint="无宏（点 ＋ 新增）"
+              renderRow={(name) => (
+                <MacroRow
+                  key={name}
+                  name={name}
+                  disabled={!activePort}
+                  onRun={() => {
+                    runMacro(name);
+                    // 运行后焦点交还终端:否则焦点留在按钮上,回车会再次触发本按钮(重复运行宏)
+                    activeTerm?.term.focus();
+                  }}
+                  onEdit={() => openMacroEditor(name)}
+                  onDelete={() => deleteMacro(name)}
                 />
-              </div>
-              {Object.keys(macros).length === 0 && <p className="sidebar__empty">无宏（点 ＋ 新增）</p>}
-              {groupBy(Object.entries(macros), (m) => m.group).map((g) => (
-                <div key={g.name} className="macro-group">
-                  <GroupHead
-                    name={g.name}
-                    count={g.items.length}
-                    collapsed={macroCollapsed.has(g.name)}
-                    onToggle={() => toggleMacroGroup(g.name)}
-                    onRename={(n) => renameMacroGroup(g.name, n)}
-                    onDissolve={() => askDissolveMacroGroup(g.name)}
-                    menuHidden={g.name === "未分组"}
-                  />
-                  {!macroCollapsed.has(g.name) && g.items.map(([name]) => (
-                    <div key={name} className="macro-row">
-                      <button
-                        className="macro-run"
-                        onClick={() => {
-                          runMacro(name);
-                          // 运行后焦点交还终端:否则焦点留在按钮上,回车会再次触发本按钮(重复运行宏)
-                          activeTerm?.term.focus();
-                        }}
-                        disabled={!activePort}
-                      >
-                        <IconPlay />
-                        <span className="macro-run__label">{name}</span>
-                      </button>
-                      <button className="macro-action macro-action--edit" onClick={() => openMacroEditor(name)} title="编辑">
-                        <IconEdit />
-                      </button>
-                      <button className="macro-action macro-action--danger" onClick={() => deleteMacro(name)} title="删除">
-                        <IconTrash />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {[...macroRuns.entries()].map(([runId, card]) => (
-                <div key={runId} className={card.status === "running" ? "script-task" : `script-task script-task--${card.success ? "ok" : "err"}`}>
-                  {card.status === "running" ? (
-                    <div className="script-task__head" title={`${card.name} 运行中`}>
-                      <span className="script-task__name">⟳ {card.name}</span>
-                      <span className="script-task__status">运行中…</span>
-                      <button
-                        className="script-task__stop"
-                        title="停止宏"
-                        onClick={() => transportsRef.current.get(card.devId)?.stopMacro(runId)}
-                      >停止</button>
-                    </div>
-                  ) : (
-                    <div className="script-task__head">
-                      <span className="script-task__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
-                      <button
-                        className="macro-result__close"
-                        title="关闭"
-                        onClick={() => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; })}
-                      >×</button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </>
+              )}
+            >
+              <RunCards
+                runs={macroRuns}
+                kindLabel="宏"
+                hasLogs={false}
+                expandedLog={null}
+                onToggleExpand={() => {}}
+                onStop={(runId, devId) => transportsRef.current.get(devId)?.stopMacro(runId)}
+                onDismiss={(runId) => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; })}
+              />
+            </NamedLibraryPanel>
           )}
 
           {activity === "scripts" && (
-            <>
-              <div className="section-head">
-                <h4 className="section-head__title">
-                  SCRIPTS{activePort && <span className="accent">→ {activePort}</span>}
-                </h4>
-                <div className="section-head__actions">
-                  <button className="icon-btn" onClick={() => scriptImportInputRef.current?.click()} title="导入脚本">
-                    <IconImport />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    onClick={() => setExportScriptsOpen(true)}
-                    disabled={Object.keys(scripts).length === 0}
-                    title="导出脚本（可多选 / 全选）"
-                  >
-                    <IconExport />
-                  </button>
-                  <button className="icon-btn" onClick={() => openScriptEditor(null)} title="新增脚本">
-                    <IconPlus />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    title="脚本编写指南(查看 / 复制给外部 Agent)"
-                    onClick={() => {
-                      setSkillOpen(true);
-                      if (skillText === null) {
-                        transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "")?.getScriptSkill().then(setSkillText).catch(() => {});
-                      }
-                    }}
-                  >
-                    <IconInfo />
-                  </button>
-                </div>
-                <input
-                  ref={scriptImportInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  style={{ display: "none" }}
-                  onChange={onImportScripts}
-                />
-              </div>
-              {Object.keys(scripts).length === 0 && <p className="sidebar__empty">无脚本（点 ＋ 新增）</p>}
-              {groupBy(Object.entries(scripts), (s) => s.group).map((g) => (
-                <div key={g.name} className="macro-group">
-                  <GroupHead
-                    name={g.name}
-                    count={g.items.length}
-                    collapsed={scriptCollapsed.has(g.name)}
-                    onToggle={() => toggleScriptGroup(g.name)}
-                    onRename={(n) => renameScriptGroup(g.name, n)}
-                    onDissolve={() => askDissolveScriptGroup(g.name)}
-                    menuHidden={g.name === "未分组"}
-                  />
-                  {!scriptCollapsed.has(g.name) && g.items.map(([name]) => (
-                    <div key={name} className="macro-row">
-                      <button
-                        className="macro-run"
-                        onClick={() => {
-                          runScript(name);
-                          // 仅在不弹参数框时回焦终端;弹框场景焦点应进对话框(由 modalOpen effect 接管)
-                          if (!scripts[name]?.params?.length) activeTerm?.term.focus();
-                        }}
-                      >
-                        <IconPlay />
-                        <span className="macro-run__label">{name}</span>
-                      </button>
-                      <button className="macro-action macro-action--edit" onClick={() => openScriptEditor(name)} title="编辑">
-                        <IconEdit />
-                      </button>
-                      <button className="macro-action macro-action--danger" onClick={() => deleteScript(name)} title="删除">
-                        <IconTrash />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {[...scriptRuns.entries()].map(([runId, card]) => (
-                <div
-                  key={runId}
-                  className={card.status === "running" ? `script-task${expandedLog === runId ? " script-task--open" : ""}` : `script-task script-task--${card.success ? "ok" : "err"}`}
+            <NamedLibraryPanel
+              title={<>SCRIPTS{activePort && <span className="accent">→ {activePort}</span>}</>}
+              items={scripts}
+              hasItems={Object.keys(scripts).length > 0}
+              collapsed={scriptCollapsed}
+              onToggleGroup={toggleScriptGroup}
+              onRenameGroup={renameScriptGroup}
+              onDissolveGroup={askDissolveScriptGroup}
+              importRef={scriptImportInputRef}
+              onImportFile={onImportScripts}
+              onExport={() => setExportScriptsOpen(true)}
+              exportTitle="导出脚本（可多选 / 全选）"
+              onNew={() => openScriptEditor(null)}
+              newItemLabel="脚本"
+              emptyHint="无脚本（点 ＋ 新增）"
+              extraActions={
+                <button
+                  className="icon-btn"
+                  title="脚本编写指南(查看 / 复制给外部 Agent)"
+                  onClick={() => {
+                    setSkillOpen(true);
+                    if (skillText === null) {
+                      transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "")?.getScriptSkill().then(setSkillText).catch(() => {});
+                    }
+                  }}
                 >
-                  {card.status === "running" ? (
-                    <>
-                      <div
-                        className="script-task__head"
-                        onClick={() => setExpandedLog((v) => (v === runId ? null : runId))}
-                        role="button"
-                      >
-                        <span className="script-task__name" title={card.name}>⟳ {card.name}</span>
-                        <span className="script-task__status">运行中…</span>
-                        <button
-                          className="script-task__stop"
-                          title="停止脚本"
-                          onClick={(e) => { e.stopPropagation(); transportsRef.current.get(card.devId)?.stopScript(runId); }}
-                        >停止</button>
-                      </div>
-                      {expandedLog === runId && (
-                        <div className="script-log-list script-log-list--live">
-                          {card.logs.length === 0 && (
-                            <div className="script-log-list__line script-log-list__line--muted">（等待 log 输出…）</div>
-                          )}
-                          {card.logs.map((line, i) => (
-                            <div key={i} className="script-log-list__line">{line}</div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <div
-                        className="script-task__head"
-                        onClick={card.logs.length > 0 ? () => setExpandedLog((v) => (v === runId ? null : runId)) : undefined}
-                        role={card.logs.length > 0 ? "button" : undefined}
-                      >
-                        <span className="script-task__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
-                        <button
-                          className="macro-result__close"
-                          title="关闭"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setScriptRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; });
-                            if (expandedLog === runId) setExpandedLog(null);
-                          }}
-                        >×</button>
-                      </div>
-                      {expandedLog === runId && card.logs.length > 0 && (
-                        <div className="script-log-list">
-                          {card.logs.map((line, i) => (
-                            <div key={i} className="script-log-list__line">{line}</div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              ))}
-            </>
+                  <IconInfo />
+                </button>
+              }
+              renderRow={(name) => (
+                <ScriptRow
+                  key={name}
+                  name={name}
+                  onRun={() => {
+                    runScript(name);
+                    // 仅在不弹参数框时回焦终端;弹框场景焦点应进对话框(由 modalOpen effect 接管)
+                    if (!scripts[name]?.params?.length) activeTerm?.term.focus();
+                  }}
+                  onEdit={() => openScriptEditor(name)}
+                  onDelete={() => deleteScript(name)}
+                />
+              )}
+            >
+              <RunCards
+                runs={scriptRuns}
+                kindLabel="脚本"
+                hasLogs
+                expandedLog={expandedLog}
+                onToggleExpand={(runId) => setExpandedLog((v) => (v === runId ? null : runId))}
+                onStop={(runId, devId) => transportsRef.current.get(devId)?.stopScript(runId)}
+                onDismiss={(runId) => {
+                  setScriptRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; });
+                  if (expandedLog === runId) setExpandedLog(null);
+                }}
+              />
+            </NamedLibraryPanel>
           )}
         </aside>
         <div
@@ -2161,12 +1523,12 @@ export default function App() {
           macro={editorMacro}
           error={editorError}
           isNew={editing.isNew}
-          groups={Array.from(new Set(Object.values(macros).map((m) => m.group).filter((g): g is string => !!g)))}
+          groups={macroGroupNames}
           onName={setEditorName}
           onMacroChange={setEditorMacro}
           onSave={saveMacroDef}
           onDelete={() => deleteMacro(editing.name)}
-          onCancel={() => setEditing(null)}
+          onCancel={() => macroLib.setEditing(null)}
         />
       )}
 
@@ -2177,12 +1539,12 @@ export default function App() {
           script={editorScript}
           error={editorScriptError}
           isNew={editingScript.isNew}
-          groups={Array.from(new Set(Object.values(scripts).map((s) => s.group).filter((g): g is string => !!g)))}
+          groups={scriptGroupNames}
           onName={setEditorScriptName}
           onScriptChange={setEditorScript}
           onSave={saveScriptDef}
           onDelete={() => deleteScript(editingScript.name)}
-          onCancel={() => setEditingScript(null)}
+          onCancel={() => scriptLib.setEditing(null)}
         />
       )}
     </div>
