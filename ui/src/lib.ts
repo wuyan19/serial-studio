@@ -331,6 +331,9 @@ export async function copyText(text: string): Promise<boolean> {
     }
   }
   try {
+    // 记住复制前焦点:select() 会把焦点抢到临时 textarea,删掉后丢到 body——
+    // 终端(xterm 的隐藏输入代理)会失焦,不归还的话要再点一下窗口才能继续打字。
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const ta = document.createElement("textarea");
     ta.value = text;
     // 移出视口 + 防滚动穿透;readonly 防 iOS 弹键盘(本项目桌面为主,防御性保留)
@@ -341,6 +344,7 @@ export async function copyText(text: string): Promise<boolean> {
     ta.select();
     const ok = document.execCommand("copy");
     ta.remove();
+    prev?.focus();
     return ok;
   } catch {
     return false;
