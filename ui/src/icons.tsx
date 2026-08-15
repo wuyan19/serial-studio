@@ -40,7 +40,7 @@ export function IconPlug({ className }: IconProps) {
 export function IconBolt({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z" />
+      <path d="M13.2 2 5.2 13.4h5.3L9.9 22l8.9-11.4h-5.3L13.2 2Z" />
     </Svg>
   );
 }
@@ -49,8 +49,9 @@ export function IconBolt({ className }: IconProps) {
 export function IconKeyboard({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <rect x="3" y="7" width="18" height="10" rx="2" />
-      <path d="M7 11h.01M11 11h.01M15 11h.01M17 11h.01M7 14h.01M17 14h.01M10 14h4" />
+      <rect x="3" y="6.5" width="18" height="11" rx="2.5" />
+      <path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01" />
+      <path d="M6.5 13.5h.01M17 13.5h.01M9.5 13.5h5" />
     </Svg>
   );
 }
@@ -64,13 +65,14 @@ export function IconExpand({ className }: IconProps) {
   );
 }
 
-/** Scripts (code). */
+/** Scripts —— 卷轴信纸(上下卷边 + 字迹,形制参照 Lucide scroll-text,ISC)。 */
 export function IconCode({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <path d="M8 9l-3 3 3 3" />
-      <path d="M16 9l3 3-3 3" />
-      <path d="M13.5 6l-3 12" />
+      <path d="M15 8h-5" />
+      <path d="M15 12h-5" />
+      <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+      <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
     </Svg>
   );
 }
@@ -79,10 +81,12 @@ export function IconCode({ className }: IconProps) {
 export function IconGlobe({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" />
-      <path d="M12 3c2.6 2.6 2.6 15.4 0 18" />
-      <path d="M12 3c-2.6 2.6-2.6 15.4 0 18" />
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17" />
+      <path d="M12 3.5c2.8 2.8 2.8 14.2 0 17" />
+      <path d="M12 3.5c-2.8 2.8-2.8 14.2 0 17" />
+      <path d="M6.2 8.2c1.9 1.5 9.7 1.5 11.6 0" />
+      <path d="M6.2 15.8c1.9-1.5 9.7-1.5 11.6 0" />
     </Svg>
   );
 }
@@ -233,13 +237,12 @@ export function IconBell({ className }: IconProps) {
   );
 }
 
-/** 亮色模式。 */
-/** 主题(明暗对比圆)——主题菜单入口,不随具体主题换图标。 */
-export function IconPalette({ className }: IconProps) {
+/** 主题 —— 短袖 T 恤(换主题=换衣服)。 */
+export function IconShirt({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none" />
+      <path d="M9.3 2.6a2.7 2.7 0 0 0 5.4 0" />
+      <path d="M9.3 2.6 4.2 4.9 1.8 9.2l3.6 1.7V21.5h13.2V10.9l3.6-1.7-2.4-4.3-5.1-2.3" />
     </Svg>
   );
 }

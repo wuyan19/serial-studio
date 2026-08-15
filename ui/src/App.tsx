@@ -83,7 +83,7 @@ import {
   IconPower,
   IconSliders,
   IconTrash,
-  IconPalette,
+  IconShirt,
   IconCheck,
 } from "./icons";
 import { getTheme, setTheme, subscribe, toggleTheme, THEMES, type Theme } from "./theme";
@@ -1320,7 +1320,7 @@ export default function App() {
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
         <div className="manage">
           <ActivityIcon
-            icon={<IconPalette className="act-icon__svg" />}
+            icon={<IconShirt className="act-icon__svg" />}
             title="主题"
             active={themeMenu}
             onClick={() => setThemeMenu(!themeMenu)}

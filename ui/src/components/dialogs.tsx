@@ -5,7 +5,7 @@ import type { ActionId, ConnConfig, Macro, Script, ScriptParam, SerialConfig, Sh
 import { BAUD_RATES, isTauri } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
-import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconPlug } from "../icons";
+import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 import { marked } from "marked";
 
@@ -547,7 +547,7 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="键盘快捷键" className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
-          <IconGear /> SHORTCUTS
+          <IconKeyboard /> SHORTCUTS
         </h3>
         <div className="dialog__sub">点键帽录制，按下新组合；Esc 取消录制</div>
 
