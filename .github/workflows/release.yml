@@ -116,9 +116,12 @@ jobs:
           import json, subprocess, os
           tag, repo = os.environ["TAG"], os.environ["GITHUB_REPOSITORY"]
           d = json.load(open("latest.json"))
-          # asset id → 文件名(api 端点 url 无文件名,经 release 资产清单反查)
+          # asset id → 文件名(api 端点 url 无文件名,经 release 资产清单反查)。
+          # 注意必须走 releases 列表 + select:releases/tags/{tag} 端点不返回 draft,
+          # 而本 job 运行时 release 尚为草稿
           out = subprocess.check_output(
-              ["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", '.assets[] | "\\(.id) \\(.name)"']
+              ["gh", "api", f"repos/{repo}/releases", "--paginate", "--jq",
+               f'.[] | select(.tag_name=="{tag}") | .assets[] | "\\(.id) \\(.name)"']
           ).decode()
           assets = dict(line.split(" ", 1) for line in out.splitlines())
           prefix = "https://ghproxy.net/https://github.com/"
