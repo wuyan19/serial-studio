@@ -750,7 +750,7 @@ export function ScriptSkillDialog({
         <div className="macro-editor__head">
           <h3 className="dialog__title">脚本编写指南</h3>
           <div className="dialog__sub">
-            SKILL 全文 —— 复制给外部 Agent(Claude / Cursor 等),它即可为你生成 Serial Studio 脚本
+            SKILL 全文
           </div>
         </div>
         <div className="macro-editor__scroll">
@@ -771,7 +771,7 @@ export function ScriptSkillDialog({
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn btn--primary" onClick={copy} disabled={failed || !text}>
-              <IconCopy /> {copied ? "已复制 ✓" : "复制给外部 Agent"}
+              <IconCopy /> {copied ? "已复制 ✓" : "复制全文"}
             </button>
             <button className="btn btn--ghost" onClick={() => setRaw((v) => !v)} disabled={failed || !text}>
               {raw ? "Markdown 预览" : "查看原文"}

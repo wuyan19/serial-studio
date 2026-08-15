@@ -84,7 +84,7 @@ if (line === "") throw new Error("COM3 未返回 MAC");
 const mac = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/)[0];
 await send("AT+SETMAC=" + mac, "COM5");
 if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
-log("✅ 已把 " + mac + " 从 COM3 同步到 COM5");
+log("已把 " + mac + " 从 COM3 同步到 COM5");
 ```
 
 **周期采集**:循环里直接 `log("第 " + i + " 轮: " + value)` 边采边打。
@@ -107,7 +107,7 @@ if (await expect("OK", 1000) === "") throw new Error("关回显失败");
 await send("AT+CSQ");
 const csq = await expect("CSQ:\\s*\\d+", 1500);
 if (csq === "") throw new Error("查询信号失败");
-log("✅ 自检通过,信号: " + csq);
+log("自检通过,信号: " + csq);
 ```
 
 ## 输出约定
