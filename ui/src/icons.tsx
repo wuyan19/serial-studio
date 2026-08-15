@@ -45,6 +45,25 @@ export function IconBolt({ className }: IconProps) {
   );
 }
 
+/** Keyboard shortcuts. */
+export function IconKeyboard({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="3" y="7" width="18" height="10" rx="2" />
+      <path d="M7 11h.01M11 11h.01M15 11h.01M17 11h.01M7 14h.01M17 14h.01M10 14h4" />
+    </Svg>
+  );
+}
+
+/** Dialog maximize / restore. */
+export function IconExpand({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+    </Svg>
+  );
+}
+
 /** Scripts (code). */
 export function IconCode({ className }: IconProps) {
   return (

@@ -6,11 +6,11 @@ import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一�
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { ISearchDecorationOptions } from "@xterm/addon-search";
-import type { Group, PaneHalf, TermInstance } from "../types";
+import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
 import { copyText, parsePortId } from "../lib";
 import { getTheme, subscribe, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
-import { eventToCombo, formatCombo, getBindings } from "../shortcuts";
+import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
 import { IconChevronDown, IconChevronUp, IconClose, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
 
@@ -347,6 +347,9 @@ export function GroupView({
   termContainerRef: (el: HTMLDivElement | null) => void;
 }) {
   const termRef = useRef<HTMLDivElement>(null);
+  // 空状态快捷键提示用:跟随改键(只在有空 tab 的格子短暂存在,订阅成本可忽略)
+  const [bindings, setBindings] = useState<ShortcutMap>(() => getBindings());
+  useEffect(() => subscribeBindings(setBindings), []);
   // 拖拽回调走 ref：listener 只挂一次（[group.id]），避 prop 每渲染变化导致 stale
   const dndRef = useRef({ onDragOverHalf, onDragLeave, onDropHalf, onFocusGroup });
   dndRef.current = { onDragOverHalf, onDragLeave, onDropHalf, onFocusGroup };
@@ -492,6 +495,13 @@ export function GroupView({
           <div className="term-empty">
             <IconPlug className="term-empty__icon" />
             <div>从左侧 PORTS 打开一个串口开始收发</div>
+            {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
+                现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆 */}
+            <div className="term-empty__hint">
+              <span><kbd>{formatCombo(bindings["port.palette"].combo)}</kbd> 串口面板</span>
+              <span><kbd>{formatCombo(bindings["macro.palette"].combo)}</kbd> 宏</span>
+              <span><kbd>{formatCombo(bindings["script.palette"].combo)}</kbd> 脚本</span>
+            </div>
           </div>
         )}
         {focused && searchOpen && activeTerm?.search && (
@@ -630,13 +640,13 @@ export function SearchBar({
 
   return (
     <div className="searchbar">
-      <button className="searchbar__toggle" data-on={caseSensitive} onClick={() => setCaseSensitive((v) => !v)} title="区分大小写">
+      <button className="searchbar__toggle" data-on={caseSensitive} onClick={() => setCaseSensitive((v) => !v)} title="区分大小写" aria-label="区分大小写" aria-pressed={caseSensitive}>
         Aa
       </button>
-      <button className="searchbar__toggle" data-on={regex} onClick={() => setRegex((v) => !v)} title="正则表达式">
+      <button className="searchbar__toggle" data-on={regex} onClick={() => setRegex((v) => !v)} title="正则表达式" aria-label="正则表达式" aria-pressed={regex}>
         .*
       </button>
-      <button className="searchbar__toggle" data-on={wholeWord} onClick={() => setWholeWord((v) => !v)} title="整词">
+      <button className="searchbar__toggle" data-on={wholeWord} onClick={() => setWholeWord((v) => !v)} title="整词" aria-label="整词匹配" aria-pressed={wholeWord}>
         W
       </button>
       <input
@@ -659,13 +669,13 @@ export function SearchBar({
         spellCheck={false}
       />
       <span className="searchbar__count">{countText}</span>
-      <button className="searchbar__btn" onClick={prev} title="上一个 (Shift+Enter)">
+      <button className="searchbar__btn" onClick={prev} title="上一个 (Shift+Enter)" aria-label="上一个匹配">
         <IconChevronUp />
       </button>
-      <button className="searchbar__btn" onClick={next} title="下一个 (Enter)">
+      <button className="searchbar__btn" onClick={next} title="下一个 (Enter)" aria-label="下一个匹配">
         <IconChevronDown />
       </button>
-      <button className="searchbar__btn searchbar__close" onClick={onClose} title="关闭 (Esc)">
+      <button className="searchbar__btn searchbar__close" onClick={onClose} title="关闭 (Esc)" aria-label="关闭搜索">
         <IconClose />
       </button>
     </div>

@@ -3,6 +3,7 @@ import type {
   ActionId,
   ConnConfig,
   Macro,
+  PaneDir,
   PaneHalf,
   PaneNode,
   PortId,
@@ -77,6 +78,7 @@ import {
   IconGear,
   IconGlobe,
   IconInfo,
+  IconKeyboard,
   IconPlug,
   IconPower,
   IconSliders,
@@ -230,10 +232,26 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
   const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
+  /** 未查看的失败结果 runId 集合(驱动活动栏红角标;打开对应面板即清——"查看"清偿提醒)。 */
+  const [macroUnseen, setMacroUnseen] = useState<Set<string>>(new Set());
+  const [scriptUnseen, setScriptUnseen] = useState<Set<string>>(new Set());
+  // runs 的 ref 镜像:断线等事件回调里读"当前谁在 running"(避免 setState updater 内收集副作用的 StrictMode 双跑)
+  const macroRunsRef = useRef<Map<string, MacroRunCard>>(new Map());
+  const scriptRunsRef = useRef<Map<string, ScriptRunCard>>(new Map());
+  useEffect(() => {
+    macroRunsRef.current = macroRuns;
+    scriptRunsRef.current = scriptRuns;
+  }, [macroRuns, scriptRuns]);
   /** 当前展开日志的卡片 runId(null = 收起);一次展开一个卡片。 */
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   type ActivityView = "ports" | "macros" | "scripts" | null;
-  const [activity, setActivity] = useState<ActivityView>(null);
+  // 默认展开端口面板:空终端区的引导文案("从左侧 PORTS 打开一个串口")依赖它在场
+  const [activity, setActivity] = useState<ActivityView>("ports");
+  /** 打开对应面板即视为"已查看" → 清未读红角标。 */
+  useEffect(() => {
+    if (activity === "macros") setMacroUnseen(new Set());
+    if (activity === "scripts") setScriptUnseen(new Set());
+  }, [activity]);
   /** 侧栏宽度(可拖动调整,localStorage 持久化,clamp 180–480)。 */
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem("sidebar-width"));
@@ -251,9 +269,23 @@ export default function App() {
     });
   const [manageMenu, setManageMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
-  /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉)。 */
+  /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
   const [skillText, setSkillText] = useState<string | null>(null);
+  const [skillFailed, setSkillFailed] = useState(false);
+  const fetchSkill = useCallback(() => {
+    setSkillText(null);
+    setSkillFailed(false);
+    // 注意:非本地态依赖 remotes[0] 同步派生自 connConfig(引用计数 effect 只换 transport 实例不换 id)
+    const t = transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "");
+    // transport 未建(如 Web 连接未就绪):置失败给出重试入口,而非永久「加载中…」
+    if (!t) {
+      setSkillFailed(true);
+      return;
+    }
+    t.getScriptSkill().then(setSkillText).catch(() => setSkillFailed(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLocal]);
   /** 待收集参数的脚本名(非 null=弹参数收集框);null=关闭。 */
   const [pendingRun, setPendingRun] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -266,27 +298,46 @@ export default function App() {
     title: string;
     icon?: React.ReactNode;
     message: string;
-    confirmText?: string;
+    confirmText: string;
     tone?: "primary" | "danger";
     onConfirm: () => void;
   } | null>(null);
 
   // ===== 宏/脚本库（泛型 useNamedLibrary，差异面见 MACRO_SPEC/SCRIPT_SPEC）=====
   // ui 三件套：确认弹窗 / 轻提示 / 错误横幅（库内部行为与文案由此触达宿主）。
+  // 定时器先清旧的再设新的——否则第 2 条横幅会被第 1 条的旧定时器提前清掉（互踩）。
+  const noticeTimer = useRef<number | null>(null);
+  const errorTimer = useRef<number | null>(null);
   const libNotify = useCallback((msg: string, ms = 4000) => {
     setNotice(msg);
-    setTimeout(() => setNotice(""), ms);
+    if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), ms);
   }, []);
   const libError = useCallback((msg: string, ms = 5000) => {
     setErrorMsg(msg);
-    setTimeout(() => setErrorMsg(""), ms);
+    if (errorTimer.current !== null) clearTimeout(errorTimer.current);
+    errorTimer.current = window.setTimeout(() => setErrorMsg(""), ms);
   }, []);
+  // ===== 运行结果 toast:宏/脚本完成时若对应面板不可见,右下角浮出结果,点击打开面板 =====
+  type Toast = { id: number; ok: boolean; text: string; panel: "macros" | "scripts" };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastSeq = useRef(0);
+  const pushToast = useCallback((ok: boolean, text: string, panel: "macros" | "scripts") => {
+    const id = ++toastSeq.current;
+    setToasts((prev) => [...prev.slice(-3), { id, ok, text, panel }]); // 最多同时 4 条
+    window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ok ? 3000 : 6000);
+  }, []);
+  // 事件回调里读当前活动面板(避免闭包过期;activityRef 已被 LED 活动时间戳占用,故名 activityViewRef)
+  const activityViewRef = useRef<ActivityView>(null);
+  useEffect(() => {
+    activityViewRef.current = activity;
+  }, [activity]);
   // 库内确认(删除/解散)onConfirm 完成后自动关弹窗——对齐重构前各 handler 末尾的 setConfirmState(null)
   const libConfirm = useCallback((s: {
     title: string;
     icon?: React.ReactNode;
     message: string;
-    confirmText?: string;
+    confirmText: string;
     tone?: "primary" | "danger";
     onConfirm: () => void | Promise<void>;
   }) => {
@@ -424,16 +475,14 @@ export default function App() {
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置
         const c = res.config;
-        setNotice(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。`);
-        setTimeout(() => setNotice(""), 6000);
+        libNotify(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。如需修改配置，请强制关闭该端口后重新打开。`, 8000);
       }
       return res;
     } catch (e) {
-      setErrorMsg(String(e));
-      setTimeout(() => setErrorMsg(""), 5000);
+      libError(String(e));
       return undefined;
     }
-  }, []);
+  }, [libNotify, libError]);
 
   /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
    *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
@@ -460,16 +509,43 @@ export default function App() {
             void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
           }
         } else {
-          // 断连:清本设备运行卡片幽灵(脚本/宏后端经 owner 清理 abort,但 result 发不回前端 → 卡片会永远卡在 running)。
-          // 端口"断开待重连"标记与端口行灭灯由 reducer(dev_online=false)处理。
+          // 断连:运行中卡片转"已中止"失败态(不删除——结果可回看,而非静默蒸发)。
+          // 只转 running——已完成(✓/✗)的结果是既成事实,断线不该把它翻写成失败。
+          // 被中断的进未读角标;面板不可见时 toast(与自然完成的反馈通道对齐)。
+          const interruptedMacros = [...macroRunsRef.current.entries()].filter(
+            ([, c]) => c.devId === devId && c.status === "running"
+          );
+          const interruptedScripts = [...scriptRunsRef.current.entries()].filter(
+            ([, c]) => c.devId === devId && c.status === "running"
+          );
+          if (interruptedMacros.length) {
+            setMacroUnseen((prev) => new Set([...prev, ...interruptedMacros.map(([rid]) => rid)]));
+            if (activityViewRef.current !== "macros") {
+              pushToast(false, `连接断开，宏「${interruptedMacros.map(([, c]) => c.name).join("」「")}」已中止`, "macros");
+            }
+          }
+          if (interruptedScripts.length) {
+            setScriptUnseen((prev) => new Set([...prev, ...interruptedScripts.map(([rid]) => rid)]));
+            if (activityViewRef.current !== "scripts") {
+              pushToast(false, `连接断开，脚本「${interruptedScripts.map(([, c]) => c.name).join("」「")}」已中止`, "scripts");
+            }
+          }
           setScriptRuns((prev) => {
             const n = new Map(prev);
-            for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
+            for (const [rid, card] of n) {
+              if (card.devId === devId && card.status === "running") {
+                n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
+              }
+            }
             return n;
           });
           setMacroRuns((prev) => {
             const n = new Map(prev);
-            for (const [rid, card] of n) if (card.devId === devId) n.delete(rid);
+            for (const [rid, card] of n) {
+              if (card.devId === devId && card.status === "running") {
+                n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
+              }
+            }
             return n;
           });
         }
@@ -506,8 +582,7 @@ export default function App() {
         reloadScripts();
       }),
       t.onError((msg) => {
-        setErrorMsg(msg);
-        setTimeout(() => setErrorMsg(""), 5000);
+        libError(msg);
       }),
       t.onMacroResult((runId, name, success, message) => {
         // 更新对应卡片 running→done(card 不在则忽略,理论上 runMacro 已 set)。
@@ -519,6 +594,11 @@ export default function App() {
         });
         // 成功结果 3s 后自动消失;失败保留(× 手动关),避免错过错误。
         if (success) setTimeout(() => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; }), 3000);
+        if (!success) setMacroUnseen((prev) => new Set(prev).add(runId)); // 红角标(打开面板清偿)
+        // 面板不可见时浮 toast(命令面板跑宏最常见:activity 还停在 ports)
+        if (activityViewRef.current !== "macros") {
+          pushToast(success, `宏「${name}」${success ? "完成" : `失败：${message ?? ""}`}`, "macros");
+        }
       }),
       t.onScriptResult((runId, name, success, message) => {
         if (!runId) return;
@@ -527,6 +607,10 @@ export default function App() {
           if (!card) return prev;
           return new Map(prev).set(runId, { ...card, status: "done", success, message });
         });
+        if (!success) setScriptUnseen((prev) => new Set(prev).add(runId));
+        if (activityViewRef.current !== "scripts") {
+          pushToast(success, `脚本「${name}」${success ? "完成" : `失败：${message ?? ""}`}`, "scripts");
+        }
       }),
       t.onScriptLog((runId, message) => {
         // 未知 runId 忽略(防 MCP run_id="" 污染);每卡片 logs cap 1000(滚动)。
@@ -539,7 +623,7 @@ export default function App() {
         });
       }),
     ];
-  }, [openPort, prunePort, reloadScripts]);
+  }, [openPort, prunePort, reloadScripts, libError, pushToast]);
 
   // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
   // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。
@@ -607,9 +691,10 @@ export default function App() {
     });
   }, [isLocal, connConfig.host, connConfig.port]);
 
-  // 服务器配置：Tauri 控制面 invoke 读本地 settings.json
-  useEffect(() => {
-    if (!isTauri()) return;
+  // 服务器配置：Tauri 控制面 invoke 读本地 settings.json(失败可从设置面板重试)
+  const [srvFailed, setSrvFailed] = useState(false);
+  const loadSrvSettings = useCallback(() => {
+    setSrvFailed(false);
     tauriInvoke<SrvSettings>("get_settings")
       .then((s) => {
         setSrvSettings(s);
@@ -617,8 +702,12 @@ export default function App() {
           setConnConfig((c) => (c.port === s.ws_port ? c : { host: "127.0.0.1", port: s.ws_port }));
         }
       })
-      .catch(() => {});
+      .catch(() => setSrvFailed(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => {
+    if (isTauri()) loadSrvSettings();
+  }, [loadSrvSettings]);
 
   // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）；Web/远程窗口不加载
   // （由 connConfig 派生单设备）。加载后全展开 → 引用计数 effect 自动重连之前的设备。
@@ -717,13 +806,11 @@ export default function App() {
         await transportsRef.current.get(devId)?.setAlias(name, trimmed);
         refreshPorts(devId);
       } catch (e) {
-        setErrorMsg("设置别名失败: " + String(e));
-        setTimeout(() => setErrorMsg(""), 5000);
+        libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
       }
     } else if (res && !res.opened) {
       // 附加：别名未生效（端口已被其它会话先开）
-      setNotice("端口已被其它会话打开，本次别名未生效。");
-      setTimeout(() => setNotice(""), 5000);
+      libNotify("端口已被其它会话打开，本次别名未生效。");
     }
   };
 
@@ -803,16 +890,21 @@ export default function App() {
   const movePort = (port: string, srcGroupId: string, dstGroupId: string) =>
     dispatch({ type: "move_port", port, srcGroupId, dstGroupId });
 
-  /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例)，leaf→GroupView(标签栏+终端区)。 */
-  const renderPane = (node: PaneNode) => {
+  /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例 + 拖动手柄)，leaf→GroupView(标签栏+终端区)。
+   *  path = 从根到此节点的子索引序列,供 set_split_ratio 定位(根 split 为 [])。 */
+  const renderPane = (node: PaneNode, path: number[] = []) => {
     if (node.type === "split") {
       return (
         <div className={`pane-split pane-split--${node.dir}`}>
           <div className="pane-split__child" style={{ flex: node.ratio }}>
-            {renderPane(node.children[0])}
+            {renderPane(node.children[0], [...path, 0])}
           </div>
+          <PaneDivider
+            dir={node.dir}
+            onRatio={(r) => dispatch({ type: "set_split_ratio", path, ratio: r })}
+          />
           <div className="pane-split__child" style={{ flex: 1 - node.ratio }}>
-            {renderPane(node.children[1])}
+            {renderPane(node.children[1], [...path, 1])}
           </div>
         </div>
       );
@@ -894,7 +986,7 @@ export default function App() {
 
   const runMacro = (name: string) => {
     if (!activePort) {
-      setErrorMsg("请先选择并打开一个串口");
+      libError("请先选择并打开一个串口");
       return;
     }
     const runId = crypto.randomUUID();
@@ -912,7 +1004,7 @@ export default function App() {
       : { devId: isLocal ? "local" : (remotes[0]?.id ?? ""), name: "" };
     const transport = transportsRef.current.get(devId);
     if (!transport) {
-      setErrorMsg(isLocal ? "本地服务未就绪" : "请先连接一台远程设备");
+      libError(isLocal ? "本地服务未就绪，无法运行脚本；请重启应用后重试" : "尚无可用连接，请先添加并连接一台远程设备");
       return;
     }
     const runId = crypto.randomUUID();
@@ -929,13 +1021,15 @@ export default function App() {
     doRun(name, {});
   };
 
-  /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。同地址已存在则轻提示。 */
+  /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。
+   *  重复地址由 RemoteDialog 内联拦截(含 Enter 路径),此处再兜一层防御——
+   *  校验只在 UI 入口做等于只拦鼠标不拦键盘。 */
   const addRemote = () => {
     const host = remoteInput.host.trim();
     if (!host) return;
+    if (remotes.some((r) => r.host === host && r.port === remoteInput.port)) return;
     const id = crypto.randomUUID();
     const dev: RemoteDevice = { id, host, port: remoteInput.port, nickname: remoteInput.nickname.trim() || undefined };
-    const dup = remotes.some((r) => r.host === host && r.port === dev.port);
     setRemotes((prev) => {
       const next = [...prev, dev];
       if (isLocal) persistRemotes(next);
@@ -944,10 +1038,6 @@ export default function App() {
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
     setRemoteInput({ host: "", port: 18700, nickname: "" });
     setRemoteOpen(false);
-    if (dup) {
-      setNotice(`已添加（${host}:${dev.port} 已存在同地址设备）。`);
-      setTimeout(() => setNotice(""), 5000);
-    }
   };
 
   /** 删除远程设备：关其所有 Tab + 显式销毁 transport（引用计数 effect 不再遍历已删 devId）+ 移出列表。 */
@@ -996,6 +1086,37 @@ export default function App() {
     });
   };
 
+  /** 断开在线设备:有开着的 tab 先确认(一并关闭);无 tab 直接断。
+   *  实现 = 关 tab + 移出 expandedRemotes → 引用计数 effect 自动 dispose。
+   *  与「删除设备」的差别:保留设备定义,可随时重连。 */
+  const disconnectRemote = (dev: RemoteDevice) => {
+    const label = dev.nickname?.trim() || `${dev.host}:${dev.port}`;
+    const tabs = openPorts.filter((p) => parsePortId(p).devId === dev.id);
+    const doDisconnect = () => {
+      tabs.forEach((pid) => prunePort(pid));
+      setExpandedRemotes((prev) => {
+        const n = new Set(prev);
+        n.delete(dev.id);
+        return n;
+      });
+    };
+    if (tabs.length > 0) {
+      setConfirmState({
+        title: "断开远程设备",
+        icon: <IconPower />,
+        message: `断开「${label}」？其 ${tabs.length} 个串口标签将关闭。设备仍保留在列表中，可随时重连。`,
+        confirmText: "断开",
+        tone: "danger",
+        onConfirm: () => {
+          doDisconnect();
+          setConfirmState(null);
+        },
+      });
+    } else {
+      doDisconnect();
+    }
+  };
+
   const refreshPorts = (devId?: string) => {
     if (devId) transportsRef.current.get(devId)?.list();
     else transportsRef.current.forEach((t) => t.list());
@@ -1016,12 +1137,16 @@ export default function App() {
       await transportsRef.current.get(devId)?.setAlias(name, alias);
       refreshPorts(devId);
     } catch (e) {
-      setErrorMsg("设置别名失败: " + String(e));
-      setTimeout(() => setErrorMsg(""), 5000);
+      libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
     }
   };
 
   const activeHolders = activePort ? portInfoOf(activePort)?.holders ?? 0 : 0;
+  /** 活动栏角标:运行中(绿点)优先,否则有"未查看"的失败结果(红点,打开面板即清)。 */
+  const macroRunning = [...macroRuns.values()].some((c) => c.status === "running");
+  const macroFailed = [...macroRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && macroUnseen.has(rid));
+  const scriptRunning = [...scriptRuns.values()].some((c) => c.status === "running");
+  const scriptFailed = [...scriptRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && scriptUnseen.has(rid));
   /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）。每卡带 devId/label/online/ports。 */
   const portGroups: { devId: string; label: string; online?: boolean; ports: PortInfo[] }[] = [
     ...(isLocal ? [{ devId: "local", label: "本地", online: devOnline["local"], ports: portsByDev["local"] ?? [] }] : []),
@@ -1127,9 +1252,21 @@ export default function App() {
       {/* 活动栏：44px 窄竖条 */}
       <div className="activity-bar">
         <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
-        <ActivityIcon icon={<IconBolt className="act-icon__svg" />} title="宏" active={activity === "macros"} onClick={() => setActivity(activity === "macros" ? null : "macros")} />
+        <ActivityIcon
+          icon={<IconBolt className="act-icon__svg" />}
+          title="宏"
+          active={activity === "macros"}
+          onClick={() => setActivity(activity === "macros" ? null : "macros")}
+          badge={macroRunning ? "run" : macroFailed ? "alert" : undefined}
+        />
         {showScripts && (
-          <ActivityIcon icon={<IconCode className="act-icon__svg" />} title="脚本" active={activity === "scripts"} onClick={() => setActivity(activity === "scripts" ? null : "scripts")} />
+          <ActivityIcon
+            icon={<IconCode className="act-icon__svg" />}
+            title="脚本"
+            active={activity === "scripts"}
+            onClick={() => setActivity(activity === "scripts" ? null : "scripts")}
+            badge={scriptRunning ? "run" : scriptFailed ? "alert" : undefined}
+          />
         )}
         <div className="activity-bar__spacer" />
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
@@ -1147,6 +1284,9 @@ export default function App() {
               <div className="manage-menu">
                 <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
                   <IconGear /> 设置
+                </button>
+                <button className="manage-menu__item" onClick={() => { setShortcutsOpen(true); setManageMenu(false); }}>
+                  <IconKeyboard /> 键盘快捷键
                 </button>
                 <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
                   <IconInfo /> 关于
@@ -1182,6 +1322,7 @@ export default function App() {
               onCancelAlias={() => setAliasEdit(null)}
               onForceClose={forceClosePort}
               onReconnectRemote={reconnectRemote}
+              onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
               onRefresh={() => refreshPorts()}
             />
@@ -1203,6 +1344,7 @@ export default function App() {
               onNew={() => openMacroEditor(null)}
               newItemLabel="宏"
               emptyHint="无宏（点 ＋ 新增）"
+              storageHint={!isLocal ? "Web 模式：宏保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
               renderRow={(name) => (
                 <MacroRow
                   key={name}
@@ -1246,15 +1388,15 @@ export default function App() {
               onNew={() => openScriptEditor(null)}
               newItemLabel="脚本"
               emptyHint="无脚本（点 ＋ 新增）"
+              storageHint={!isLocal ? "Web 模式：脚本保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
               extraActions={
                 <button
                   className="icon-btn"
-                  title="脚本编写指南(查看 / 复制给外部 Agent)"
+                  title="脚本编写指南（查看 / 复制给外部 Agent）"
+                  aria-label="脚本编写指南"
                   onClick={() => {
                     setSkillOpen(true);
-                    if (skillText === null) {
-                      transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "")?.getScriptSkill().then(setSkillText).catch(() => {});
-                    }
+                    if (skillText === null) fetchSkill();
                   }}
                 >
                   <IconInfo />
@@ -1312,26 +1454,46 @@ export default function App() {
             window.addEventListener("mouseup", onUp);
           }}
           onDoubleClick={() => setSidebarWidth(240)}
-          title="拖动调整宽度(双击重置)"
+          title="拖动调整宽度（双击重置）"
         />
         </>
       )}
 
       <main className="main">
         {errorMsg && (
-          <div className="banner banner--err">
+          <div className="banner banner--err" role="alert">
             <IconAlert /> {errorMsg}
+            <button
+              className="banner__close"
+              aria-label="关闭错误提示"
+              onClick={() => {
+                if (errorTimer.current !== null) clearTimeout(errorTimer.current);
+                setErrorMsg("");
+              }}
+            >
+              <IconClose />
+            </button>
           </div>
         )}
         {notice && (
-          <div className="banner banner--notice">
+          <div className="banner banner--notice" role="status">
             <IconInfo /> {notice}
+            <button
+              className="banner__close"
+              aria-label="关闭提示"
+              onClick={() => {
+                if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+                setNotice("");
+              }}
+            >
+              <IconClose />
+            </button>
           </div>
         )}
         {serviceError && (
-          <div className="banner banner--err">
+          <div className="banner banner--err" role="alert">
             <IconAlert /> {serviceError}
-            <button className="banner__close" onClick={() => setServiceError("")} title="关闭">
+            <button className="banner__close" onClick={() => setServiceError("")} title="关闭" aria-label="关闭">
               <IconClose />
             </button>
           </div>
@@ -1341,6 +1503,26 @@ export default function App() {
         {renderPane(layout)}
         {/* TermView 实例池：固定渲染于此（offscreen 隐藏），DOM 由 TermView 经 appendChild
             挪入所属 group 的终端容器（DOM reparent）。跨 group 搬 tab 只换容器、组件不重建 → 保 scrollback。 */}
+        {/* 运行结果 toast:面板不可见时的完成/失败反馈,点击跳对应面板 */}
+        {toasts.length > 0 && (
+          <div className="toast-area" aria-live="polite">
+            {toasts.map((t) => (
+              <button
+                key={t.id}
+                className={`toast toast--${t.ok ? "ok" : "err"}`}
+                onClick={() => {
+                  setActivity(t.panel);
+                  setToasts((prev) => prev.filter((x) => x.id !== t.id));
+                }}
+              >
+                <span className="toast__mark">{t.ok ? "✓" : "✗"}</span>
+                <span className="toast__text">{t.text}</span>
+                <span className="toast__go">查看</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="term-pool" aria-hidden>
           {openPorts.map((port) => {
             const gid = groupOfPort.get(port);
@@ -1412,8 +1594,7 @@ export default function App() {
               const saved = await downloadJson("serial-studio-macros.json", obj);
               if (saved) setExportMacrosOpen(false); // 用户取消（saved=false）则保持对话框打开
             } catch (e) {
-              setErrorMsg("导出失败: " + String(e));
-              setTimeout(() => setErrorMsg(""), 5000);
+              libError(`导出失败：${String(e)}，请重试或更换保存位置`);
             }
           }}
           onCancel={() => setExportMacrosOpen(false)}
@@ -1431,8 +1612,7 @@ export default function App() {
               const saved = await downloadJson("serial-studio-scripts.json", obj);
               if (saved) setExportScriptsOpen(false);
             } catch (e) {
-              setErrorMsg("导出失败: " + String(e));
-              setTimeout(() => setErrorMsg(""), 5000);
+              libError(`导出失败：${String(e)}，请重试或更换保存位置`);
             }
           }}
           onCancel={() => setExportScriptsOpen(false)}
@@ -1444,6 +1624,8 @@ export default function App() {
         <SettingsPanel
           connConfig={connConfig}
           srvSettings={srvSettings}
+          srvFailed={srvFailed}
+          onRetrySrv={loadSrvSettings}
           showServer={isTauri() && !isRemote}
           onOpenShortcuts={() => setShortcutsOpen(true)}
           onConnChange={(c) => {
@@ -1458,8 +1640,7 @@ export default function App() {
               setErrorMsg("");
               setConnConfig({ host: s.ws_host, port: s.ws_port });
             } catch (e) {
-              setErrorMsg(String(e));
-              setTimeout(() => setErrorMsg(""), 5000);
+              libError(String(e));
             }
           }}
           onClose={() => setSettingsOpen(false)}
@@ -1468,7 +1649,7 @@ export default function App() {
 
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
       {skillOpen && (
-        <ScriptSkillDialog text={skillText ?? "加载中…"} onClose={() => setSkillOpen(false)} />
+        <ScriptSkillDialog text={skillText} failed={skillFailed} onRetry={fetchSkill} onClose={() => setSkillOpen(false)} />
       )}
       {pendingRun && scripts[pendingRun]?.params?.length && (
         <ScriptRunParamsDialog
@@ -1512,17 +1693,13 @@ export default function App() {
           }}
         />
       )}
-      {remoteOpen && <RemoteDialog input={remoteInput} onChange={setRemoteInput} onConfirm={addRemote} onCancel={() => setRemoteOpen(false)} />}
-
-      {confirmState && (
-        <ConfirmDialog
-          title={confirmState.title}
-          icon={confirmState.icon}
-          message={confirmState.message}
-          confirmText={confirmState.confirmText}
-          tone={confirmState.tone}
-          onConfirm={confirmState.onConfirm}
-          onCancel={() => setConfirmState(null)}
+      {remoteOpen && (
+        <RemoteDialog
+          input={remoteInput}
+          onChange={setRemoteInput}
+          onConfirm={addRemote}
+          onCancel={() => setRemoteOpen(false)}
+          existing={remotes.map((r) => `${r.host}:${r.port}`)}
         />
       )}
 
@@ -1538,7 +1715,7 @@ export default function App() {
           onMacroChange={setEditorMacro}
           onSave={saveMacroDef}
           onDelete={() => deleteMacro(editing.name)}
-          onCancel={() => macroLib.setEditing(null)}
+          onCancel={macroLib.closeEditor}
         />
       )}
 
@@ -1554,10 +1731,68 @@ export default function App() {
           onScriptChange={setEditorScript}
           onSave={saveScriptDef}
           onDelete={() => deleteScript(editingScript.name)}
-          onCancel={() => scriptLib.setEditing(null)}
+          onCancel={scriptLib.closeEditor}
+        />
+      )}
+
+      {/* 确认弹窗:必须排在所有对话框之后——overlay 同 z-index 时后来者居上,
+          放前面会被编辑器盖住(如编辑器 dirty 确认弹在编辑器下层不可见) */}
+      {confirmState && (
+        <ConfirmDialog
+          title={confirmState.title}
+          icon={confirmState.icon}
+          message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          tone={confirmState.tone}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
         />
       )}
       </div>
     </div>
+  );
+}
+
+/** 分栏拖动手柄宽度(px),与 CSS .pane-divider 的 flex-basis 保持一致(命中区 10px)。 */
+const PANE_DIVIDER_W = 10;
+
+/** 分栏拖动手柄:拖动按容器内坐标实时改比例(reducer 内 clamp 0.15–0.85),双击复位 0.5。
+ *  容器取 parentElement(即 .pane-split)。比例按"两子格可用空间"算——须扣除手柄自身宽,
+ *  否则手柄永远滞后光标约半个手柄宽。拖动监听挂 window,组件卸载兜底移除
+ *  (防拖动中布局坍缩/重构后悬空监听继续 dispatch 过期 path)。 */
+function PaneDivider({ dir, onRatio }: { dir: PaneDir; onRatio: (r: number) => void }) {
+  const cleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cleanupRef.current?.(), []);
+  const start = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+    const move = (ev: MouseEvent) => {
+      const total = (dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_W;
+      const pos = dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
+      onRatio((pos - PANE_DIVIDER_W / 2) / total);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      cleanupRef.current = null;
+    };
+    cleanupRef.current = up;
+    document.body.style.cursor = dir === "row" ? "col-resize" : "row-resize";
+    document.body.style.userSelect = "none"; // 拖动期间禁选中(同侧栏拖宽)
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  return (
+    <div
+      className={`pane-divider pane-divider--${dir}`}
+      onMouseDown={start}
+      onDoubleClick={() => onRatio(0.5)}
+      role="separator"
+      aria-orientation={dir === "row" ? "vertical" : "horizontal"}
+      title="拖动调整比例（双击复位）"
+    />
   );
 }

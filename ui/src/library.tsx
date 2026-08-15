@@ -23,7 +23,8 @@ export interface LibraryUI {
     title: string;
     icon?: React.ReactNode;
     message: string;
-    confirmText?: string;
+    /** 必填动词式按钮文案（如「删除」「解散」），避免泛化「确定」。 */
+    confirmText: string;
     tone?: "primary" | "danger";
     onConfirm: () => void | Promise<void>;
   }) => void;
@@ -88,6 +89,8 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
   const [editorName, setEditorName] = useState("");
   const [editorItem, setEditorItem] = useState<T>(spec.newItem);
   const [editorError, setEditorError] = useState("");
+  /** 打开时的快照（名字+条目），供 closeEditor 判 dirty。 */
+  const [editorInitial, setEditorInitial] = useState<{ name: string; item: T }>({ name: "", item: spec.newItem() });
   /** 侧栏分组折叠状态（收起的组名集合，localStorage 持久化，单一数据源集中写盘）。 */
   const [collapsed, setCollapsed] = useState<Set<string>>(
     () => new Set(JSON.parse(localStorage.getItem(spec.collapsedKey) ?? "[]") as string[])
@@ -112,12 +115,34 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       setEditing({ name, isNew: false });
       setEditorName(name);
       setEditorItem(JSON.parse(JSON.stringify(items[name])));
+      setEditorInitial({ name, item: items[name] });
     } else {
       setEditing({ name: "", isNew: true });
       setEditorName("");
       setEditorItem(spec.newItem());
+      setEditorInitial({ name: "", item: spec.newItem() });
     }
     setEditorError("");
+  };
+
+  /** 关闭编辑器;有未保存改动先确认(保存/删除路径不经此处,直接 setEditing(null))。 */
+  const closeEditor = () => {
+    if (!editing) return;
+    const dirty =
+      editorName !== editorInitial.name ||
+      JSON.stringify(editorItem) !== JSON.stringify(editorInitial.item);
+    if (!dirty) {
+      setEditing(null);
+      return;
+    }
+    ui.confirm({
+      title: "放弃未保存的修改",
+      icon: <IconAlert />,
+      message: `「${editorInitial.name || "未命名"}」的修改尚未保存，关闭后将丢失。`,
+      confirmText: "放弃修改",
+      tone: "danger",
+      onConfirm: () => setEditing(null),
+    });
   };
 
   const saveDef = async () => {
@@ -146,7 +171,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     ui.confirm({
       title: `删除${spec.label}`,
       icon: <IconTrash />,
-      message: `删除${spec.label} "${name}"？此操作不可恢复。`,
+      message: `删除${spec.label}「${name}」？此操作不可恢复。`,
       confirmText: "删除",
       tone: "danger",
       onConfirm: async () => {
@@ -183,7 +208,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     ui.confirm({
       title: "解散分组",
       icon: <IconAlert />,
-      message: `解散分组「${name}」?其中 ${count} 个${spec.label}将移至「未分组」,不会被删除。`,
+      message: `解散分组「${name}」？其中 ${count} 个${spec.label}将移至「未分组」，不会被删除。`,
       confirmText: "解散",
       tone: "danger",
       onConfirm: async () => {
@@ -229,7 +254,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       }
       ui.notify(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或无效）` : ""}。`, 5000);
     } catch (err) {
-      ui.error(`导入失败：` + String(err), 6000);
+      ui.error(`导入失败：${String(err)}，请确认文件为有效的 JSON`, 6000);
     }
   };
 
@@ -249,6 +274,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     setItems,
     editing,
     setEditing,
+    closeEditor,
     editorName,
     setEditorName,
     editorItem,

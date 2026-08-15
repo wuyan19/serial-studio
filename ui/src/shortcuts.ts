@@ -54,7 +54,7 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   "port.refresh": "刷新端口列表",
   "settings.open": "打开设置",
   "about.open": "关于",
-  "remote.open": "打开远程窗口",
+  "remote.open": "添加远程设备",
   "activity.toggle-ports": "切到端口侧栏",
   "activity.toggle-macros": "切到宏侧栏",
   "activity.toggle-scripts": "切到脚本侧栏",

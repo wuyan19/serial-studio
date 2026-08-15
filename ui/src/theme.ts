@@ -11,6 +11,7 @@
  *   3. index.html 内联脚本的 id 数组 + 首帧背景色规则
  *   4. components/term.tsx 的 TERM_THEMES / SEARCH_DECORATIONS 各加一条
  *   5. App.tsx 的 THEME_ICONS 加一条
+ *   6. components/editors.tsx 的 CodeMirror 语法色(cmSyntax*,色值与 TERM_THEMES 同源)加一套
  */
 
 /** 主题注册表（有序，toggle 按此循环）。 */

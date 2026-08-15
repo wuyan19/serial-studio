@@ -6,7 +6,7 @@ import { BAUD_RATES, isTauri } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconPlug } from "../icons";
-import { ConfigRow, useDialogKeys, useEscClose } from "./primitives";
+import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 
 // ===== 串口配置对话框 =====
 
@@ -30,14 +30,19 @@ export function SerialConfigDialog({
   // 别名是端口语义（每端口独立），用内部状态；config 仍是受控（跨端口沿用）。
   // 调用方 key={port} 保证换端口时重挂、状态重置。
   const [alias, setAlias] = useState(initialAlias);
+  const [baud, setBaud] = useState(String(config.baud_rate));
+  // 波特率自由输入态(初始:现值不在常用档里则直接进入,如重开 250000 的端口)
+  const [customBaud, setCustomBaud] = useState(() => !BAUD_RATES.includes(config.baud_rate));
   const openRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   // 默认聚焦「打开」：用默认串口参数时直接回车即开，免点鼠标。
   useEffect(() => {
     openRef.current?.focus();
   }, []);
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="打开串口" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconPlug /> OPEN PORT
         </h3>
@@ -46,13 +51,62 @@ export function SerialConfigDialog({
           <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，描述此端口连接的设备" className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="波特率">
-          <select value={config.baud_rate} onChange={(e) => onChange({ ...config, baud_rate: Number(e.target.value) })} className="field-select">
-            {BAUD_RATES.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
+          {/* 常用档 select + 「自定义…」切自由输入(如 250000,WS2812/DMX 常用)。
+              datalist 会被已填值前缀过滤、天然不给全列表,故不用。
+              自由输入的 string 态承接中间态,仅合法正整数上抛;失焦非法则回退下拉并恢复上个合法值。 */}
+          {customBaud ? (
+            <>
+              <input
+                autoFocus
+                inputMode="numeric"
+                value={baud}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  setBaud(v);
+                  const n = Number(v);
+                  if (v !== "" && Number.isInteger(n) && n > 0) onChange({ ...config, baud_rate: n });
+                }}
+                onBlur={() => {
+                  const n = Number(baud);
+                  if (!(baud !== "" && Number.isInteger(n) && n > 0)) {
+                    setCustomBaud(false);
+                    setBaud(String(config.baud_rate));
+                  }
+                }}
+                placeholder="如 250000"
+                className="field"
+                autoCapitalize="off"
+                spellCheck={false}
+              />
+              {/* 合法自定义值也要有回下拉的出口(下方 select 有动态 option 兜住显示) */}
+              <button type="button" className="mini-btn" title="回到常用档下拉" aria-label="回到常用档下拉" onClick={() => setCustomBaud(false)}>↺</button>
+            </>
+          ) : (
+            <select
+              value={config.baud_rate}
+              onChange={(e) => {
+                if (e.target.value === "custom") {
+                  setCustomBaud(true);
+                } else {
+                  setBaud(e.target.value);
+                  onChange({ ...config, baud_rate: Number(e.target.value) });
+                }
+              }}
+              className="field-select"
+            >
+              {BAUD_RATES.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+              {/* 现值不在常用档(如自定义后回退/重开 250000 端口):动态 option 兜住,
+                  否则 select 无匹配项渲染空白、显示与实际不符 */}
+              {!BAUD_RATES.includes(config.baud_rate) && (
+                <option value={config.baud_rate}>{config.baud_rate}（自定义）</option>
+              )}
+              <option value="custom">自定义…</option>
+            </select>
+          )}
         </ConfigRow>
         <ConfigRow label="数据位">
           <select value={config.data_bits} onChange={(e) => onChange({ ...config, data_bits: e.target.value })} className="field-select">
@@ -140,9 +194,11 @@ export function ExportMacrosDialog({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, onConfirm, onCancel]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="导出宏" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconExport /> EXPORT MACROS
         </h3>
@@ -214,9 +270,11 @@ export function ExportScriptsDialog({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, onConfirm, onCancel]);
+  const scriptDialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(scriptDialogRef);
   return (
     <div className="dialog-overlay" onClick={onCancel}>
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={scriptDialogRef} role="dialog" aria-modal="true" aria-label="导出脚本" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconExport /> EXPORT SCRIPTS
         </h3>
@@ -259,6 +317,8 @@ export function ExportScriptsDialog({
 export function SettingsPanel({
   connConfig,
   srvSettings,
+  srvFailed,
+  onRetrySrv,
   onConnChange,
   onSaveSrv,
   showServer,
@@ -267,6 +327,9 @@ export function SettingsPanel({
 }: {
   connConfig: ConnConfig;
   srvSettings: SrvSettings | null;
+  /** get_settings 失败(srvSettings 为 null 时区分「加载中」与「失败」)。 */
+  srvFailed?: boolean;
+  onRetrySrv?: () => void;
   onConnChange: (c: ConnConfig) => void;
   onSaveSrv: (s: SrvSettings) => void;
   showServer: boolean;
@@ -294,6 +357,8 @@ export function SettingsPanel({
 
   // 同 AliasDialog：默认聚焦首个输入框可直接键入；回车（任意焦点）触发主操作。
   useDialogKeys({ onClose, onEnter: apply });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
 
   // 置于内容与按钮行之间（本地模式在 Telnet 端口下），两分支共用，避免重复。
   const shortcutEntry = (
@@ -305,7 +370,7 @@ export function SettingsPanel({
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGear /> SETTINGS
         </h3>
@@ -376,6 +441,11 @@ export function SettingsPanel({
                   </button>
                 </div>
               </>
+            ) : srvFailed ? (
+              <div style={{ color: "var(--danger)", display: "flex", alignItems: "center", gap: 10 }}>
+                服务器配置加载失败
+                <button className="btn" onClick={onRetrySrv}>重试</button>
+              </div>
             ) : (
               <div style={{ color: "var(--ink-faint)" }}>加载中…</div>
             )}
@@ -455,10 +525,11 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [recording, onClose]);
-
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="键盘快捷键" className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGear /> SHORTCUTS
         </h3>
@@ -486,6 +557,7 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
                   type="button"
                   className="mini-btn"
                   title="重置默认"
+                  aria-label={`重置「${ACTION_LABELS[action]}」为默认键`}
                   disabled={isDefault}
                   onClick={() => {
                     resetBinding(action);
@@ -549,10 +621,12 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
     );
     setStatus(s);
   }
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="关于 Serial Studio" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <div className="about">
           <div className="about__mark">
             <IconPlug />
@@ -590,7 +664,7 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
                   <div className="about__progress">
                     <div className="about__progress-fill" style={{ width: `${status.percent ?? 0}%` }} />
                   </div>
-                  <p className="about__update-msg">下载中 {status.percent ?? 0}%</p>
+                  <p className="about__update-msg">下载中… {status.percent ?? 0}%</p>
                 </div>
               )}
               {status.state === "downloadComplete" && (
@@ -618,16 +692,23 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
  *  纯文本展示(等宽、pre-wrap);复制的是 SKILL.md 原文,粘给 Agent 即完整 skill。 */
 export function ScriptSkillDialog({
   text,
+  failed,
+  onRetry,
   onClose,
 }: {
-  text: string;
+  text: string | null;
+  /** 拉取失败(null 时区分「加载中」与「失败」)。 */
+  failed?: boolean;
+  onRetry?: () => void;
   onClose: () => void;
 }) {
   useEscClose(onClose);
   const [copied, setCopied] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(text ?? "");
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -636,7 +717,7 @@ export function ScriptSkillDialog({
   };
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="脚本编写指南" className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
         <div className="macro-editor__head">
           <h3 className="dialog__title">脚本编写指南</h3>
           <div className="dialog__sub">
@@ -644,10 +725,17 @@ export function ScriptSkillDialog({
           </div>
         </div>
         <div className="macro-editor__scroll">
-          <pre className="script-skill__pre">{text}</pre>
+          {failed ? (
+            <div style={{ padding: "24px 8px", textAlign: "center" }}>
+              <p style={{ color: "var(--danger)", margin: "0 0 12px" }}>指南加载失败，请检查连接后重试。</p>
+              <button className="btn" onClick={onRetry}>重试</button>
+            </div>
+          ) : (
+            <pre className="script-skill__pre">{text ?? "加载中…"}</pre>
+          )}
         </div>
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
-          <button className="btn btn--primary" onClick={copy}>
+          <button className="btn btn--primary" onClick={copy} disabled={failed || !text}>
             <IconCopy /> {copied ? "已复制 ✓" : "复制给外部 Agent"}
           </button>
           <button className="btn" onClick={onClose}>
@@ -659,35 +747,48 @@ export function ScriptSkillDialog({
   );
 }
 
-export function RemoteDialog({ input, onChange, onConfirm, onCancel }: {
+export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }: {
   input: { host: string; port: number; nickname: string };
   onChange: (v: { host: string; port: number; nickname: string }) => void;
   onConfirm: () => void;
   onCancel: () => void;
+  /** 已存在设备地址列表（"host:port"），用于重复拦截 */
+  existing: string[];
 }) {
-  useDialogKeys({ onClose: onCancel, onEnter: onConfirm });
+  const host = input.host.trim();
+  const dup = host !== "" && existing.includes(`${host}:${input.port}`);
+  const invalid = host === "" || dup;
+  // Enter 是 window 级监听,不看按钮 disabled——主操作必须自带校验,否则键盘路径绕过拦截
+  useDialogKeys({ onClose: onCancel, onEnter: () => { if (!invalid) onConfirm(); } });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="添加远程设备" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGlobe /> 添加远程设备
         </h3>
         <div className="dialog__sub">连接远程 Serial Studio 服务</div>
         <ConfigRow label="地址">
-          <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" spellCheck={false} />
+          <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="端口">
-          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
+          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="昵称">
-          <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" autoCapitalize="off" spellCheck={false} />
+          <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
+        {dup && (
+          <p className="dialog__hint" style={{ color: "var(--danger)" }}>
+            已存在同地址设备 {host}:{input.port}，无需重复添加。
+          </p>
+        )}
         <p className="dialog__hint">将作为远程设备卡加入串口列表，展开即按需连接。</p>
         <div className="btn-row">
           <button className="btn btn--ghost" onClick={onCancel}>
             取消
           </button>
-          <button className="btn btn--primary" onClick={onConfirm}>
+          <button className="btn btn--primary" onClick={onConfirm} disabled={invalid} title={host === "" ? "请填写设备地址" : undefined}>
             添加
           </button>
         </div>
@@ -709,9 +810,11 @@ export function ScriptRunParamsDialog({ scriptName, params, onConfirm, onCancel 
     return init;
   });
   useDialogKeys({ onClose: onCancel, onEnter: () => onConfirm(values) });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`运行参数 ${scriptName}`} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title"><IconCode /> 运行参数</h3>
         <div className="dialog__sub">{scriptName}</div>
         {params.map((p) => (
@@ -743,7 +846,7 @@ export function ConfirmDialog({
   title,
   icon,
   message,
-  confirmText = "确定",
+  confirmText,
   cancelText = "取消",
   tone = "primary",
   onConfirm,
@@ -752,36 +855,32 @@ export function ConfirmDialog({
   title: string;
   icon?: React.ReactNode;
   message: React.ReactNode;
-  confirmText?: string;
+  /** 动词式按钮文案（「删除」「解散」…），必填以防退化为泛化「确定」。 */
+  confirmText: string;
   cancelText?: string;
   tone?: "primary" | "danger";
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   // Enter 确认 / Esc 取消——与搜索框一致的键盘语义。遮罩不关闭（防误触，同其它对话框）。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        onConfirm();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onConfirm, onCancel]);
+  // danger（删除/强关等破坏性操作）Enter 落到取消:连击回车不该直接执行不可恢复动作。
+  // 键盘走 useDialogKeys(栈仲裁:叠在编辑器上时只响栈顶,不再与下层 Esc 监听双触发)。
+  useDialogKeys({ onClose: onCancel, onEnter: () => (tone === "danger" ? onCancel() : onConfirm()) });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // danger 时初始焦点在「取消」(经 useDialogA11y 的 initialFocus,而非 autoFocus——后者会
+  // 污染 prev 捕获,导致确认框关闭后焦点丢 body、逃出仍在的编辑器)
+  useDialogA11y(dialogRef, tone === "danger" ? cancelRef : undefined);
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={title} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           {icon ?? <IconAlert />} {title}
         </h3>
         <div className="dialog__sub">{message}</div>
         <div className="btn-row">
-          <button className="btn btn--ghost" onClick={onCancel}>
+          <button ref={cancelRef} className="btn btn--ghost" onClick={onCancel}>
             {cancelText}
           </button>
           <button className={`btn ${tone === "danger" ? "btn--danger" : "btn--primary"}`} onClick={onConfirm}>

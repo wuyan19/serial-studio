@@ -49,8 +49,7 @@ export function RunCards({
                 <div
                   className="script-task__head"
                   title={`${card.name} 运行中`}
-                  onClick={hasLogs ? () => onToggleExpand(runId) : undefined}
-                  role={hasLogs ? "button" : undefined}
+                  {...expandableHeadProps(runId, card.name, hasLogs, expandedLog === runId, onToggleExpand)}
                 >
                   <span className="script-task__name" title={card.name}>⟳ {card.name}</span>
                   <span className="script-task__status">运行中…</span>
@@ -78,13 +77,13 @@ export function RunCards({
               <>
                 <div
                   className="script-task__head"
-                  onClick={logs.length > 0 ? () => onToggleExpand(runId) : undefined}
-                  role={logs.length > 0 ? "button" : undefined}
+                  {...expandableHeadProps(runId, card.name, logs.length > 0, expandedLog === runId, onToggleExpand)}
                 >
                   <span className="script-task__msg">{card.success ? "✓" : "✗"} {card.name}: {card.message}</span>
                   <button
                     className="macro-result__close"
                     title="关闭"
+                    aria-label="关闭"
                     onClick={(e) => {
                       e.stopPropagation();
                       onDismiss(runId);
@@ -105,5 +104,30 @@ export function RunCards({
       })}
     </>
   );
+}
+
+/** 可展开卡头的公共交互属性(点击/Enter/Space 展开 + role/aria),expandable=false 时不注入。
+ *  running 卡(有日志)与 done 卡(有日志)两分支共用,避免逐字复制键盘处理块。 */
+function expandableHeadProps(
+  runId: string,
+  name: string,
+  expandable: boolean,
+  expanded: boolean,
+  onToggleExpand: (id: string) => void
+) {
+  if (!expandable) return {};
+  return {
+    onClick: () => onToggleExpand(runId),
+    role: "button" as const,
+    tabIndex: 0,
+    "aria-label": `展开 ${name} 日志`,
+    "aria-expanded": expanded,
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onToggleExpand(runId);
+      }
+    },
+  };
 }
 

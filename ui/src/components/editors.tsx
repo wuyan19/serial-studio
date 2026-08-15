@@ -1,10 +1,62 @@
 /** 编辑器族：宏编辑器（步骤编排）与脚本编辑器（JS 代码），结构/样式互为镜像。
 newStep/validateMacro 是宏步骤的纯函数入口（App 导入宏 spec 用）。 */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Macro, MacroStep, Script, ScriptParam, StepType } from "../types";
 import { downloadJson, parseParamsFromCode } from "../lib";
-import { IconAlert, IconBolt, IconChevronDown, IconChevronUp, IconClose, IconCode, IconCopy, IconExport, IconGrip, IconPlus, IconTrash } from "../icons";
-import { ConfigRow, useEscClose } from "./primitives";
+import { IconAlert, IconBolt, IconChevronDown, IconChevronUp, IconClose, IconCode, IconCopy, IconExpand, IconExport, IconGrip, IconInfo, IconPlus, IconTrash } from "../icons";
+import { getTheme, subscribe, type Theme } from "../theme";
+import { ConfigRow, useDialogA11y, useEscClose } from "./primitives";
+import CodeMirror from "@uiw/react-codemirror";
+import { EditorView } from "@codemirror/view";
+import { javascript } from "@codemirror/lang-javascript";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
+
+// ===== CodeMirror 主题:容器底色走 CSS 变量(跟随应用主题),语法色复用终端 ANSI 调色板 =====
+
+const cmBaseTheme = EditorView.theme({
+  "&": {
+    height: "320px",
+    fontSize: "12.5px",
+    backgroundColor: "transparent",
+    border: "1px solid var(--hairline)",
+    borderRadius: "var(--r-md, 8px)",
+  },
+  ".cm-scroller": { fontFamily: "var(--font-mono)" },
+  /* gutter 必须不透明:透明时横向滚动的内容会从行号底下透过去,视觉重叠 */
+  ".cm-gutters": { backgroundColor: "var(--surface)", color: "var(--ink-faint)", border: "none" },
+  ".cm-activeLine": { backgroundColor: "rgba(127, 127, 127, 0.07)" },
+  ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--ink)" },
+  "&.cm-focused": { outline: "none" },
+});
+
+/** 选中/语法色按明暗两套,hex 与 term.tsx 的 TERM_THEMES 同源。 */
+const cmDark = EditorView.theme(
+  { "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(79, 214, 194, 0.22)" } },
+  { dark: true }
+);
+const cmLight = EditorView.theme(
+  { "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(12, 127, 115, 0.18)" } },
+  { dark: false }
+);
+const cmSyntaxDark = HighlightStyle.define([
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "#c792ea" },
+  { tag: [t.string, t.special(t.string)], color: "#e3b341" },
+  { tag: [t.number, t.bool], color: "#f2a65a" },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: "#5c6270", fontStyle: "italic" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#4fd6c2" },
+  { tag: [t.className, t.typeName], color: "#7fbfdd" },
+  { tag: [t.definition(t.variableName)], color: "#7ee787" },
+]);
+const cmSyntaxLight = HighlightStyle.define([
+  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "#9b4d96" },
+  { tag: [t.string, t.special(t.string)], color: "#9a6b0c" },
+  { tag: [t.number, t.bool], color: "#b06a16" },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: "#8b9099", fontStyle: "italic" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#0c7f73" },
+  { tag: [t.className, t.typeName], color: "#2563a0" },
+  { tag: [t.definition(t.variableName)], color: "#187a43" },
+]);
 
 // ===== 宏编辑器 =====
 
@@ -111,6 +163,7 @@ export function MacroEditor({
   onCancel: () => void;
 }) {
   useEscClose(onCancel);
+  const [maximized, setMaximized] = useState(false);
   const setDesc = (description: string) => onMacroChange({ ...macro, description });
   const setGroup = (group: string) => onMacroChange({ ...macro, group: group || undefined });
   const setStep = (i: number, s: MacroStep) => {
@@ -172,10 +225,15 @@ export function MacroEditor({
     if (dragIndex === null || overIndex !== i) return null;
     return overAfter ? "after" : "before";
   };
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="宏编辑器" className={`dialog dialog--med dialog--macro${maximized ? " dialog--max" : ""}`} onClick={(e) => e.stopPropagation()}>
+        <button className="dialog__max" onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */} onClick={() => setMaximized((v) => !v)} title={maximized ? "还原" : "最大化"} aria-label={maximized ? "还原窗口" : "最大化窗口"}>
+          <IconExpand />
+        </button>
         <div className="macro-editor__head">
           <h3 className="dialog__title">
             <IconBolt /> MACRO
@@ -197,7 +255,7 @@ export function MacroEditor({
           <div className="dialog__group-label" style={{ marginTop: 6 }}>
             步骤
           </div>
-        {macro.steps.length === 0 && <p className="sidebar__empty">无步骤（点下方添加）</p>}
+        {macro.steps.length === 0 && <p className="sidebar__empty">无步骤（点下方新增步骤）</p>}
         {macro.steps.map((s, i) => (
           <StepEditor
             key={i}
@@ -249,6 +307,7 @@ export function MacroEditor({
           <div style={{ display: "flex", gap: 8 }}>
             <button
               className="btn btn--ghost btn--icon"
+              onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */}
               onClick={async () => {
                 const n = name.trim() || "macro";
                 try {
@@ -258,11 +317,18 @@ export function MacroEditor({
                 }
               }}
               title="导出为 JSON 文件（可分享 / 导入）"
+              aria-label="导出为 JSON 文件"
             >
               <IconExport />
             </button>
             {!isNew && (
-              <button className="btn btn--danger btn--icon" onClick={onDelete} title="删除">
+              <button
+                className="btn btn--danger btn--icon"
+                onClick={onDelete}
+                onMouseDown={(e) => e.preventDefault() /* 不抢焦点:dirty/删除确认取消后,焦点还原回正在编辑的输入框 */}
+                title="删除"
+                aria-label="删除"
+              >
                 <IconTrash />
               </button>
             )}
@@ -281,7 +347,7 @@ export function MacroEditor({
   );
 }
 
-/** 脚本编辑器：JS 代码编辑（textarea），结构/样式镜像 MacroEditor。 */
+/** 脚本编辑器：JS 代码编辑（CodeMirror 6 语法高亮），结构/样式镜像 MacroEditor。 */
 export function ScriptEditor({
   name,
   script,
@@ -306,6 +372,10 @@ export function ScriptEditor({
   onCancel: () => void;
 }) {
   useEscClose(onCancel);
+  // 高亮配色跟随应用主题(与终端 ANSI 调色板同源)
+  const [cmTheme, setCmTheme] = useState<Theme>(getTheme());
+  useEffect(() => subscribe(setCmTheme), []);
+  const [helpOpen, setHelpOpen] = useState(false);
   const setDesc = (description: string) => onScriptChange({ ...script, description });
   const setGroup = (group: string) => onScriptChange({ ...script, group: group || undefined });
   const setCode = (code: string) => {
@@ -321,10 +391,23 @@ export function ScriptEditor({
   };
   const addParam = () => setParams([...(script.params ?? []), { name: "", type: "string" }]);
   const removeParam = (i: number) => setParams((script.params ?? []).filter((_, j) => j !== i));
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="脚本编辑器" className="dialog dialog--macro dialog--max" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="dialog__max"
+          onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */}
+          onClick={() => setHelpOpen((v) => !v)}
+          title="可用 API 与参数说明"
+          aria-label="可用 API 与参数说明"
+          aria-expanded={helpOpen}
+        >
+          <IconInfo />
+        </button>
+        {helpOpen && <ScriptHelpPanel onClose={() => setHelpOpen(false)} />}
         <div className="macro-editor__head">
           <h3 className="dialog__title">
             <IconCode /> SCRIPT
@@ -342,54 +425,52 @@ export function ScriptEditor({
           </ConfigRow>
         </div>
 
-        <div className="macro-editor__scroll">
-          <div className="dialog__group-label" style={{ marginTop: 6 }}>
-            代码
+        {/* 固定双栏布局(打开即最大化):左=代码(独立滚动,由 CodeMirror 内部 scroller 承担),
+            右=参数+JSON 预览(独立 overflow-y 滚动)。两栏互不联动。 */}
+        <div className="macro-editor__scroll script-editor__grid">
+          <div className="script-editor__col-code">
+            <div className="dialog__group-label" style={{ marginTop: 6 }}>
+              代码
+            </div>
+            <div className="script-editor__cm">
+              <CodeMirror
+                value={script.code}
+                onChange={setCode}
+                theme={[cmBaseTheme, cmTheme === "dark" ? cmDark : cmLight, syntaxHighlighting(cmTheme === "dark" ? cmSyntaxDark : cmSyntaxLight)]}
+                extensions={[javascript()]}
+                height="100%"
+                placeholder="// 在此编写 JS 脚本…"
+              />
+            </div>
+            {error && (
+              <div className="editor-error">
+                <IconAlert /> {error}
+              </div>
+            )}
           </div>
-          <div className="script-editor__hint">await send(data, [port]) · await expect(pattern, ms, [port]) · await clear([port]) · await sleep(ms) · log(data)</div>
-          <div className="script-editor__hint">[port] 可选,缺省为当前活动端口,可指定其它已打开端口(跨多串口操作)</div>
-          <textarea
-            value={script.code}
-            onChange={(e) => setCode(e.target.value)}
-            className="field script-editor__code"
-            spellCheck={false}
-            autoCapitalize="off"
-            placeholder="// 在此编写 JS 脚本…"
-            style={{
-              fontFamily: "var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)",
-              minHeight: 300,
-              resize: "vertical",
-              width: "100%",
-            }}
-          />
-
-          <div className="dialog__group-label" style={{ marginTop: 12 }}>
-            参数(运行时收集,脚本用 args.键名 读取)
+          <div className="script-editor__col-side">
+            {/* 标头固定不滚;真正可滚的是下方 side-scroll */}
+            <div className="dialog__group-label script-editor__side-head">参数（运行时收集，脚本用 args.键名 读取）</div>
+            <div className="script-editor__side-scroll">
+              {(script.params ?? []).map((p, i) => (
+                <ParamEditor key={i} param={p} onChange={(np) => setParam(i, np)} onRemove={() => removeParam(i)} />
+              ))}
+              <button className="btn btn--ghost macro-editor__add" onClick={addParam} title="新增参数">
+                <IconPlus /> 新增参数
+              </button>
+              <details>
+                <summary className="json-summary">JSON 预览（只读）</summary>
+                <pre className="json-preview">{JSON.stringify(script, null, 2)}</pre>
+              </details>
+            </div>
           </div>
-          <div className="script-editor__hint">string=文本框;select=下拉(选项以 chip 方式添加/移除,缺省从选项中选)。无参数则直接运行不弹窗。</div>
-          {(script.params ?? []).map((p, i) => (
-            <ParamEditor key={i} param={p} onChange={(np) => setParam(i, np)} onRemove={() => removeParam(i)} />
-          ))}
-          <button className="btn btn--ghost macro-editor__add" onClick={addParam} title="新增参数">
-            <IconPlus /> 新增参数
-          </button>
-
-        {error && (
-          <div className="editor-error">
-            <IconAlert /> {error}
-          </div>
-        )}
-
-        <details>
-          <summary className="json-summary">JSON 预览（只读）</summary>
-          <pre className="json-preview">{JSON.stringify(script, null, 2)}</pre>
-        </details>
         </div>
 
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: 8 }}>
             <button
               className="btn btn--ghost btn--icon"
+              onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */}
               onClick={async () => {
                 const n = name.trim() || "script";
                 try {
@@ -399,11 +480,18 @@ export function ScriptEditor({
                 }
               }}
               title="导出为 JSON 文件（可分享 / 导入）"
+              aria-label="导出为 JSON 文件"
             >
               <IconExport />
             </button>
             {!isNew && (
-              <button className="btn btn--danger btn--icon" onClick={onDelete} title="删除">
+              <button
+                className="btn btn--danger btn--icon"
+                onClick={onDelete}
+                onMouseDown={(e) => e.preventDefault() /* 不抢焦点:dirty/删除确认取消后,焦点还原回正在编辑的输入框 */}
+                title="删除"
+                aria-label="删除"
+              >
                 <IconTrash />
               </button>
             )}
@@ -449,9 +537,9 @@ function ParamEditor({ param, onChange, onRemove }: {
     <div className="param-card">
       <div className="param-card__row">
         <input className="field param-card__name" value={param.name}
-          onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="键名(args.键名)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+          onChange={(e) => onChange({ ...param, name: e.target.value })} placeholder="键名（args.键名）" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         <input className="field param-card__label" value={param.label ?? ""}
-          onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签(可选)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+          onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签（可选）" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         <select className="field param-card__type" value={param.type}
           onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
           <option value="string">string</option>
@@ -460,14 +548,14 @@ function ParamEditor({ param, onChange, onRemove }: {
         {isSelect && options.length > 0 ? (
           <select className="field param-card__default" value={param.default ?? ""}
             onChange={(e) => onChange({ ...param, default: e.target.value || undefined })}>
-            <option value="">缺省(可选)</option>
+            <option value="">默认（可选）</option>
             {options.map((o) => <option key={o} value={o}>{o}</option>)}
           </select>
         ) : (
           <input className="field param-card__default" value={param.default ?? ""}
-            onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="缺省(可选)" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+            onChange={(e) => onChange({ ...param, default: e.target.value || undefined })} placeholder="默认（可选）" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         )}
-        <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数"><IconTrash /></button>
+        <button className="btn btn--danger btn--icon" onClick={onRemove} title="删除参数" aria-label="删除参数"><IconTrash /></button>
       </div>
       {isSelect && (
         <div className="param-card__options">
@@ -475,7 +563,7 @@ function ParamEditor({ param, onChange, onRemove }: {
           {options.map((o) => (
             <span key={o} className="param-chip">
               {o}
-              <button className="param-chip__x" onClick={() => removeOption(o)} title={`移除 ${o}`}>×</button>
+              <button className="param-chip__x" onClick={() => removeOption(o)} title={`移除 ${o}`} aria-label={`移除选项 ${o}`}>×</button>
             </span>
           ))}
           <input className="param-chip-add" value={optInput}
@@ -572,16 +660,16 @@ function StepEditor({
         </select>
         <div className="step-head__spacer" />
         <div className="step-actions">
-          <button onClick={onDuplicate} title="复制" className="mini-btn">
+          <button onClick={onDuplicate} title="复制" aria-label={`复制步骤 ${index + 1}`} className="mini-btn">
             <IconCopy />
           </button>
-          <button onClick={onMoveUp} disabled={index === 0} title="上移" className="mini-btn">
+          <button onClick={onMoveUp} disabled={index === 0} title="上移" aria-label={`上移步骤 ${index + 1}`} className="mini-btn">
             <IconChevronUp />
           </button>
-          <button onClick={onMoveDown} disabled={index === total - 1} title="下移" className="mini-btn">
+          <button onClick={onMoveDown} disabled={index === total - 1} title="下移" aria-label={`下移步骤 ${index + 1}`} className="mini-btn">
             <IconChevronDown />
           </button>
-          <button onClick={onRemove} title="删除" className="mini-btn mini-btn--danger">
+          <button onClick={onRemove} title="删除" aria-label={`删除步骤 ${index + 1}`} className="mini-btn mini-btn--danger">
             <IconClose />
           </button>
         </div>
@@ -631,3 +719,33 @@ function StepEditor({
   );
 }
 
+
+/** 帮助速查浮层:独立组件以获得对话框栈/Esc/焦点圈闭——内联在编辑器里会变成伪模态
+ *  (Esc 关掉的是编辑器、Tab 钻到遮罩底下)。挂载晚于编辑器 → 栈顶,Esc 先关它。 */
+function ScriptHelpPanel({ onClose }: { onClose: () => void }) {
+  useEscClose(onClose);
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogA11y(ref);
+  return (
+    <>
+      {/* 点击面板外(对话框内区域)关闭 */}
+      <div className="script-help__backdrop" onClick={onClose} />
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="可用 API 与参数速查" className="script-help">
+        <div className="script-help__head">
+          <span>速查 · 详见「脚本编写指南」</span>
+          <button className="banner__close" onClick={onClose} aria-label="关闭帮助">
+            <IconClose />
+          </button>
+        </div>
+        <div className="script-help__row"><code>await send(data, [port])</code></div>
+        <div className="script-help__row"><code>await expect(pattern, ms, [port])</code></div>
+        <div className="script-help__row"><code>await clear([port])</code></div>
+        <div className="script-help__row"><code>await sleep(ms)</code></div>
+        <div className="script-help__row"><code>log(data)</code></div>
+        <div className="script-help__row"><code>args.键名</code></div>
+        <div className="script-help__row"><code>// @param 名 string default=值</code></div>
+        <div className="script-help__row"><code>// @param 名 select A|B default=A</code></div>
+      </div>
+    </>
+  );
+}

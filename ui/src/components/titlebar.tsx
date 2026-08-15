@@ -56,12 +56,22 @@ export function TitleBar() {
       <div className="titlebar__title">Serial Studio</div>
       {!isMac && (
         <div className="titlebar__controls">
-          <button className="titlebar__btn" title="最小化" onClick={() => void win.minimize()}>
+          {/* mousedown 不抢焦点(同侧栏铅笔按钮):点了最小化/最大化后焦点保持在终端,
+              否则还原窗口后键盘输入落不到 xterm,必须先点一下终端 */}
+          <button
+            className="titlebar__btn"
+            title="最小化"
+            aria-label="最小化"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void win.minimize()}
+          >
             <IconWinMin className="titlebar__btn-icon" />
           </button>
           <button
             className="titlebar__btn"
             title={maximized ? "还原" : "最大化"}
+            aria-label={maximized ? "还原" : "最大化"}
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => void win.toggleMaximize()}
           >
             {maximized ? (
@@ -70,7 +80,13 @@ export function TitleBar() {
               <IconWinMax className="titlebar__btn-icon" />
             )}
           </button>
-          <button className="titlebar__btn titlebar__btn--close" title="关闭" onClick={() => void win.close()}>
+          <button
+            className="titlebar__btn titlebar__btn--close"
+            title="关闭"
+            aria-label="关闭"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void win.close()}
+          >
             <IconClose className="titlebar__btn-icon" />
           </button>
         </div>

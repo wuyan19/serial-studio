@@ -39,6 +39,7 @@ export function PortsPanel({
   onCancelAlias,
   onForceClose,
   onReconnectRemote,
+  onDisconnectRemote,
   onRemoveRemote,
   onRefresh,
 }: {
@@ -55,6 +56,7 @@ export function PortsPanel({
   onCancelAlias: () => void;
   onForceClose: (pid: PortId) => void;
   onReconnectRemote: (dev: RemoteDevice) => void;
+  onDisconnectRemote: (dev: RemoteDevice) => void;
   onRemoveRemote: (dev: RemoteDevice) => void;
   onRefresh: () => void;
 }) {
@@ -62,7 +64,7 @@ export function PortsPanel({
     <>
       <div className="section-head">
         <h4 className="section-head__title">PORTS</h4>
-        <button className="icon-btn" onClick={onRefresh} title="刷新">
+        <button className="icon-btn" onClick={onRefresh} title="刷新" aria-label="刷新端口列表">
           <IconRefresh />
         </button>
       </div>
@@ -82,10 +84,12 @@ export function PortsPanel({
                 <div className="port-group__btns">
                   {dev && (
                     <>
-                      {grp.online !== true && (
-                        <button className="port-group__action" title="重连设备" onClick={() => onReconnectRemote(dev)}><IconRefresh /></button>
+                      {grp.online === true ? (
+                        <button className="port-group__action" title="断开设备" aria-label={`断开设备 ${grp.label}`} onClick={() => onDisconnectRemote(dev)}><IconPower /></button>
+                      ) : (
+                        <button className="port-group__action" title="重连设备" aria-label={`重连设备 ${grp.label}`} onClick={() => onReconnectRemote(dev)}><IconRefresh /></button>
                       )}
-                      <button className="port-group__action port-group__action--danger" title="删除设备" onClick={() => onRemoveRemote(dev)}><IconTrash /></button>
+                      <button className="port-group__action port-group__action--danger" title="删除设备" aria-label={`删除设备 ${grp.label}`} onClick={() => onRemoveRemote(dev)}><IconTrash /></button>
                     </>
                   )}
                 </div>
@@ -93,7 +97,13 @@ export function PortsPanel({
             </div>
             {!portCollapsed.has(grp.devId) &&
               (grp.ports.length === 0 ? (
-                <p className="sidebar__empty">{grp.online === false ? "未连接" : "无可用端口"}</p>
+                <p className="sidebar__empty">
+                  {grp.online === false
+                    ? "未连接"
+                    : grp.online === undefined && grp.devId !== "local"
+                      ? "连接中…"
+                      : "无可用端口"}
+                </p>
               ) : (
                 grp.ports.map((p) => {
                   const pid = `${grp.devId}::${p.name}` as PortId;
@@ -135,6 +145,7 @@ export function PortsPanel({
                       <button
                         className="port-item__edit"
                         title={`设置 ${p.name} 别名`}
+                        aria-label={`设置 ${p.name} 别名`}
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => onSetAliasEdit(pid)}
                       >
@@ -144,6 +155,7 @@ export function PortsPanel({
                         <button
                           className="port-item__force"
                           title={`强制关闭 ${p.name}（断开远程）`}
+                          aria-label={`强制关闭 ${p.name}`}
                           onClick={() => onForceClose(pid)}
                         >
                           <IconPower />
@@ -179,6 +191,7 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   renderRow,
   children,
   extraActions,
+  storageHint,
 }: {
   /** 段标题（MACROS / SCRIPTS，含 → activePort 后缀由调用方拼好）。 */
   title: React.ReactNode;
@@ -201,6 +214,8 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   children?: React.ReactNode;
   /** 段头额外按钮（脚本面板的「指南」等），排在末尾（新增按钮之后）。 */
   extraActions?: React.ReactNode;
+  /** 存储位置说明（Web 模式:localStorage,与桌面端落盘不同——防止误以为存服务器）。 */
+  storageHint?: string;
 }) {
   return (
     <>
@@ -231,6 +246,7 @@ export function NamedLibraryPanel<T extends { group?: string }>({
           onChange={onImportFile}
         />
       </div>
+      {storageHint && <p className="sidebar__storage-hint">{storageHint}</p>}
       {!hasItems && <p className="sidebar__empty">{emptyHint}</p>}
       {groupBy(Object.entries(items), (m) => m.group).map((g) => (
         <div key={g.name} className="macro-group">
@@ -261,14 +277,14 @@ export function MacroRow({ name, disabled, onRun, onEdit, onDelete }: {
 }) {
   return (
     <div className="macro-row">
-      <button className="macro-run" onClick={onRun} disabled={disabled}>
+      <button className="macro-run" onClick={onRun} disabled={disabled} title={disabled ? "先打开一个端口再运行宏" : undefined}>
         <IconPlay />
         <span className="macro-run__label">{name}</span>
       </button>
-      <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑">
+      <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑" aria-label={`编辑宏 ${name}`}>
         <IconEdit />
       </button>
-      <button className="macro-action macro-action--danger" onClick={onDelete} title="删除">
+      <button className="macro-action macro-action--danger" onClick={onDelete} title="删除" aria-label={`删除宏 ${name}`}>
         <IconTrash />
       </button>
     </div>
@@ -288,10 +304,10 @@ export function ScriptRow({ name, onRun, onEdit, onDelete }: {
         <IconPlay />
         <span className="macro-run__label">{name}</span>
       </button>
-      <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑">
+      <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑" aria-label={`编辑脚本 ${name}`}>
         <IconEdit />
       </button>
-      <button className="macro-action macro-action--danger" onClick={onDelete} title="删除">
+      <button className="macro-action macro-action--danger" onClick={onDelete} title="删除" aria-label={`删除脚本 ${name}`}>
         <IconTrash />
       </button>
     </div>

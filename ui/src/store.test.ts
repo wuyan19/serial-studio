@@ -152,6 +152,38 @@ describe("drop_half / move_port", () => {
   });
 });
 
+describe("set_split_ratio", () => {
+  it("改根 split 比例并 clamp 到 0.15–0.85", () => {
+    let s = withPorts("local::COM3", "local::COM4");
+    s = sessionReducer(s, { type: "drop_half", port: "local::COM4", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "set_split_ratio", path: [], ratio: 0.7 });
+    expect(s.layout).toMatchObject({ type: "split", ratio: 0.7 });
+    s = sessionReducer(s, { type: "set_split_ratio", path: [], ratio: 0.05 });
+    expect(s.layout).toMatchObject({ ratio: 0.15 });
+    s = sessionReducer(s, { type: "set_split_ratio", path: [], ratio: 2 });
+    expect(s.layout).toMatchObject({ ratio: 0.85 });
+  });
+
+  it("沿 path 改嵌套 split,不影响兄弟", () => {
+    let s = withPorts("local::COM1", "local::COM2", "local::COM3");
+    s = sessionReducer(s, { type: "drop_half", port: "local::COM2", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "drop_half", port: "local::COM3", srcGroupId: "g1", dstGroupId: "g1", half: "down" });
+    // 第二次 drop 在 g1 下分裂 → 嵌套 split 在 path [0]
+    const root = s.layout as { type: "split"; ratio: number; children: [{ type: string; ratio: number }, unknown] };
+    s = sessionReducer(s, { type: "set_split_ratio", path: [0], ratio: 0.6 });
+    const next = s.layout as typeof root;
+    expect(next.ratio).toBe(root.ratio); // 根不动
+    expect(next.children[0]).toMatchObject({ type: "split", ratio: 0.6 });
+  });
+
+  it("ratio 不变时引用不变（no-op 短路）", () => {
+    let s = withPorts("local::COM3", "local::COM4");
+    s = sessionReducer(s, { type: "drop_half", port: "local::COM4", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    const s2 = sessionReducer(s, { type: "set_split_ratio", path: [], ratio: 0.5 });
+    expect(s2).toBe(s);
+  });
+});
+
 describe("switch_tab / set_focused_group", () => {
   it("切换活动端口并聚焦 group", () => {
     let s = withPorts("local::COM3", "local::COM4");

@@ -70,7 +70,9 @@ export type SessionAction =
   /** 拖 tab 到某 group 终端区半区：新建 group 并分裂。 */
   | { type: "drop_half"; port: PortId; srcGroupId: string; dstGroupId: string; half: PaneHalf }
   /** 拖 tab 到另一 group 的标签栏：迁移归属。 */
-  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string };
+  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string }
+  /** 拖分栏手柄改比例。path = 从根到目标 split 节点的子索引序列（根 split 为 []）。 */
+  | { type: "set_split_ratio"; path: number[]; ratio: number };
 
 /** 端口 → 所属 group 反查。 */
 function groupOf(groups: Record<string, Group>, pid: PortId): string | undefined {
@@ -193,6 +195,20 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
 
     case "set_focused_group":
       return s.focusedGroupId === a.groupId ? s : { ...s, focusedGroupId: a.groupId };
+
+    case "set_split_ratio": {
+      // 沿 path 定位目标 split 节点,只改 ratio(结构不变,clamp 0.15–0.85 防拖没)
+      const clamp = Math.min(0.85, Math.max(0.15, a.ratio));
+      const walk = (node: PaneNode, idx: number): PaneNode => {
+        if (node.type !== "split") return node;
+        if (idx === a.path.length) return node.ratio === clamp ? node : { ...node, ratio: clamp };
+        const children: [PaneNode, PaneNode] = [node.children[0], node.children[1]];
+        children[a.path[idx]] = walk(children[a.path[idx]], idx + 1);
+        return { ...node, children };
+      };
+      const layout = walk(s.layout, 0);
+      return layout === s.layout ? s : { ...s, layout };
+    }
 
     case "switch_tab": {
       const cur = s.groups[a.groupId];

@@ -217,6 +217,21 @@ button {
   color: var(--ink);
   background: rgba(255, 255, 255, 0.03);
 }
+/* 运行状态角标:run=有任务运行中(绿),alert=有失败结果待查看(红)。5px 让开图标拐角 */
+.act-icon__dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.act-icon__dot[data-kind="run"] {
+  background: var(--link);
+}
+.act-icon__dot[data-kind="alert"] {
+  background: var(--danger);
+}
 .act-icon[data-active="true"] {
   color: var(--rx);
   border-left-color: var(--rx);
@@ -581,6 +596,16 @@ button {
   font-size: var(--fs-sm);
   padding: 2px 2px 8px;
 }
+/* Web 模式存储位置说明(localStorage,非服务器) */
+.sidebar__storage-hint {
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 3px 6px;
+  margin: 2px 0 6px;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-sm);
+}
 
 /* port item —— 强制关闭按钮绝对定位到串口按钮右侧内嵌（button 不能嵌套，故用兄弟覆盖） */
 .port-item-row {
@@ -698,6 +723,10 @@ button {
   font-size: inherit;
   line-height: 1.2;
   outline: none;
+}
+/* 常态 rx 描边已示意编辑态;聚焦再叠一圈(无布局位移) */
+.alias-inline:focus {
+  box-shadow: 0 0 0 1px var(--rx);
 }
 /* 端口行编辑态：放开 name 的裁剪，否则输入框被 overflow:hidden 切掉。 */
 .port-item-row[data-editing="true"] .port-item__name {
@@ -984,6 +1013,7 @@ button {
    Main — tabs, channel strip, terminal
    ============================================================ */
 .main {
+  position: relative; /* 锚定右下角 toast-area */
   flex: 1;
   min-width: 0;
   display: flex;
@@ -1110,6 +1140,80 @@ button {
   color: var(--warn);
   background: rgba(227, 179, 65, 0.08);
   border-bottom-color: rgba(227, 179, 65, 0.22);
+}
+
+/* ===== 运行结果 toast(右下角,点击跳对应面板) ===== */
+.toast-area {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 90;
+  max-width: 380px;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md, 8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-align: left;
+  animation: toast-in 0.16s var(--ease);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast--ok {
+  border-left: 3px solid var(--link);
+}
+.toast--err {
+  border-left: 3px solid var(--danger);
+}
+.toast__mark {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.toast--ok .toast__mark {
+  color: var(--link);
+}
+.toast--err .toast__mark {
+  color: var(--danger);
+}
+.toast__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+.toast__go {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.toast:hover .toast__go {
+  color: var(--ink);
+  border-color: var(--ink-faint);
 }
 .banner__close {
   margin-left: auto;
@@ -1278,6 +1382,30 @@ button {
   min-width: 0;
   min-height: 0;
 }
+/* 分栏拖动手柄:10px 命中区(::after 收窄到 4px 视觉条),悬停亮 rx */
+.pane-divider {
+  flex: 0 0 10px; /* 与 App.tsx PANE_DIVIDER_W 保持一致(比例计算扣此宽) */
+  position: relative;
+  z-index: 5;
+  background: transparent;
+}
+.pane-divider::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  background: transparent;
+  transition: background var(--t-fast) var(--ease);
+}
+.pane-divider:hover::after {
+  background: var(--rx);
+  opacity: 0.45;
+}
+.pane-divider--row {
+  cursor: col-resize;
+}
+.pane-divider--col {
+  cursor: row-resize;
+}
 .pane-split--row {
   flex-direction: row;
 }
@@ -1316,6 +1444,18 @@ button {
   border-radius: var(--r-sm);
   padding: 1px 6px;
   color: var(--ink-dim);
+}
+/* 空状态快捷键提示行(kbd 走上方 .term-empty kbd 现成样式) */
+.term-empty__hint {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.term-empty__hint kbd {
+  margin-right: 4px;
 }
 
 /* ============================================================
@@ -1460,9 +1600,145 @@ button {
 }
 /* Macro editor：顶（标题/名称/描述）与底（按钮）固定，中间（步骤→JSON 预览）超高滚动 */
 .dialog--macro {
+  position: relative; /* 锚定右上角最大化按钮 */
   display: flex;
   flex-direction: column;
   overflow: hidden; /* 覆盖 .dialog 的 overflow-y: auto，滚动交给内部 */
+}
+/* 编辑器对话框最大化切换(脚本代码区随之撑满) */
+.dialog__max {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.dialog__max:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.dialog__max svg {
+  width: 14px;
+  height: 14px;
+}
+.dialog--max {
+  width: min(1180px, 94vw);
+  /* 必须显式覆盖:同挂的 .dialog--med 有 max-width:90vw,单靠书写顺序压制脆弱 */
+  max-width: 94vw;
+  height: 90vh;
+  max-height: 90vh;
+}
+/* 脚本编辑器:固定双栏(打开即最大化)——代码(左,独立滚动) | 参数+JSON(右,独立滚动)。
+   双类选择器抬高特异性压过单类的 .macro-editor__scroll(源码顺序在其后,单类必输),
+   网格自身禁滚,滚动下放到两列内部,否则两栏会作为一个整体联动滚动。 */
+.macro-editor__scroll.script-editor__grid {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  overflow: hidden;
+}
+.script-editor__col-code {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 代码容器:flex 撑满列剩余,并把高度链条压到 CodeMirror 内部 scroller(它自己 overflow:auto) */
+.script-editor__cm {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.script-editor__cm .cm-theme,
+.script-editor__cm .cm-editor {
+  height: 100%;
+}
+.script-editor__cm .cm-scroller {
+  overflow: auto;
+}
+.script-editor__col-side {
+  /* 340 基准 + 只收不放(grow 必须为 0:1 会让参数列与代码列平分剩余空间,喧宾夺主);
+     窄窗口先收缩,更窄走下方媒体查询切单列 */
+  flex: 0 1 340px;
+  /* min-width:0 去掉 flex 项默认 min-width:auto——否则 JSON 预览展开时长行把整列撑破 */
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 窄窗口:双栏退化为上下单栏(代码固定高 + 参数随下,整体滚动) */
+@media (max-width: 760px) {
+  .macro-editor__scroll.script-editor__grid {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .script-editor__col-code {
+    flex: 0 0 auto;
+    min-height: 260px;
+  }
+  .script-editor__col-side {
+    flex: 0 0 auto;
+    overflow-y: visible;
+  }
+}
+/* 参数标头固定,下方参数卡+JSON 才滚动 */
+.script-editor__side-head {
+  flex-shrink: 0;
+  margin-top: 12px;
+}
+.script-editor__side-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+/* JSON 预览长行折行(配合列宽锁定,展开不再撑宽) */
+.script-editor__side-scroll .json-preview {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+/* 脚本编辑器右上角帮助速查面板 */
+.script-help__backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+.script-help {
+  position: absolute;
+  top: 46px;
+  right: 14px;
+  z-index: 3;
+  padding: 10px 14px;
+  background: var(--surface-2); /* 与宿主 dialog(--surface)拉开一层,不靠阴影硬撑 */
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px;
+}
+.script-help__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  margin-bottom: 6px;
+}
+.script-help__row {
+  margin: 3px 0;
+}
+.script-help code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--link);
+  white-space: nowrap;
 }
 .macro-editor__head {
   flex-shrink: 0;
@@ -1752,6 +2028,10 @@ button {
 }
 .palette__input::placeholder {
   color: var(--ink-faint);
+}
+/* 补焦点反馈:基类 outline:none,无此规则聚焦只剩光标 */
+.palette__input:focus {
+  border-bottom-color: var(--rx);
 }
 .palette__list {
   max-height: 320px;
@@ -2347,6 +2627,13 @@ button {
 :root[data-theme="light"] .dialog,
 :root[data-theme="light"] .manage-menu {
   box-shadow: 0 18px 48px rgba(60, 50, 30, 0.22);
+}
+/* 浮层类(toast/帮助速查)在象牙底上用暖阴影——暗色主题的近黑硬阴影在浅色下发脏 */
+:root[data-theme="light"] .toast {
+  box-shadow: 0 4px 16px rgba(60, 50, 30, 0.18);
+}
+:root[data-theme="light"] .script-help {
+  box-shadow: 0 8px 28px rgba(60, 50, 30, 0.2);
 }
 :root[data-theme="light"] ::selection {
   background: rgba(12, 127, 115, 0.2);

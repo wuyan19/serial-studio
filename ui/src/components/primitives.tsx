@@ -1,6 +1,6 @@
 /** 底层原语：布局行、通用 hook、端口名标签、别名 inline 输入、分组头、活动栏图标。
 各对话框/编辑器/终端视图共用，不依赖其它组件模块。 */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // ===== 通用 =====
 
@@ -13,39 +13,110 @@ export function ConfigRow({ label, children }: { label: string; children: React.
   );
 }
 
+/** 模块级对话框栈:嵌套对话框(编辑器上叠确认框、确认框上再叠帮助浮层)的按键归属仲裁——
+ *  只有栈顶响应 Esc/Enter,否则 window 级监听会全部触发(一次 Esc 关两层)。
+ *  挂载即 push、卸载即 pop;后挂载(视觉上层)者后 push → 栈顶。 */
+const dialogStack: number[] = [];
+let dialogSeq = 0;
+function useDialogStackId(): number {
+  const id = useMemo(() => ++dialogSeq, []);
+  useEffect(() => {
+    dialogStack.push(id);
+    return () => {
+      const i = dialogStack.indexOf(id);
+      if (i >= 0) dialogStack.splice(i, 1);
+    };
+  }, [id]);
+  return id;
+}
+
 /** 裸 Esc 关闭对话框（无修饰符）。给仅靠按钮关闭、无 Enter 语义的通用对话框用。
  *  模态打开期间 App 全局 listener 已被抑制，不会与之冲突。 */
 // Esc/Enter 走 capture:终端聚焦时 xterm 会在 bubble 阶段吃掉 Esc(About 无 autoFocus、
 // 从终端用快捷键打开后 Esc 关不掉),capture 先于 xterm 触发,焦点在不在对话框里都能关。
+// 栈顶判定 + stopImmediatePropagation:一次按键只归最上层对话框。
 export function useEscClose(onClose: () => void) {
+  const id = useDialogStackId();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (dialogStack[dialogStack.length - 1] !== id) return; // 非栈顶(上层还有对话框):让位
       if (e.key === "Escape") {
         e.preventDefault();
+        e.stopImmediatePropagation();
         onClose();
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, id]);
 }
 
 /** 对话框通用键：Esc 关闭、回车触发主操作（同 AliasDialog 语义）。
  *  回车是 window 级监听，故点击输入框编辑后按回车仍能触发主操作（不依赖按钮焦点）。 */
 export function useDialogKeys({ onClose, onEnter }: { onClose: () => void; onEnter?: () => void }) {
+  const id = useDialogStackId();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (dialogStack[dialogStack.length - 1] !== id) return; // 非栈顶:让位
       if (e.key === "Escape") {
         e.preventDefault();
+        e.stopImmediatePropagation();
         onClose();
       } else if (e.key === "Enter" && onEnter) {
         e.preventDefault();
+        e.stopImmediatePropagation();
         onEnter();
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, onEnter]);
+  }, [onClose, onEnter, id]);
+}
+
+/** 对话框焦点圈闭：挂载时焦点入框（有 autoFocus 输入框或 initialFocus 指定时聚焦它）、
+ *  Tab 循环在内、卸载（关闭）后焦点还原到打开前的元素（通常是终端）。
+ *  配合容器上的 role="dialog" aria-modal="true" 使用。
+ *  initialFocus 不能用 autoFocus 属性实现——它在 commit 期生效,早于本 effect 捕获 prev,
+ *  会把 prev 污染成对话框内部元素(卸载时还原到已卸载节点,焦点丢 body)。 */
+export function useDialogA11y(ref: React.RefObject<HTMLDivElement | null>, initialFocus?: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const prev = document.activeElement instanceof HTMLElement && !el.contains(document.activeElement)
+      ? document.activeElement
+      : null;
+    if (initialFocus?.current) initialFocus.current.focus();
+    else if (!el.contains(document.activeElement)) {
+      el.tabIndex = -1;
+      el.focus();
+    }
+    const FOCUSABLE =
+      "button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[href],[tabindex]:not([tabindex='-1']),[contenteditable]:not([contenteditable='false'])";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((x) => x.offsetParent !== null);
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === el || !el.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !el.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    el.addEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("keydown", onKey);
+      // 打开者可能已卸载(如编辑器整体关闭);isConnected 兜底,失效则不动(交由上层回焦逻辑)
+      if (prev?.isConnected) prev.focus();
+    };
+  }, [ref, initialFocus]);
 }
 
 /** 端口名展示：有别名时显「别名(真名)」，真名走 .port-label__raw 浅色；无别名仅显真名。
@@ -197,6 +268,7 @@ export function GroupHead({
         <button
           className="macro-group__menu"
           title="分组操作"
+          aria-label={`分组操作（${name}）`}
           onClick={(e) => {
             e.stopPropagation();
             setMenuOpen((v) => !v);
@@ -214,7 +286,7 @@ export function GroupHead({
               setRenaming(true);
             }}
           >
-            重命名组
+            重命名分组
           </button>
           <button
             className="group-menu__item group-menu__item--danger"
@@ -223,7 +295,7 @@ export function GroupHead({
               onDissolve();
             }}
           >
-            解散组
+            解散分组
           </button>
         </div>
       )}
@@ -232,10 +304,19 @@ export function GroupHead({
 }
 
 
-export function ActivityIcon({ icon, title, active, onClick }: { icon: React.ReactNode; title: string; active: boolean; onClick: () => void }) {
+/** 活动栏图标按钮。badge:角标——"run"=有任务运行中,"alert"=有失败结果待查看(读屏同步)。 */
+export function ActivityIcon({ icon, title, active, onClick, badge }: {
+  icon: React.ReactNode;
+  title: string;
+  active: boolean;
+  onClick: () => void;
+  badge?: "run" | "alert";
+}) {
+  const label = badge === "run" ? `${title}（有任务运行中）` : badge === "alert" ? `${title}（有失败结果待查看）` : title;
   return (
-    <button onClick={onClick} title={title} data-active={active} className="act-icon" aria-label={title}>
+    <button onClick={onClick} title={title} data-active={active} className="act-icon" aria-label={label}>
       {icon}
+      {badge && <span className="act-icon__dot" data-kind={badge} />}
     </button>
   );
 }

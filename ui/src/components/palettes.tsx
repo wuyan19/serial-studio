@@ -1,7 +1,7 @@
 /** 命令面板族：宏（Ctrl+O）、脚本（Ctrl+B）、串口（Ctrl+I）。模糊搜索 + 键盘导航。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Macro, PortId, PortInfo, Script } from "../types";
-import { PortLabel } from "./primitives";
+import { PortLabel, useDialogA11y } from "./primitives";
 
 // ===== 宏命令面板（Ctrl+O） =====
 
@@ -43,6 +43,9 @@ export function MacroPalette({
   const [selected, setSelected] = useState(0);
   const [hint, setHint] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // 与对话框同级的模态:补 role/aria-modal + 焦点圈闭(初始焦点即搜索框)
+  useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
     const matched: { name: string; score: number; first: number }[] = [];
@@ -95,7 +98,7 @@ export function MacroPalette({
 
   return (
     <div className="palette-overlay" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="宏命令面板" className="palette" onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           className="palette__input"
@@ -152,8 +155,9 @@ export function ScriptPalette({
 }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
-  const [hint, setHint] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
     const matched: { name: string; score: number; first: number }[] = [];
@@ -167,22 +171,14 @@ export function ScriptPalette({
     return matched.map((x) => x.name);
   }, [scripts, query]);
 
-  // 查询变化 → 回到首项、清提示
+  // 查询变化 → 回到首项
   useEffect(() => {
     setSelected(0);
-    setHint("");
   }, [query]);
 
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
-
   const commit = (name: string) => {
-    if (!activePort) {
-      setHint("先打开一个端口再运行脚本");
-      return;
-    }
+    // 无活动端口照放行:纯 sleep/log 脚本不依赖端口即可跑(与 doRun/侧栏入口一致);
+    // 有缺省 send 的脚本由后端 send 抛"未指定端口"给出明确错误
     onRun(name);
     onClose();
   };
@@ -206,7 +202,7 @@ export function ScriptPalette({
 
   return (
     <div className="palette-overlay" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="脚本选择面板" className="palette" onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           className="palette__input"
@@ -235,12 +231,10 @@ export function ScriptPalette({
           ))}
         </div>
         <div className="palette__footer">
-          {hint ? (
-            <span className="palette__hint">{hint}</span>
-          ) : activePort ? (
+          {activePort ? (
             <span>↑↓ 选择 · 回车运行</span>
           ) : (
-            <span className="palette__hint palette__hint--faint">未打开端口</span>
+            <span className="palette__hint palette__hint--faint">未打开端口（纯 log/sleep 脚本可直接运行）</span>
           )}
         </div>
       </div>
@@ -263,6 +257,8 @@ export function PortPalette({
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
     const matched: { pid: PortId; score: number; first: number }[] = [];
@@ -312,7 +308,7 @@ export function PortPalette({
 
   return (
     <div className="palette-overlay" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="串口选择面板" className="palette" onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           className="palette__input"
