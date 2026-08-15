@@ -163,11 +163,7 @@ button {
   width: 78px;
 }
 .titlebar__title {
-  flex: 1;
-  padding-left: 10px;
-  font-size: 12px;
-  color: var(--ink-dim);
-  letter-spacing: 0.02em;
+  flex: 1; /* 纯占位:把窗口控制钮推到右缘 */
 }
 .titlebar__controls {
   display: flex;

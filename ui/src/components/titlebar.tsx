@@ -53,7 +53,8 @@ export function TitleBar() {
     >
       {/* macOS 红绿灯安全区(Overlay 模式下原生按钮悬浮于此) */}
       <div className="titlebar__traffic" />
-      <div className="titlebar__title">Serial Studio</div>
+      {/* 占位撑开,把窗口控制钮推到右缘(标题文字已去掉,拖动区=标题栏本体) */}
+      <div className="titlebar__title" />
       {!isMac && (
         <div className="titlebar__controls">
           {/* mousedown 不抢焦点(同侧栏铅笔按钮):点了最小化/最大化后焦点保持在终端,

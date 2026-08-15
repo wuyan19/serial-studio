@@ -681,6 +681,14 @@ fn run_gui() {
                     let _ = w.set_decorations(false);
                 }
             }
+            // macOS 的 Overlay 标题栏层会居中渲染窗口 title(自绘标题栏管不到),
+            // 清空窗口标题以隐藏;Dock/菜单栏显示的是应用名,不受影响。
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_title("");
+                }
+            }
 
             // 窗口级 state 必须在 spawn_event_emitter 之前 manage：
             // emitter 的 DataReceived 分支用 try_state::<PortChannels>()
