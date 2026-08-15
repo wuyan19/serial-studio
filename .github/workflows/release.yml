@@ -24,10 +24,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # mac 必须带 app 目标:macOS 更新产物(.app.tar.gz+.sig)由 app bundle 派生,
+          # 只打 dmg 会被 bundler 警告 "no updater-enabled targets" → latest.json 缺 darwin 键,
+          # mac 端检查更新报 fallback platforms not found(0.7.0/0.8.0 均栽此)。
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
           - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin --bundles app,dmg"
           - platform: ubuntu-22.04
             args: "--bundles appimage" # deb 不支持自动更新 → 改 AppImage
           - platform: windows-latest
@@ -78,8 +81,10 @@ jobs:
           releaseBody: "Serial Studio ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }} — 草稿，发布前请人工核对产物。详见 README。"
           releaseDraft: true
           prerelease: false
-          # Windows 同时打 nsis+msi：让 latest.json 确定性指向 nsis（体积小、更新体验好）
-          updaterJsonPreferNsisLazyDownload: true
+          # Windows 同时打 nsis+msi：让 latest.json 确定性指向 nsis（体积小、更新体验好）。
+          # 注意输入名是 updaterJsonPreferNsis——曾经的 updaterJsonPreferNsisLazyDownload
+          # 是非法输入被 tauri-action 静默忽略(2026-08 修复)。
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
       - name: Upload portable .exe (Windows · 非安装直运行)
