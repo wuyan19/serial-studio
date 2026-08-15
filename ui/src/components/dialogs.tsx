@@ -661,7 +661,7 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
           {local && (
             <div className="about__update">
               {status.state === "idle" && (
-                <button className="btn" onClick={onCheck}>检查更新</button>
+                <button className="btn btn--primary" onClick={onCheck}>检查更新</button>
               )}
               {status.state === "checking" && <p className="about__update-msg">检查中…</p>}
               {status.state === "upToDate" && <p className="about__update-msg">已是最新版本</p>}
