@@ -39,6 +39,8 @@ export function TitleBar() {
       onMouseDown={(e) => {
         // 仅左键 + 事件落在标题栏自身(标题文字/安全区)才拖动;按钮等子元素各司其职
         if (e.button !== 0 || e.target !== e.currentTarget) return;
+        // 不抢焦点(同窗口按钮):标题栏点击后键盘输入仍落在 xterm,双击最大化后无需再点终端
+        e.preventDefault();
         // 双击最大化/还原;官方 window-customization 模式(detail=2 为第二连击)
         if (e.detail === 2) void win.toggleMaximize();
         else void win.startDragging();

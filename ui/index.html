@@ -5,12 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Serial Studio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- UI 字体已自托管(@fontsource,styles.css @import → vite 打包进 dist),
+         不再请求 Google Fonts:离线可用,也免去字体异步就位的终端 fit 竞态 -->
     <style>
       html, body, #root { margin: 0; height: 100%; }
       html { background: #0a0b0d; color-scheme: dark; }

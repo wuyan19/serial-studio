@@ -1,4 +1,12 @@
 @import "@xterm/xterm/css/xterm.css";
+/* 字体自托管(@fontsource,随 dist 由 rust-embed 打进二进制):离线可用、无启动外网请求,
+   也消除了 Google Fonts 异步就位导致的终端 fit 竞态(字符格尺寸漂移)。 */
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "@fontsource/ibm-plex-mono/latin-600.css";
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
 
 /* ============================================================
    Serial Studio — design tokens
@@ -1363,6 +1371,9 @@ button {
   flex: 1;
   position: relative;
   min-height: 0;
+  /* 兜底裁剪:xterm 根元素高度由 fit 显式设定,任何一次 fit 失准(如字体晚到未重排)
+     都只裁剪不出界,绝不会画过容器盖住底部通道条 */
+  overflow: hidden;
 }
 
 /* ===== 分栏（editor group + 布局树） =====

@@ -148,7 +148,23 @@ export function TermView({
         /* 容器未可见 */
       }
     }, 50);
+    // Web 字体(Plex Mono)晚于终端就位时,字符格尺寸随重测改变而容器尺寸不变——
+    // RO 不触发、xterm 也不自动 refit,终端会以旧格尺寸的高度溢出容器(曾盖住底部通道条)。
+    // 字体批次就位后补一次 fit;alive 防卸载后迟到回调。
+    let alive = true;
+    const refit = () => {
+      if (!alive) return;
+      try {
+        fit.fit();
+      } catch {
+        /* 容器未可见 */
+      }
+    };
+    document.fonts?.addEventListener("loadingdone", refit);
+    document.fonts?.ready.then(refit);
     return () => {
+      alive = false;
+      document.fonts?.removeEventListener("loadingdone", refit);
       clearTimeout(timer);
       disposable.dispose();
       selDisposable.dispose();
