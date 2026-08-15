@@ -26,6 +26,20 @@ function fuzzyMatch(query: string, target: string): { score: number; first: numb
   return qi === q.length ? { score, first: first === -1 ? 0 : first } : null;
 }
 
+/** 键盘选中滚动跟随：选中项变化（方向键/悬停/过滤重置）时把它滚进可视区。
+ *  block:"nearest" 只在越界时滚动，已可见的选中不引起跳动。
+ *  面板选中是纯 state、不走 DOM 焦点，浏览器不会自动滚动，需手动跟随。 */
+function useSelectedIntoView(
+  listRef: React.RefObject<HTMLDivElement | null>,
+  selected: number,
+  count: number
+) {
+  useEffect(() => {
+    const el = listRef.current?.querySelectorAll<HTMLElement>(".palette__item")[selected];
+    el?.scrollIntoView({ block: "nearest" });
+  }, [listRef, selected, count]);
+}
+
 /** 宏命令面板：顶部搜索框 + 模糊过滤的宏列表，方向键选择，回车执行。
  *  模态打开时 App 的全局 listener 已被抑制；这里在输入框上自处理方向键 / 回车 / Esc。 */
 export function MacroPalette({
@@ -44,6 +58,7 @@ export function MacroPalette({
   const [hint, setHint] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   // 与对话框同级的模态:补 role/aria-modal + 焦点圈闭(初始焦点即搜索框)
   useDialogA11y(dialogRef, inputRef);
 
@@ -58,6 +73,7 @@ export function MacroPalette({
     );
     return matched.map((x) => x.name);
   }, [macros, query]);
+  useSelectedIntoView(listRef, selected, filtered.length);
 
   // 查询变化 → 回到首项、清提示
   useEffect(() => {
@@ -109,7 +125,7 @@ export function MacroPalette({
           autoCapitalize="off"
           spellCheck={false}
         />
-        <div className="palette__list">
+        <div className="palette__list" ref={listRef}>
           {filtered.length === 0 && <div className="palette__empty">无匹配宏</div>}
           {filtered.map((name, i) => (
             <button
@@ -157,6 +173,7 @@ export function ScriptPalette({
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
@@ -170,6 +187,7 @@ export function ScriptPalette({
     );
     return matched.map((x) => x.name);
   }, [scripts, query]);
+  useSelectedIntoView(listRef, selected, filtered.length);
 
   // 查询变化 → 回到首项
   useEffect(() => {
@@ -213,7 +231,7 @@ export function ScriptPalette({
           autoCapitalize="off"
           spellCheck={false}
         />
-        <div className="palette__list">
+        <div className="palette__list" ref={listRef}>
           {filtered.length === 0 && <div className="palette__empty">无匹配脚本</div>}
           {filtered.map((name, i) => (
             <button
@@ -258,6 +276,7 @@ export function PortPalette({
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
@@ -270,6 +289,7 @@ export function PortPalette({
     matched.sort((a, b) => a.score - b.score || a.first - b.first || a.pid.localeCompare(b.pid));
     return matched.map((x) => x.pid);
   }, [ports, query]);
+  useSelectedIntoView(listRef, selected, filtered.length);
 
   useEffect(() => {
     setSelected(0);
@@ -319,7 +339,7 @@ export function PortPalette({
           autoCapitalize="off"
           spellCheck={false}
         />
-        <div className="palette__list">
+        <div className="palette__list" ref={listRef}>
           {filtered.length === 0 && <div className="palette__empty">无匹配串口</div>}
           {filtered.map((pid, i) => (
             <button
