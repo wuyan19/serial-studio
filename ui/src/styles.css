@@ -604,34 +604,37 @@ button {
   text-transform: none;
 }
 
+/* 图标按钮 · 「薰衣草反应」:无框,悬停染交互色——"可点=薰衣草"语言延伸到每个图标按钮。
+   全程只引用 --accent,换主题(Claude 等)自动跟随。方案对比见 design-preview-icon-btn.html */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   background: transparent;
-  color: var(--ink-dim);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  border: none;
+  border-radius: 6px;
   cursor: pointer;
-  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
-    background var(--t-fast) var(--ease);
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .icon-btn:hover {
   color: var(--ink);
-  border-color: var(--surface-3);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
 }
+.icon-btn:active {
+  background: color-mix(in srgb, var(--accent) 21%, transparent);
+}
+/* 危险操作(删除等)悬停现红,压过薰衣草 hover */
 .icon-btn--danger:hover {
   color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 .icon-btn svg {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
 }
 
 .sidebar__empty {
@@ -879,14 +882,21 @@ button {
   color: var(--ink-faint);
   cursor: pointer;
   z-index: 1;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+  opacity: 0;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
+    opacity var(--t-fast) var(--ease);
+}
+/* 编辑/删除悬停行才现身(键盘 Tab 聚焦也现身);行内右侧 56px 常驻预留,文本不跳动 */
+.macro-row:hover .macro-action,
+.macro-action:focus-visible {
+  opacity: 1;
 }
 .macro-action--edit {
   right: 28px;
 }
 .macro-action:hover {
   color: var(--ink);
-  background: var(--surface-3);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
 }
 .macro-action--danger:hover {
   color: var(--danger);
