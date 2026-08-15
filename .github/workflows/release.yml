@@ -110,7 +110,8 @@ jobs:
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -e
-          gh release download "$TAG" --pattern latest.json --output latest.json
+          # 本 job 无 checkout,gh release 必须显式 -R 指仓库(否则回退 git 探测报 not a git repository)
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern latest.json --output latest.json
           python3 - <<'PY'
           import json, subprocess, os
           tag, repo = os.environ["TAG"], os.environ["GITHUB_REPOSITORY"]
@@ -133,4 +134,4 @@ jobs:
           json.dump(d, open("latest.json", "w"), indent=2, ensure_ascii=False)
           print("改写完成:", {k: v["url"].rsplit('/', 1)[-1] for k, v in d["platforms"].items()})
           PY
-          gh release upload "$TAG" latest.json --clobber
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" latest.json --clobber
