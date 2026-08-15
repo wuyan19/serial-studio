@@ -329,16 +329,28 @@ button {
   display: flex;
   flex-direction: column;
 }
-/* 侧栏拖动调宽条(贴 sidebar 右缘;width 由 inline style 驱动) */
+/* 侧栏拖动调宽条(悬浮在 sidebar 右缘分界线上,不占布局宽度——侧栏与主区只隔 1px 边框) */
 .sidebar-resizer {
   flex-shrink: 0;
-  width: 4px;
-  margin-left: -1px;
+  width: 6px;
+  margin-left: -5px; /* 覆盖边框 1px + 两侧各分摊,布局净占宽 0 */
+  margin-right: -1px;
   cursor: col-resize;
-  background: transparent;
   z-index: 5;
+  position: relative;
 }
-.sidebar-resizer:hover {
+/* 命中区 6px 好抓,视觉线只画 2px(整块填色会显得很粗) */
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% + 1px); /* 元素中心被负边距推到边框左侧,补 1px 让线正好盖住边框 */
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+}
+.sidebar-resizer:hover::after {
   background: var(--accent);
 }
 /* 侧栏分组(宏/脚本按 group 折叠;组头整行可点) */
@@ -1408,29 +1420,48 @@ button {
   min-width: 0;
   min-height: 0;
 }
-/* 分栏拖动手柄:8px 命中区(::after 收窄到 4px 视觉条),悬停亮主题交互色 */
+/* 分栏拖动手柄:8px 命中区悬浮在分界线上不占布局(净占宽 0,比例计算无需扣宽),
+   静止画 1px hairline 分隔两个终端区,悬停亮 2px 主题交互色 */
 .pane-divider {
-  flex: 0 0 8px; /* 与 App.tsx PANE_DIVIDER_W 保持一致(比例计算扣此宽) */
+  flex: 0 0 8px;
   position: relative;
   z-index: 5;
-  background: transparent;
 }
 .pane-divider::after {
   content: "";
   position: absolute;
-  inset: 2px;
-  background: transparent;
+  background: var(--hairline-soft);
   transition: background var(--t-fast) var(--ease);
-}
-.pane-divider:hover::after {
-  background: var(--accent);
-  opacity: 0.45;
 }
 .pane-divider--row {
   cursor: col-resize;
+  margin: 0 -4px;
+}
+.pane-divider--row::after {
+  left: 50%;
+  transform: translateX(-50%);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+.pane-divider--row:hover::after {
+  width: 2px;
+  background: var(--accent);
 }
 .pane-divider--col {
   cursor: row-resize;
+  margin: -4px 0;
+}
+.pane-divider--col::after {
+  top: 50%;
+  transform: translateY(-50%);
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+.pane-divider--col:hover::after {
+  height: 2px;
+  background: var(--accent);
 }
 .pane-split--row {
   flex-direction: row;

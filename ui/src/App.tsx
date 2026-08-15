@@ -1836,12 +1836,9 @@ export default function App() {
   );
 }
 
-/** 分栏拖动手柄宽度(px),与 CSS .pane-divider 的 flex-basis 保持一致(命中区 8px)。 */
-const PANE_DIVIDER_W = 8;
-
 /** 分栏拖动手柄:拖动按容器内坐标实时改比例(reducer 内 clamp 0.15–0.85),双击复位 0.5。
- *  容器取 parentElement(即 .pane-split)。比例按"两子格可用空间"算——须扣除手柄自身宽,
- *  否则手柄永远滞后光标约半个手柄宽。拖动监听挂 window,组件卸载兜底移除
+ *  容器取 parentElement(即 .pane-split)。手柄负边距悬浮在分界线上不占布局,
+ *  比例直接按容器全宽算。拖动监听挂 window,组件卸载兜底移除
  *  (防拖动中布局坍缩/重构后悬空监听继续 dispatch 过期 path)。 */
 function PaneDivider({ dir, onRatio }: { dir: PaneDir; onRatio: (r: number) => void }) {
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -1851,9 +1848,9 @@ function PaneDivider({ dir, onRatio }: { dir: PaneDir; onRatio: (r: number) => v
     e.preventDefault();
     const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
     const move = (ev: MouseEvent) => {
-      const total = (dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_W;
+      const total = dir === "row" ? rect.width : rect.height;
       const pos = dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
-      onRatio((pos - PANE_DIVIDER_W / 2) / total);
+      onRatio(pos / total);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
