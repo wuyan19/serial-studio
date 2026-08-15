@@ -549,7 +549,6 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
         <h3 className="dialog__title">
           <IconKeyboard /> SHORTCUTS
         </h3>
-        <div className="dialog__sub">点键帽录制，按下新组合；Esc 取消录制</div>
 
         <div className="shortcut-list">
           {order.map((action) => {

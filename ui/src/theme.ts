@@ -129,9 +129,35 @@ const LINEAR_LIGHT_CM: CmSyntaxColors = {
   defVar: "#187a43",
 };
 
-/** 主题注册表(有序,toggle 按此循环;主题菜单按 family 分组展示)。
- *  as const 保住字面量联合类型(Theme = "linear" | "linear-light"),
- *  satisfies 只做结构校验、不拓宽类型。 */
+/* ===== 其余家族的 term/search/cm 派生策略 =====
+   ANSI 信号调色板(青=RX/琥珀=TX)与语法色是语义层,不随风格家族变——
+   新主题按 lum 复用 Linear 基线,只覆写 background/foreground/selection;
+   search 高亮随各主题的交互色(accent)走。 */
+
+/** 暗色家族 term:覆写底/前景/选中(光标保持 RX 青)。 */
+function darkTerm(bg: string, fg: string, selection: string): ITheme {
+  return { ...LINEAR_TERM, background: bg, foreground: fg, cursorAccent: bg, selectionBackground: selection };
+}
+
+/** 亮色家族 term:覆写底/前景/选中(光标保持深 RX 青)。 */
+function lightTerm(bg: string, fg: string, selection: string): ITheme {
+  return { ...LINEAR_LIGHT_TERM, background: bg, foreground: fg, cursorAccent: bg, selectionBackground: selection };
+}
+
+/** search 高亮:match/active/border 三色 + overview ruler 复用前后两色。 */
+function searchColors(match: string, active: string, border: string): ISearchDecorationOptions {
+  return {
+    matchBackground: match,
+    activeMatchBackground: active,
+    activeMatchBorder: border,
+    matchOverviewRuler: match,
+    activeMatchColorOverviewRuler: border,
+  };
+}
+
+/** 主题注册表(有序,toggle 按此循环;主题菜单平铺按此顺序展示)。
+ *  as const 保住字面量联合类型,satisfies 只做结构校验、不拓宽类型。
+ *  新主题三处登记:此处 + styles.css token 块 + index.html 首帧脚本。 */
 export const THEMES = [
   {
     id: "linear",
@@ -150,6 +176,105 @@ export const THEMES = [
     term: LINEAR_LIGHT_TERM,
     search: LINEAR_LIGHT_SEARCH,
     cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "apple",
+    label: "Apple · 暗",
+    family: "Apple",
+    lum: "dark",
+    term: darkTerm("#101012", "#f5f5f7", "rgba(41,151,255,0.30)"),
+    search: searchColors("#17324f", "#23507e", "#4a9bff"),
+    cm: LINEAR_CM,
+  },
+  {
+    id: "apple-light",
+    label: "Apple · 亮",
+    family: "Apple",
+    lum: "light",
+    term: lightTerm("#ffffff", "#1d1d1f", "rgba(0,102,204,0.16)"),
+    search: searchColors("#d8e6f6", "#b3d0f0", "#0066cc"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "raycast",
+    label: "Raycast · 暗",
+    family: "Raycast",
+    lum: "dark",
+    term: darkTerm("#050607", "#f4f4f6", "rgba(255,255,255,0.20)"),
+    search: searchColors("#2a2c2e", "#46494c", "#6a6e72"),
+    cm: LINEAR_CM,
+  },
+  {
+    id: "raycast-light",
+    label: "Raycast · 亮",
+    family: "Raycast",
+    lum: "light",
+    term: lightTerm("#ffffff", "#171717", "rgba(23,23,23,0.12)"),
+    search: searchColors("#e3e5e8", "#c9ccd1", "#8a8f96"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "superhuman",
+    label: "Superhuman · 暗",
+    family: "Superhuman",
+    lum: "dark",
+    term: darkTerm("#0b0a1a", "#ffffff", "rgba(201,180,250,0.25)"),
+    search: searchColors("#33304d", "#554e8a", "#8f86c9"),
+    cm: LINEAR_CM,
+  },
+  {
+    id: "superhuman-light",
+    label: "Superhuman · 亮",
+    family: "Superhuman",
+    lum: "light",
+    term: lightTerm("#fdfdfc", "#292827", "rgba(27,25,56,0.16)"),
+    search: searchColors("#e5e2ec", "#cbc6dd", "#6a5fc1"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "claude",
+    label: "Claude · 暗",
+    family: "Claude",
+    lum: "dark",
+    term: darkTerm("#141310", "#faf9f5", "rgba(204,120,92,0.28)"),
+    search: searchColors("#3a2e26", "#6e4a35", "#cc785c"),
+    cm: LINEAR_CM,
+  },
+  {
+    id: "claude-light",
+    label: "Claude · 亮",
+    family: "Claude",
+    lum: "light",
+    term: lightTerm("#fbfaf6", "#141413", "rgba(204,120,92,0.20)"),
+    search: searchColors("#f0e1d7", "#e2c3b0", "#a9583e"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "cursor",
+    label: "Cursor · 亮",
+    family: "Cursor",
+    lum: "light",
+    term: lightTerm("#fcfcfa", "#26251e", "rgba(245,78,0,0.18)"),
+    search: searchColors("#f7e3d7", "#f0c4a8", "#f54e00"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "stripe",
+    label: "Stripe · 亮",
+    family: "Stripe",
+    lum: "light",
+    term: lightTerm("#fbfcfe", "#0d253d", "rgba(83,58,253,0.16)"),
+    search: searchColors("#e4defc", "#cbc2f8", "#533afd"),
+    cm: LINEAR_LIGHT_CM,
+  },
+  {
+    id: "sentry",
+    label: "Sentry · 暗",
+    family: "Sentry",
+    lum: "dark",
+    term: darkTerm("#120d1e", "#ffffff", "rgba(194,239,78,0.22)"),
+    search: searchColors("#2c3a18", "#4c6420", "#c2ef4e"),
+    cm: LINEAR_CM,
   },
 ] as const satisfies readonly ThemeDef[];
 
@@ -206,6 +331,9 @@ export function setTheme(t: Theme) {
     /* ignore */
   }
   document.documentElement.dataset.theme = t;
+  // data-lum 随行:styles.css 浅色家族共用层(信号色/组件特例)挂在这一属性上,
+  // 免去每个浅色主题往十几条选择器里加 id(首帧脚本持有一份等价映射)。
+  document.documentElement.dataset.lum = themeDefOf(t).lum;
   listeners.forEach((l) => l(t));
 }
 

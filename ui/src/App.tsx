@@ -264,7 +264,7 @@ export default function App() {
       return next;
     });
   const [manageMenu, setManageMenu] = useState(false);
-  /** 主题选择菜单(多主题后循环切换不再可用,菜单按 family 分组列出全部主题)。 */
+  /** 主题选择菜单(按注册表顺序平铺列出全部主题)。 */
   const [themeMenu, setThemeMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
@@ -1329,28 +1329,24 @@ export default function App() {
             <>
               <div className="manage-backdrop" onClick={() => setThemeMenu(false)} />
               <div className="manage-menu">
-                {THEMES.map((def, i) => {
-                  // family 首条渲染分组标头(注册表有序,相邻同名归一组)
-                  const firstOfFamily = i === 0 || THEMES[i - 1].family !== def.family;
+                {THEMES.map((def) => {
                   const current = def.id === theme;
                   return (
-                    <div key={def.id}>
-                      {firstOfFamily && <div className="manage-menu__group">{def.family}</div>}
-                      <button
-                        className="manage-menu__item"
-                        data-current={current || undefined}
-                        onClick={() => {
-                          setTheme(def.id);
-                          setThemeMenu(false);
-                        }}
-                      >
-                        {/* 勾选占位对齐:非当前项隐藏勾,保持文本同列 */}
-                        <span style={{ display: "inline-flex", visibility: current ? "visible" : "hidden" }}>
-                          <IconCheck />
-                        </span>
-                        {def.label}
-                      </button>
-                    </div>
+                    <button
+                      key={def.id}
+                      className="manage-menu__item"
+                      data-current={current || undefined}
+                      onClick={() => {
+                        setTheme(def.id);
+                        setThemeMenu(false);
+                      }}
+                    >
+                      {/* 勾选占位对齐:非当前项隐藏勾,保持文本同列 */}
+                      <span style={{ display: "inline-flex", visibility: current ? "visible" : "hidden" }}>
+                        <IconCheck />
+                      </span>
+                      {def.label}
+                    </button>
                   );
                 })}
               </div>

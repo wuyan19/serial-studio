@@ -272,7 +272,9 @@ button {
   position: absolute;
   bottom: -4px;
   left: 50px;
-  min-width: 132px;
+  min-width: 160px; /* 最长主题名「Superhuman · 亮」+ 勾选图标需 ~150px */
+  max-height: calc(100vh - 90px); /* 主题增多后矮屏不顶出上沿,内部滚动 */
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
@@ -286,6 +288,7 @@ button {
   gap: 8px;
   width: 100%;
   text-align: left;
+  white-space: nowrap; /* 长主题名单行,菜单宽度由 min-width 兜底 */
   padding: 7px 10px;
   background: transparent;
   color: var(--ink-dim);
@@ -298,13 +301,7 @@ button {
   background: var(--surface-2);
   color: var(--ink);
 }
-/* 主题菜单:分组标头 + 当前项(交互色 + 勾) */
-.manage-menu__group {
-  padding: 7px 10px 3px;
-  font-size: 10.5px;
-  letter-spacing: 0.06em;
-  color: var(--ink-faint);
-}
+/* 主题菜单:当前项(交互色 + 勾) */
 .manage-menu__item[data-current="true"] {
   color: var(--accent);
 }
@@ -847,7 +844,7 @@ button {
   background: var(--surface-2);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-btn);
+  border-radius: var(--r-md); /* 列表行按钮:固定中圆角,不跟 --r-btn(胶囊家族下整行胶囊很怪) */
   cursor: pointer;
   font-size: var(--fs-base);
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
@@ -1990,7 +1987,6 @@ button {
   overflow-y: auto;
 }
 .dialog--shortcuts > .dialog__title,
-.dialog--shortcuts > .dialog__sub,
 .dialog--shortcuts > .editor-error,
 .dialog--shortcuts > .btn-row {
   flex-shrink: 0;
@@ -2701,17 +2697,273 @@ button {
 }
 
 /* ============================================================
-   Linear·亮 —— 唯一的主题覆盖块(默认值 = Linear·暗,住在 :root)。
+   主题覆盖块(默认值 = Linear·暗,住在 :root)。
    【新增主题】清单 3 处:theme.ts::THEMES 一条完整定义 + styles.css
-   一块 `:root[data-theme="xxx"]` token 覆盖 + index.html(id 数组+首帧背景);
-   term.tsx / editors.tsx / App.tsx 均读注册表,无需再动。
-   信号对(RX teal / TX amber)在白底加深;TS 侧配色(xterm/CM)见 theme.ts。
+   一块 `:root[data-theme="xxx"]` token 覆盖 + index.html(id 数组+首帧背景
+   +lightIds 明暗映射);term.tsx / editors.tsx / App.tsx 均读注册表,无需再动。
+   亮色主题的按明暗取值部分(信号色加深/hover 叠黑/浅浮层影)自动挂到
+   下方 data-lum 共用层,不需再改任何选择器。
+   规格来源:awesome-design-md 各 DESIGN.md(Raycast/Superhuman/Claude/
+   Cursor/Stripe/Sentry);Raycast 亮面为极性反推,Superhuman/Claude 暗面
+   中间层为两级规格间的等距外推。
    ============================================================ */
 :root {
-  color-scheme: dark; /* 默认 = Linear·暗;亮色主题在各自块内翻转 */
+  color-scheme: dark; /* 默认 = Linear·暗;亮色由 data-lum 共用层翻转 */
 }
-:root[data-theme="linear-light"] {
+
+/* ---------- 亮色家族共用层:data-lum ----------
+   data-lum 由 theme.ts::setTheme 与 index.html 首帧脚本随 data-theme 一并写入,
+   亮色主题的一切"按明暗取值"的共用规则(信号色加深、hover 叠黑、浅浮层影)
+   都挂在这一组上——新增浅色主题不再需要改任何选择器。
+   信号对/步骤色:白底加深(语义不随家族变)。 */
+:root[data-lum="light"] {
+  --rx: #0c7f73;
+  --tx: #b06a16;
+  --link: #187a43;
+  --danger: #c8392f;
+  --warn: #9a6b0c;
+  --c-send: #0c7f73;
+  --c-delay: #8445c0;
+  --c-expect: #b06a16;
+  --c-clear: #c8392f;
   color-scheme: light;
+}
+
+/* ---------- Apple·暗:真中性灰(无蓝调)+ Action Blue 交互色 ----------
+   圆角语汇:胶囊按钮 + 10px 输入 + 12px 卡片;卡片零高光(圆角即层级) */
+:root[data-theme="apple"] {
+  --bg: #161617;
+  --surface: #1d1d1f;
+  --surface-2: #272729;
+  --surface-3: #2f2f31;
+  --term-bg: #101012;
+  --hairline: #38383a;
+  --hairline-soft: #2c2c2e;
+  --ink: #f5f5f7;
+  --ink-dim: #a1a1a6;
+  --ink-faint: #6e6e73;
+  --accent: #2997ff;
+  --accent-hover: #3da1ff;
+  --accent-press: #0077ed;
+  --on-accent: #ffffff;
+  --r-btn: 999px; /* 胶囊 CTA 是 Apple 家族签名 */
+  --r-input: 10px;
+  --r-card: 12px;
+  --card-glow: none;
+  --font-ui: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* ---------- Apple·亮:羊皮纸底 + 纯白卡片 ---------- */
+:root[data-theme="apple-light"] {
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --surface-2: #fafafc;
+  --surface-3: #f0f0f0;
+  --term-bg: #ffffff;
+  --hairline: #e0e0e0;
+  --hairline-soft: #ececee;
+  --ink: #1d1d1f;
+  --ink-dim: #515154;
+  --ink-faint: #86868b;
+  --accent: #0066cc;
+  --accent-hover: #0077ed;
+  --accent-press: #0055aa;
+  --on-accent: #ffffff;
+  --r-btn: 999px;
+  --r-input: 10px;
+  --r-card: 12px;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --card-glow: none;
+  --font-ui: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* ---------- Raycast·暗:近黑单色阶梯,纯白 CTA,零投影 ---------- */
+:root[data-theme="raycast"] {
+  --bg: #07080a;
+  --surface: #0d0d0d;
+  --surface-2: #101111;
+  --surface-3: #121212;
+  --term-bg: #050607;
+  --hairline: #242728;
+  --hairline-soft: #1d1e1f;
+  --ink: #f4f4f6;
+  --ink-dim: #cdcdcd;
+  --ink-faint: #9c9c9d;
+  --accent: #ffffff;
+  --accent-hover: #ffffff;
+  --accent-press: #e8e8e8;
+  --on-accent: #000000;
+  --r-card: 10px;
+}
+
+/* ---------- Raycast·亮(极性反推) ---------- */
+:root[data-theme="raycast-light"] {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f5f5f5;
+  --surface-3: #ebebeb;
+  --term-bg: #ffffff;
+  --hairline: #dfdfdf;
+  --hairline-soft: #e8e8e8;
+  --ink: #171717;
+  --ink-dim: #4d4d4d;
+  --ink-faint: #8a8a8a;
+  --accent: #171717;
+  --accent-hover: #2b2b2b;
+  --accent-press: #000000;
+  --on-accent: #ffffff;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+
+/* ---------- Superhuman·暗:靛蓝紫底,淡紫交互色 ---------- */
+:root[data-theme="superhuman"] {
+  --bg: #0e0c1f;
+  --surface: #1b1938;
+  --surface-2: #201e42;
+  --surface-3: #262450;
+  --term-bg: #0b0a1a;
+  --hairline: #3f3a52;
+  --hairline-soft: #333048;
+  --ink: #ffffff;
+  --ink-dim: #bcbac9;
+  --ink-faint: #8e8ba6;
+  --accent: #c9b4fa;
+  --accent-hover: #d9c8ff;
+  --accent-press: #b39cf7;
+  --on-accent: #1b1938;
+  --r-input: 6px;
+}
+
+/* ---------- Superhuman·亮:白底 + 靛蓝 CTA ---------- */
+:root[data-theme="superhuman-light"] {
+  --bg: #fafaf8;
+  --surface: #ffffff;
+  --surface-2: #f5f4f0;
+  --surface-3: #edece7;
+  --term-bg: #fdfdfc;
+  --hairline: #e8e4dd;
+  --hairline-soft: #efede8;
+  --ink: #292827;
+  --ink-dim: #73706d;
+  --ink-faint: #9a9794;
+  --accent: #1b1938;
+  --accent-hover: #2a2750;
+  --accent-press: #0e0c1f;
+  --on-accent: #ffffff;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+
+/* ---------- Claude·暗:暖褐底 + 珊瑚橘 ---------- */
+:root[data-theme="claude"] {
+  --bg: #181715;
+  --surface: #1f1e1b;
+  --surface-2: #252320;
+  --surface-3: #2b2926;
+  --term-bg: #141310;
+  --hairline: #35322c;
+  --hairline-soft: #2c2a25;
+  --ink: #faf9f5;
+  --ink-dim: #a09d96;
+  --ink-faint: #74716a;
+  --accent: #cc785c;
+  --accent-hover: #d8865f;
+  --accent-press: #a9583e;
+  --on-accent: #ffffff;
+}
+
+/* ---------- Claude·亮:奶油底 + 珊瑚橘 ---------- */
+:root[data-theme="claude-light"] {
+  --bg: #f5f0e8;
+  --surface: #faf9f5;
+  --surface-2: #f5f0e8;
+  --surface-3: #efe9de;
+  --term-bg: #fbfaf6;
+  --hairline: #e6dfd8;
+  --hairline-soft: #ebe6df;
+  --ink: #141413;
+  --ink-dim: #3d3d3a;
+  --ink-faint: #6c6a64;
+  --accent: #cc785c;
+  --accent-hover: #b5674a;
+  --accent-press: #a9583e;
+  --on-accent: #ffffff;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+
+/* ---------- Cursor·亮(单态):暖米底 + 橙 CTA + 零投影 ---------- */
+:root[data-theme="cursor"] {
+  --bg: #fafaf7;
+  --surface: #ffffff;
+  --surface-2: #f7f7f4;
+  --surface-3: #e6e5e0;
+  --term-bg: #fcfcfa;
+  --hairline: #e6e5e0;
+  --hairline-soft: #efeee8;
+  --ink: #26251e;
+  --ink-dim: #5a5852;
+  --ink-faint: #807d72;
+  --accent: #f54e00;
+  --accent-hover: #ff6a1f;
+  --accent-press: #d04200;
+  --on-accent: #ffffff;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+
+/* ---------- Stripe·亮(单态):靛蓝 CTA + 药丸按钮 + 蓝调阴影 ---------- */
+:root[data-theme="stripe"] {
+  --bg: #f6f9fc;
+  --surface: #ffffff;
+  --surface-2: #f0f4f9;
+  --surface-3: #e7edf3;
+  --term-bg: #fbfcfe;
+  --hairline: #e3e8ee;
+  --hairline-soft: #ecf0f4;
+  --ink: #0d253d;
+  --ink-dim: #273951;
+  --ink-faint: #64748d;
+  --accent: #533afd;
+  --accent-hover: #665efd;
+  --accent-press: #4434d4;
+  --on-accent: #ffffff;
+  --r-btn: 999px; /* 药丸按钮是 Stripe 的家族签名 */
+  --r-input: 6px;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+
+/* ---------- Sentry·暗(单态):紫夜底 + lime 交互色 ---------- */
+:root[data-theme="sentry"] {
+  --bg: #150f23;
+  --surface: #1f1633;
+  --surface-2: #251c40;
+  --surface-3: #2c224d;
+  --term-bg: #120d1e;
+  --hairline: #362d59;
+  --hairline-soft: #2b2447;
+  --ink: #ffffff;
+  --ink-dim: #b8b5c4;
+  --ink-faint: #8a86a0;
+  --accent: #c2ef4e;
+  --accent-hover: #d3f76e;
+  --accent-press: #b0e338;
+  --on-accent: #150f23;
+  --r-input: 6px;
+}
+
+/* ---------- Linear·亮(家族块之后,与各家族平级) ---------- */
+:root[data-theme="linear-light"] {
   --bg: #f4f5f6;
   --surface: #ffffff;
   --surface-2: #f7f8f8;
@@ -2722,71 +2974,63 @@ button {
   --ink: #1c1d1f;
   --ink-dim: #5e6267;
   --ink-faint: #8a8f98;
-  /* 信号对/步骤色:白底加深(语义色,不随风格家族变) */
-  --rx: #0c7f73;
-  --tx: #b06a16;
-  --link: #187a43;
-  --danger: #c8392f;
-  --warn: #9a6b0c;
-  --c-send: #0c7f73;
-  --c-delay: #8445c0;
-  --c-expect: #b06a16;
-  --c-clear: #c8392f;
-
   /* 薰衣草白底加深一档(hover 方向反转:亮底上 hover 变深) */
   --accent: #5e6ad2;
   --accent-hover: #5158b8;
   --accent-press: #4a51a8;
   --on-accent: #ffffff;
-
   --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
   --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
   --card-glow: inset 0 1px 0 #ffffff;
 }
-:root[data-theme="linear-light"] ::selection {
+
+/* ============================================================
+   浅色家族组件特例(挂 data-lum,见上方共用层注释):
+   hover 叠黑、遮罩/阴影换中性浅影(暗色默认的近黑硬阴影在浅色下发脏)。
+   ============================================================ */
+:root[data-lum="light"] ::selection {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
-/* 浅色面特例:hover 叠黑、遮罩/阴影换中性冷调(暗色默认的近黑硬阴影在浅色下发脏) */
-:root[data-theme="linear-light"] .act-icon:hover {
+:root[data-lum="light"] .act-icon:hover {
   background: rgba(0, 0, 0, 0.045);
 }
-:root[data-theme="linear-light"] .tab:hover {
+:root[data-lum="light"] .tab:hover {
   background: rgba(0, 0, 0, 0.04);
 }
-:root[data-theme="linear-light"] .dialog-overlay,
-:root[data-theme="linear-light"] .palette-overlay {
+:root[data-lum="light"] .dialog-overlay,
+:root[data-lum="light"] .palette-overlay {
   background: rgba(30, 34, 44, 0.42);
 }
-/* 浮层阴影统一换中性冷调浅影(palette 与 dialog 同构;group-menu/searchbar 是同族漏网) */
-:root[data-theme="linear-light"] .dialog,
-:root[data-theme="linear-light"] .palette,
-:root[data-theme="linear-light"] .manage-menu {
+/* 浮层阴影统一换中性浅影(palette 与 dialog 同构;group-menu/searchbar 是同族漏网) */
+:root[data-lum="light"] .dialog,
+:root[data-lum="light"] .palette,
+:root[data-lum="light"] .manage-menu {
   box-shadow: var(--card-glow), 0 16px 40px rgba(20, 24, 32, 0.16);
 }
-:root[data-theme="linear-light"] .group-menu {
+:root[data-lum="light"] .group-menu {
   box-shadow: 0 6px 16px rgba(20, 24, 32, 0.14);
 }
-:root[data-theme="linear-light"] .searchbar {
+:root[data-lum="light"] .searchbar {
   box-shadow: 0 10px 28px rgba(20, 24, 32, 0.14);
 }
-:root[data-theme="linear-light"] .toast {
+:root[data-lum="light"] .toast {
   box-shadow: 0 4px 16px rgba(20, 24, 32, 0.12);
 }
-:root[data-theme="linear-light"] .script-help {
+:root[data-lum="light"] .script-help {
   box-shadow: 0 8px 28px rgba(20, 24, 32, 0.14);
 }
 /* banner 关闭钮 hover:暗色默认叠白,浅底上不可见 → 叠黑 */
-:root[data-theme="linear-light"] .banner__close:hover {
+:root[data-lum="light"] .banner__close:hover {
   background: rgba(0, 0, 0, 0.06);
 }
-/* 滚动条 thumb:浅色默认的 surface-3(#ececee)在白底上近不可见,加深一档 */
-:root[data-theme="linear-light"] * {
+/* 滚动条 thumb:浅色 surface-3 在白底上近不可见,加深一档 */
+:root[data-lum="light"] * {
   scrollbar-color: #d4d6da transparent;
 }
-:root[data-theme="linear-light"] *::-webkit-scrollbar-thumb {
+:root[data-lum="light"] *::-webkit-scrollbar-thumb {
   background: #d4d6da;
 }
 /* 活动栏激活:浅色底的微光用叠黑(暗色默认是叠白) */
-:root[data-theme="linear-light"] .act-icon[data-active="true"] {
+:root[data-lum="light"] .act-icon[data-active="true"] {
   background: rgba(0, 0, 0, 0.05);
 }
