@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh" data-theme="dark">
+<html lang="zh" data-theme="linear">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -13,26 +13,34 @@
     />
     <style>
       html, body, #root { margin: 0; height: 100%; }
-      html { background: #14161a; color-scheme: dark; }
+      html { background: #0a0b0d; color-scheme: dark; }
       /* 新增主题:在此加首帧背景色规则(防白闪),与 styles.css 的 token 覆盖块对应 */
-      html[data-theme="light"] { background: #f4f2ec; color-scheme: light; }
+      html[data-theme="linear-light"] { background: #f4f5f6; color-scheme: light; }
     </style>
     <script>
       // 首帧前定主题，避免闪烁。优先用户选择，否则跟随系统。
-      // 主题 id 数组与 src/theme.ts 的 THEMES 注册表手动同步(内联脚本先于 bundle 执行,无法 import)。
+      // 主题 id 数组与 src/theme.ts 的 THEMES 注册表手动同步(内联脚本先于 bundle 执行,无法 import);
+      // legacy 为已下线主题(dark/light → Linear 两态)的迁移表,与 theme.ts 保持一致。
       (function () {
-        var ids = ["dark", "light"];
+        var ids = ["linear", "linear-light"];
+        var legacy = { dark: "linear", light: "linear-light" };
         try {
           var s = localStorage.getItem("serial-studio-theme");
-          var t =
-            ids.indexOf(s) >= 0
-              ? s
-              : window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
-              ? "light"
-              : "dark";
+          var t;
+          if (ids.indexOf(s) >= 0) t = s;
+          else if (legacy[s]) {
+            // 迁移命中即回写:旧 id 不留 localStorage,迁移表未来可退役
+            t = legacy[s];
+            try { localStorage.setItem("serial-studio-theme", t); } catch (e2) {}
+          } else {
+            t =
+              window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "linear-light"
+                : "linear";
+          }
           document.documentElement.setAttribute("data-theme", t);
         } catch (e) {
-          document.documentElement.setAttribute("data-theme", "dark");
+          document.documentElement.setAttribute("data-theme", "linear");
         }
       })();
     </script>

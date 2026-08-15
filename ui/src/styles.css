@@ -2,24 +2,24 @@
 
 /* ============================================================
    Serial Studio — design tokens
-   "Bench instrument": warm-tinted graphite chassis + a
-   teal(RX)/amber(TX) signal pair keyed to data semantics.
+   "Linear" 风格:近黑冷调底座(默认=Linear·暗,亮色走 linear-light 覆盖块)
+   + 薰衣草交互色(Linear #5e6ad2 族),teal(RX)/amber(TX) 信号对专属数据语义。
    ============================================================ */
 
 :root {
-  /* Surfaces — warm-tinted graphite, not pure black / VS Code grey */
-  --bg: #14161a;
-  --surface: #1b1e24;
-  --surface-2: #232730;
-  --surface-3: #2b303a;
-  --term-bg: #0e1014;
-  --hairline: #2e333c;
-  --hairline-soft: #262a32;
+  /* Surfaces — Linear 实测阶梯(#0f1011/#141516/#18191a 微调) */
+  --bg: #0a0b0d;
+  --surface: #101114;
+  --surface-2: #15161a;
+  --surface-3: #1a1b1f;
+  --term-bg: #060708;
+  --hairline: #23262c;
+  --hairline-soft: #1d1f24;
 
-  /* Ink */
-  --ink: #e6e9ef;
-  --ink-dim: #9aa0ad;
-  --ink-faint: #5c6270;
+  /* Ink — Linear 实测(#f7f8f8 族) */
+  --ink: #f7f8f8;
+  --ink-dim: #b7bdc9;
+  --ink-faint: #62666d;
 
   /* Signal pair — content-true (RX in, TX out) */
   --rx: #4fd6c2;
@@ -45,13 +45,29 @@
   --fs-lg: 16px;
   --fs-xl: 22px;
 
-  /* Shape / motion */
-  --r-sm: 3px;
-  --r-md: 6px;
+  /* Shape / motion —— Linear 圆角语言:按钮/输入 8px、卡片 12px、小件 4px */
+  --r-sm: 4px;
+  --r-md: 10px;
   --r-pill: 999px;
+  --r-btn: 8px;
+  --r-input: 8px;
+  --r-card: 12px;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --t-fast: 110ms;
   --t-med: 200ms;
+
+  /* Linear 招牌薰衣草交互色(暗底 hover 提亮)。
+     --accent = 交互强调色(焦点/激活/主按钮/选中),与 --rx(RX 信号语义)分离——
+     主题可换交互色(将来 Apple 蓝)而不动终端/LED 的信号对。
+     --card-glow 为透明 inset 时可安全拼进逗号阴影列表(亮色主题用白高光)。 */
+  --accent: #6a75d8;
+  --accent-hover: #828fff;
+  --accent-press: #5e6ad2;
+  --on-accent: #ffffff;
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  --field-focus-border: var(--hairline);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
+  --card-glow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 /* ---------- reset ---------- */
@@ -79,7 +95,7 @@ button {
   font-family: inherit;
 }
 ::selection {
-  background: rgba(79, 214, 194, 0.26);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* scrollbars — slim, graphite */
@@ -103,7 +119,7 @@ button {
 }
 
 :focus-visible {
-  outline: 2px solid var(--rx);
+  outline: var(--focus-outline);
   outline-offset: -2px;
 }
 
@@ -232,9 +248,11 @@ button {
 .act-icon__dot[data-kind="alert"] {
   background: var(--danger);
 }
+/* 活动栏激活:Linear 侧栏选中态 = 微光提升 + 亮字,无彩色左边条 */
 .act-icon[data-active="true"] {
-  color: var(--rx);
-  border-left-color: var(--rx);
+  color: var(--ink);
+  border-left-color: transparent;
+  background: rgba(255, 255, 255, 0.06);
 }
 .act-icon__svg {
   width: 20px;
@@ -280,6 +298,19 @@ button {
   background: var(--surface-2);
   color: var(--ink);
 }
+/* 主题菜单:分组标头 + 当前项(交互色 + 勾) */
+.manage-menu__group {
+  padding: 7px 10px 3px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+.manage-menu__item[data-current="true"] {
+  color: var(--accent);
+}
+.manage-menu__item[data-current="true"] svg {
+  color: var(--accent);
+}
 .manage-menu__item svg {
   width: 15px;
   height: 15px;
@@ -308,7 +339,7 @@ button {
   z-index: 5;
 }
 .sidebar-resizer:hover {
-  background: var(--rx, var(--hairline));
+  background: var(--accent);
 }
 /* 侧栏分组(宏/脚本按 group 折叠;组头整行可点) */
 .macro-group {
@@ -401,7 +432,7 @@ button {
   color: var(--danger);
 }
 .group-menu__item--danger:hover {
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 /* 串口分组卡标题：本地卡 / 远程设备卡。head 为 div（内含 toggle button + 可选删除 button，
    避免 button 嵌套 button）。复用 macro-group 的 caret/count 子元素样式。 */
@@ -499,7 +530,7 @@ button {
 }
 .port-group__action--danger:hover {
   color: var(--danger);
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .port-group__action svg {
   width: 14px;
@@ -515,7 +546,7 @@ button {
   gap: 6px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  color: var(--ink-faint);
+  color: var(--ink-dim); /* 连接状态是有信息量的文字,不用 faint(浅色下不达对比度) */
   margin-bottom: 12px;
   padding: 5px 8px;
   background: var(--surface-2);
@@ -583,8 +614,8 @@ button {
 }
 .icon-btn--danger:hover {
   color: var(--danger);
-  border-color: rgba(229, 83, 75, 0.4);
-  background: rgba(229, 83, 75, 0.08);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 .icon-btn svg {
   width: 14px;
@@ -647,7 +678,7 @@ button {
 .port-item-row[data-active="true"] .port-item {
   background: var(--surface-2);
   color: var(--ink);
-  border-left-color: var(--rx);
+  border-left-color: var(--accent);
 }
 .port-item__force {
   position: absolute;
@@ -670,7 +701,7 @@ button {
 }
 .port-item__force:hover {
   color: var(--warn);
-  background: rgba(227, 179, 65, 0.12);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 .port-item__force svg {
   width: 14px;
@@ -701,8 +732,8 @@ button {
   right: 30px;
 }
 .port-item__edit:hover {
-  color: var(--rx);
-  background: rgba(79, 214, 194, 0.12);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .port-item__edit svg {
   width: 14px;
@@ -716,17 +747,17 @@ button {
   min-width: 0;
   background: var(--term-bg);
   color: var(--ink);
-  border: 1px solid var(--rx);
-  border-radius: var(--r-sm);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-input);
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: inherit;
   line-height: 1.2;
   outline: none;
 }
-/* 常态 rx 描边已示意编辑态;聚焦再叠一圈(无布局位移) */
+/* 常态 accent 描边已示意编辑态;聚焦再叠一圈(无布局位移) */
 .alias-inline:focus {
-  box-shadow: 0 0 0 1px var(--rx);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 /* 端口行编辑态：放开 name 的裁剪，否则输入框被 overflow:hidden 切掉。 */
 .port-item-row[data-editing="true"] .port-item__name {
@@ -763,7 +794,7 @@ button {
 }
 .port-item__dot.open {
   background: var(--link);
-  box-shadow: 0 0 6px rgba(126, 231, 135, 0.6);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--link) 60%, transparent);
 }
 .port-item__name {
   flex: 1;
@@ -779,7 +810,7 @@ button {
 .port-item__holders {
   font-size: var(--fs-xs);
   color: var(--link);
-  background: rgba(126, 231, 135, 0.1);
+  background: color-mix(in srgb, var(--link) 10%, transparent);
   padding: 1px 6px;
   border-radius: var(--r-pill);
   flex-shrink: 0;
@@ -801,7 +832,7 @@ button {
   background: var(--surface-2);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-btn);
   cursor: pointer;
   font-size: var(--fs-base);
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
@@ -813,12 +844,6 @@ button {
 .macro-run:disabled {
   color: var(--ink-faint);
   cursor: not-allowed;
-}
-.macro-run svg {
-  width: 12px;
-  height: 12px;
-  color: var(--rx);
-  flex-shrink: 0;
 }
 .macro-run__label {
   overflow: hidden;
@@ -853,7 +878,7 @@ button {
 }
 .macro-action--danger:hover {
   color: var(--danger);
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .macro-action svg {
   width: 14px;
@@ -867,7 +892,7 @@ button {
   padding: 7px 9px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-card);
   border: 1px solid var(--hairline);
   word-break: break-all;
   line-height: 1.5;
@@ -894,8 +919,8 @@ button {
 }
 .macro-result.ok {
   color: var(--link);
-  background: rgba(126, 231, 135, 0.08);
-  border-color: rgba(126, 231, 135, 0.25);
+  background: color-mix(in srgb, var(--link) 8%, transparent);
+  border-color: color-mix(in srgb, var(--link) 25%, transparent);
 }
 .macro-result.run {
   color: var(--ink-dim);
@@ -903,8 +928,8 @@ button {
 }
 .macro-result.err {
   color: var(--danger);
-  background: rgba(229, 83, 75, 0.08);
-  border-color: rgba(229, 83, 75, 0.25);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 25%, transparent);
 }
 /* 运行中脚本任务(脚本侧栏):每条运行实例一行,独立停止按钮(per-runId,多任务各停各的)。 */
 .script-task {
@@ -912,10 +937,11 @@ button {
   padding: 6px 9px;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-card);
   border: 1px solid var(--hairline);
   background: var(--surface-2);
   color: var(--ink-dim);
+  box-shadow: var(--card-glow);
 }
 .script-task__head {
   display: flex;
@@ -925,15 +951,15 @@ button {
   user-select: none;
 }
 .script-task--open {
-  border-color: rgba(126, 231, 135, 0.45);
+  border-color: color-mix(in srgb, var(--link) 45%, transparent);
 }
 /* 结束态:成功绿 / 失败红(边框+字色),迁自原 macro-result ok/err。 */
 .script-task--ok {
-  border-color: rgba(126, 231, 135, 0.45);
+  border-color: color-mix(in srgb, var(--link) 45%, transparent);
   color: var(--link);
 }
 .script-task--err {
-  border-color: rgba(229, 83, 75, 0.45);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   color: var(--danger);
 }
 .script-task__name {
@@ -967,8 +993,8 @@ button {
 }
 .script-task__stop:hover {
   color: var(--danger);
-  border-color: rgba(229, 83, 75, 0.4);
-  background: rgba(229, 83, 75, 0.1);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 /* 脚本结果横幅:有日志时可点击展开/收起本次 runId 的日志历史。 */
 .macro-result--expandable {
@@ -1002,7 +1028,7 @@ button {
 }
 .script-log-list--live {
   margin-top: 6px;
-  border-left: 2px solid rgba(126, 231, 135, 0.5);
+  border-left: 2px solid color-mix(in srgb, var(--link) 50%, transparent);
 }
 .script-log-list__line--muted {
   opacity: 0.5;
@@ -1061,14 +1087,14 @@ button {
 .tab[data-active="true"] {
   color: var(--ink);
   background: var(--term-bg);
-  border-bottom-color: var(--rx);
+  border-bottom-color: var(--accent);
 }
 .tab__dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--link);
-  box-shadow: 0 0 5px rgba(126, 231, 135, 0.5);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--link) 50%, transparent);
   flex-shrink: 0;
 }
 .tab__name {
@@ -1109,11 +1135,11 @@ button {
 }
 /* 重连按钮(仅断开 tab 条件渲染);复用 .tab__btn 基类,只覆盖 hover 色。 */
 .tab__btn--reconnect {
-  color: var(--rx);
+  color: var(--accent);
 }
 .tab__btn--reconnect:hover {
-  color: var(--rx);
-  background: rgba(79, 214, 194, 0.12);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 /* banners */
@@ -1133,13 +1159,13 @@ button {
 }
 .banner--err {
   color: var(--danger);
-  background: rgba(229, 83, 75, 0.1);
-  border-bottom-color: rgba(229, 83, 75, 0.25);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--danger) 25%, transparent);
 }
 .banner--notice {
   color: var(--warn);
-  background: rgba(227, 179, 65, 0.08);
-  border-bottom-color: rgba(227, 179, 65, 0.22);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--warn) 22%, transparent);
 }
 
 /* ===== 运行结果 toast(右下角,点击跳对应面板) ===== */
@@ -1352,14 +1378,14 @@ button {
 .group[data-focused="true"] {
   border-color: var(--hairline);
 }
-/* 拖拽落点四半区高亮：半透明青色覆盖对应半区 */
+/* 拖拽落点四半区高亮：半透明主题交互色覆盖对应半区(color-mix 免去逐主题写 rgba) */
 .group__dropzone {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 5;
-  background: rgba(79, 214, 194, 0.18);
-  box-shadow: inset 0 0 0 2px var(--rx);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .group__dropzone[data-half="left"] {
   right: 50%;
@@ -1382,9 +1408,9 @@ button {
   min-width: 0;
   min-height: 0;
 }
-/* 分栏拖动手柄:10px 命中区(::after 收窄到 4px 视觉条),悬停亮 rx */
+/* 分栏拖动手柄:8px 命中区(::after 收窄到 4px 视觉条),悬停亮主题交互色 */
 .pane-divider {
-  flex: 0 0 10px; /* 与 App.tsx PANE_DIVIDER_W 保持一致(比例计算扣此宽) */
+  flex: 0 0 8px; /* 与 App.tsx PANE_DIVIDER_W 保持一致(比例计算扣此宽) */
   position: relative;
   z-index: 5;
   background: transparent;
@@ -1392,12 +1418,12 @@ button {
 .pane-divider::after {
   content: "";
   position: absolute;
-  inset: 3px;
+  inset: 2px;
   background: transparent;
   transition: background var(--t-fast) var(--ease);
 }
 .pane-divider:hover::after {
-  background: var(--rx);
+  background: var(--accent);
   opacity: 0.45;
 }
 .pane-divider--row {
@@ -1480,7 +1506,7 @@ button {
   background: var(--term-bg);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-input);
   padding: 4px 8px;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -1489,7 +1515,7 @@ button {
   color: var(--ink-faint);
 }
 .searchbar__input:focus {
-  border-color: var(--rx);
+  border-color: var(--accent);
   outline: none;
 }
 .searchbar__input--err {
@@ -1515,8 +1541,8 @@ button {
   color: var(--ink-dim);
 }
 .searchbar__toggle[data-on="true"] {
-  color: var(--rx);
-  border-color: var(--rx);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .searchbar__count {
   font-family: var(--font-mono);
@@ -1577,7 +1603,8 @@ button {
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   padding: 18px 20px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  /* 顶缘高光 token 可与投影安全拼接(默认为透明 inset,无感) */
+  box-shadow: var(--card-glow), 0 24px 64px rgba(0, 0, 0, 0.55);
   font-size: var(--fs-base);
   max-height: 86vh;
   overflow-y: auto;
@@ -1597,6 +1624,11 @@ button {
 .dialog--med {
   width: 560px;
   max-width: 90vw;
+}
+/* 阅读型宽对话框(脚本指南等):文档排版 65-75 字符行宽最舒适 */
+.dialog--wide {
+  width: 860px;
+  max-width: 92vw;
 }
 /* Macro editor：顶（标题/名称/描述）与底（按钮）固定，中间（步骤→JSON 预览）超高滚动 */
 .dialog--macro {
@@ -1737,7 +1769,7 @@ button {
 .script-help code {
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--link);
+  /* 不单独着色,继承正文 ink——速查面板要的是可读,不是视觉强调 */
   white-space: nowrap;
 }
 .macro-editor__head {
@@ -1751,7 +1783,7 @@ button {
 .dialog--macro > .btn-row {
   flex-shrink: 0;
 }
-/* 脚本指南:SKILL 全文纯文本展示(等宽、长行折行、保留空白);颜色继承主题。 */
+/* 脚本指南:SKILL 全文展示。原文 = 等宽 pre-wrap;预览 = marked 渲染的阅读版。 */
 .script-skill__pre {
   margin: 0;
   padding: 8px 4px;
@@ -1761,13 +1793,85 @@ button {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* Markdown 预览:紧凑的文档排版(标题层级/代码块/列表/表格),色值全部走 token */
+.script-skill__md {
+  padding: 8px 4px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.script-skill__md h1,
+.script-skill__md h2,
+.script-skill__md h3,
+.script-skill__md h4 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+  color: var(--ink);
+}
+.script-skill__md h1:first-child,
+.script-skill__md h2:first-child {
+  margin-top: 0.2em;
+}
+.script-skill__md h1 { font-size: 19px; }
+.script-skill__md h2 { font-size: 16px; }
+.script-skill__md h3 { font-size: 14px; }
+.script-skill__md p { margin: 0.5em 0; }
+.script-skill__md ul,
+.script-skill__md ol { margin: 0.5em 0; padding-left: 22px; }
+.script-skill__md li { margin: 0.2em 0; }
+.script-skill__md code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+}
+.script-skill__md pre {
+  margin: 0.7em 0;
+  padding: 10px 12px;
+  background: var(--term-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+}
+.script-skill__md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.script-skill__md table {
+  border-collapse: collapse;
+  margin: 0.7em 0;
+  font-size: 12.5px;
+}
+.script-skill__md th,
+.script-skill__md td {
+  border: 1px solid var(--hairline);
+  padding: 5px 10px;
+  text-align: left;
+}
+.script-skill__md th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+.script-skill__md blockquote {
+  margin: 0.7em 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--ink-dim);
+}
+.script-skill__md a { color: var(--accent); }
+.script-skill__md hr { border: none; border-top: 1px solid var(--hairline); margin: 1.2em 0; }
 /* 脚本参数编辑卡片:字段行 + select 的选项 chip 列表(视觉语言同宏步骤卡) */
 .param-card {
   border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-card);
   padding: 8px 10px;
   margin-bottom: 7px;
   background: var(--surface-2);
+  box-shadow: var(--card-glow);
 }
 .param-card__row {
   display: flex;
@@ -1828,7 +1932,7 @@ button {
   outline: none;
 }
 .param-chip-add:focus {
-  border-color: var(--rx);
+  border-color: var(--accent);
   border-style: solid;
   color: var(--ink);
 }
@@ -1860,7 +1964,7 @@ button {
   font-weight: 500;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--rx);
+  color: var(--ink-dim); /* Linear 的 eyebrow 是灰的——彩色只留给可交互元素 */
 }
 .dialog__title svg {
   width: 15px;
@@ -1893,34 +1997,8 @@ button {
 }
 
 /* ============================================================
-   Shortcuts — settings entry + rebind dialog
+   Shortcuts — rebind dialog(设置页入口按钮已移除,入口在管理菜单)
    ============================================================ */
-.shortcut-entry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  margin: 14px 0 0;
-  padding: 8px 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  color: var(--ink-dim);
-  font-family: var(--font-ui);
-  font-size: var(--fs-base);
-  cursor: pointer;
-  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
-}
-.shortcut-entry:hover {
-  color: var(--ink);
-  border-color: var(--surface-3);
-}
-.shortcut-entry__hint {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--ink-faint);
-}
-
 .shortcut-list {
   display: flex;
   flex-direction: column;
@@ -1958,9 +2036,9 @@ button {
   border-color: var(--surface-3);
 }
 .kbd--rec {
-  color: var(--rx);
-  border-color: var(--rx);
-  background: rgba(79, 214, 194, 0.1);
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   animation: kbd-pulse 1.1s var(--ease) infinite;
 }
 /* 固定（不可改键）说明行：tab.select 一族键，键帽不可点、视觉更弱 */
@@ -2002,9 +2080,6 @@ button {
   z-index: 110;
   animation: overlay-in var(--t-med) var(--ease);
 }
-:root[data-theme="light"] .palette-overlay {
-  background: rgba(40, 35, 25, 0.42);
-}
 .palette {
   width: 480px;
   max-width: 92vw;
@@ -2031,7 +2106,7 @@ button {
 }
 /* 补焦点反馈:基类 outline:none,无此规则聚焦只剩光标 */
 .palette__input:focus {
-  border-bottom-color: var(--rx);
+  border-bottom-color: var(--accent);
 }
 .palette__list {
   max-height: 320px;
@@ -2060,15 +2135,21 @@ button {
   cursor: pointer;
   transition: background var(--t-fast) var(--ease);
 }
-.palette__item--selected,
 .palette__item:hover {
   background: var(--surface-2);
+}
+/* 键盘选中项(光标):淡交互色洗底 + 左侧 2px 指示条。
+   不能用 surface-2 洗底——Linear 底座上与 surface 几乎不可分辨,看不出当前项。 */
+.palette__item--selected,
+.palette__item--selected:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .palette__name {
   font-weight: 500;
 }
 .palette__desc {
-  color: var(--ink-faint);
+  color: var(--ink-dim); /* 描述有信息量,不用 faint(浅色下不达对比度) */
   font-size: var(--fs-xs);
 }
 .palette__footer {
@@ -2106,7 +2187,7 @@ button {
   background: var(--term-bg);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-input);
   padding: 6px 8px;
   font-family: var(--font-mono);
   font-size: var(--fs-base);
@@ -2117,7 +2198,8 @@ button {
 }
 .field:focus,
 .field-select:focus {
-  border-color: var(--rx);
+  border-color: var(--field-focus-border);
+  box-shadow: var(--field-focus-ring);
   outline: none;
 }
 .field-select {
@@ -2141,14 +2223,15 @@ button {
   background: var(--term-bg);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-input);
   padding: 7px 8px;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   line-height: 1.5;
 }
 .field-textarea:focus {
-  border-color: var(--rx);
+  border-color: var(--field-focus-border);
+  box-shadow: var(--field-focus-ring);
   outline: none;
 }
 .inline-label {
@@ -2173,36 +2256,39 @@ button {
   font-family: var(--font-ui);
   font-size: var(--fs-base);
   font-weight: 500;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-btn);
   border: 1px solid transparent;
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
 }
 .btn--primary {
-  background: var(--rx);
-  color: #0a1413;
-  border-color: var(--rx);
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
 }
 .btn--primary:hover {
-  background: #6eebd8;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
+/* ghost 按钮:Linear button-secondary = surface 底 + hairline + ink 字 */
 .btn--ghost {
-  background: var(--surface-2);
-  color: var(--ink-dim);
+  background: var(--surface);
+  color: var(--ink);
   border-color: var(--hairline);
 }
 .btn--ghost:hover {
+  background: var(--surface-2);
   color: var(--ink);
   border-color: var(--surface-3);
 }
 .btn--danger {
   background: transparent;
   color: var(--danger);
-  border-color: rgba(229, 83, 75, 0.4);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
 .btn--danger:hover {
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .btn svg {
   width: 14px;
@@ -2226,10 +2312,11 @@ button {
 .step-card {
   border: 1px solid var(--hairline);
   border-left: 2px solid var(--surface-3);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-card);
   padding: 9px 10px;
   margin-bottom: 7px;
   background: var(--surface-2);
+  box-shadow: var(--card-glow);
 }
 .step-card[data-kind="send"] {
   border-left-color: var(--c-send);
@@ -2259,10 +2346,10 @@ button {
   opacity: 0.4;
 }
 .step-card[data-drop="before"] {
-  box-shadow: inset 0 2px 0 var(--rx);
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 .step-card[data-drop="after"] {
-  box-shadow: inset 0 -2px 0 var(--rx);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 .step-head {
   display: flex;
@@ -2450,7 +2537,7 @@ button {
   border-radius: 13px; /* ~24%，呼应 app 图标的 squircle 圆度（仍主题自适应） */
   background: var(--surface-2);
   border: 1px solid var(--hairline);
-  color: var(--rx);
+  color: var(--accent); /* 跟随主题交互色 */
 }
 .about__mark svg {
   width: 30px;
@@ -2475,9 +2562,7 @@ button {
   line-height: 1.7;
   margin-bottom: 18px;
 }
-.about__tagline .pip {
-  color: var(--rx);
-}
+/* 标题里的 .pip 不再单独着色——强调色只留给可交互元素 */
 
 /* 关于对话框：检查更新区块（仅本地桌面模式渲染） */
 .about__update {
@@ -2515,7 +2600,7 @@ button {
 }
 .about__progress-fill {
   height: 100%;
-  background: var(--rx);
+  background: var(--accent); /* 下载进度是交互语义,非 RX 信号 */
   transition: width 0.2s ease;
 }
 
@@ -2575,28 +2660,28 @@ button {
 }
 
 /* ============================================================
-   Light mode — warm ivory "datasheet" chassis.
-   【新增主题】仿此块做 `:root[data-theme="xxx"]` token 覆盖,并在
-   theme.ts::THEMES / term.tsx 的 TERM_THEMES 与 SEARCH_DECORATIONS /
-   App.tsx 的 THEME_ICONS / index.html(id 数组 + 首帧背景色)各加一条;
-   本块之外的散落 light 特例(搜 `data-theme="light"`,约 10 处)需一并审计。
-   信号对(RX teal / TX amber)在白底加深以保证对比度。
+   Linear·亮 —— 唯一的主题覆盖块(默认值 = Linear·暗,住在 :root)。
+   【新增主题】清单 3 处:theme.ts::THEMES 一条完整定义 + styles.css
+   一块 `:root[data-theme="xxx"]` token 覆盖 + index.html(id 数组+首帧背景);
+   term.tsx / editors.tsx / App.tsx 均读注册表,无需再动。
+   信号对(RX teal / TX amber)在白底加深;TS 侧配色(xterm/CM)见 theme.ts。
    ============================================================ */
 :root {
-  color-scheme: dark;
+  color-scheme: dark; /* 默认 = Linear·暗;亮色主题在各自块内翻转 */
 }
-:root[data-theme="light"] {
+:root[data-theme="linear-light"] {
   color-scheme: light;
-  --bg: #f4f2ec;
+  --bg: #f4f5f6;
   --surface: #ffffff;
-  --surface-2: #efebe2;
-  --surface-3: #e4dfd3;
-  --term-bg: #fbfaf5;
-  --hairline: #ddd8cb;
-  --hairline-soft: #e7e2d6;
-  --ink: #2b2e33;
-  --ink-dim: #5b616e;
-  --ink-faint: #8b9099;
+  --surface-2: #f7f8f8;
+  --surface-3: #ececee;
+  --term-bg: #fbfbfc;
+  --hairline: #e3e4e8;
+  --hairline-soft: #ebebee;
+  --ink: #1c1d1f;
+  --ink-dim: #5e6267;
+  --ink-faint: #8a8f98;
+  /* 信号对/步骤色:白底加深(语义色,不随风格家族变) */
   --rx: #0c7f73;
   --tx: #b06a16;
   --link: #187a43;
@@ -2606,35 +2691,61 @@ button {
   --c-delay: #8445c0;
   --c-expect: #b06a16;
   --c-clear: #c8392f;
-}
 
-/* 少量不随 token 自动翻转的覆盖：白底叠白 hover、深底主按钮标签、阴影/选区 */
-:root[data-theme="light"] .act-icon:hover {
+  /* 薰衣草白底加深一档(hover 方向反转:亮底上 hover 变深) */
+  --accent: #5e6ad2;
+  --accent-hover: #5158b8;
+  --accent-press: #4a51a8;
+  --on-accent: #ffffff;
+
+  --focus-outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  --field-focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --card-glow: inset 0 1px 0 #ffffff;
+}
+:root[data-theme="linear-light"] ::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* 浅色面特例:hover 叠黑、遮罩/阴影换中性冷调(暗色默认的近黑硬阴影在浅色下发脏) */
+:root[data-theme="linear-light"] .act-icon:hover {
   background: rgba(0, 0, 0, 0.045);
 }
-:root[data-theme="light"] .tab:hover {
+:root[data-theme="linear-light"] .tab:hover {
   background: rgba(0, 0, 0, 0.04);
 }
-:root[data-theme="light"] .btn--primary {
-  color: #ffffff;
+:root[data-theme="linear-light"] .dialog-overlay,
+:root[data-theme="linear-light"] .palette-overlay {
+  background: rgba(30, 34, 44, 0.42);
 }
-:root[data-theme="light"] .btn--primary:hover {
-  background: #0a6f63;
+/* 浮层阴影统一换中性冷调浅影(palette 与 dialog 同构;group-menu/searchbar 是同族漏网) */
+:root[data-theme="linear-light"] .dialog,
+:root[data-theme="linear-light"] .palette,
+:root[data-theme="linear-light"] .manage-menu {
+  box-shadow: var(--card-glow), 0 16px 40px rgba(20, 24, 32, 0.16);
 }
-:root[data-theme="light"] .dialog-overlay {
-  background: rgba(40, 35, 25, 0.42);
+:root[data-theme="linear-light"] .group-menu {
+  box-shadow: 0 6px 16px rgba(20, 24, 32, 0.14);
 }
-:root[data-theme="light"] .dialog,
-:root[data-theme="light"] .manage-menu {
-  box-shadow: 0 18px 48px rgba(60, 50, 30, 0.22);
+:root[data-theme="linear-light"] .searchbar {
+  box-shadow: 0 10px 28px rgba(20, 24, 32, 0.14);
 }
-/* 浮层类(toast/帮助速查)在象牙底上用暖阴影——暗色主题的近黑硬阴影在浅色下发脏 */
-:root[data-theme="light"] .toast {
-  box-shadow: 0 4px 16px rgba(60, 50, 30, 0.18);
+:root[data-theme="linear-light"] .toast {
+  box-shadow: 0 4px 16px rgba(20, 24, 32, 0.12);
 }
-:root[data-theme="light"] .script-help {
-  box-shadow: 0 8px 28px rgba(60, 50, 30, 0.2);
+:root[data-theme="linear-light"] .script-help {
+  box-shadow: 0 8px 28px rgba(20, 24, 32, 0.14);
 }
-:root[data-theme="light"] ::selection {
-  background: rgba(12, 127, 115, 0.2);
+/* banner 关闭钮 hover:暗色默认叠白,浅底上不可见 → 叠黑 */
+:root[data-theme="linear-light"] .banner__close:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+/* 滚动条 thumb:浅色默认的 surface-3(#ececee)在白底上近不可见,加深一档 */
+:root[data-theme="linear-light"] * {
+  scrollbar-color: #d4d6da transparent;
+}
+:root[data-theme="linear-light"] *::-webkit-scrollbar-thumb {
+  background: #d4d6da;
+}
+/* 活动栏激活:浅色底的微光用叠黑(暗色默认是叠白) */
+:root[data-theme="linear-light"] .act-icon[data-active="true"] {
+  background: rgba(0, 0, 0, 0.05);
 }

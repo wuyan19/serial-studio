@@ -125,15 +125,6 @@ export function IconInfo({ className }: IconProps) {
   );
 }
 
-/** Run macro. */
-export function IconPlay({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <path d="M7 4.5 19 12 7 19.5v-15Z" />
-    </Svg>
-  );
-}
-
 export function IconEdit({ className }: IconProps) {
   return (
     <Svg className={className}>
@@ -243,20 +234,21 @@ export function IconBell({ className }: IconProps) {
 }
 
 /** 亮色模式。 */
-export function IconSun({ className }: IconProps) {
+/** 主题(明暗对比圆)——主题菜单入口,不随具体主题换图标。 */
+export function IconPalette({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2.5M12 19.5V22M4.5 4.5l1.8 1.8M17.7 17.7l1.8 1.8M2 12h2.5M19.5 12H22M4.5 19.5l1.8-1.8M17.7 6.3l1.8-1.8" />
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none" />
     </Svg>
   );
 }
 
-/** 暗色模式。 */
-export function IconMoon({ className }: IconProps) {
+/** 勾选(菜单当前项)。 */
+export function IconCheck({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8Z" />
+      <path d="M4.5 12.5l5 5 10-11" />
     </Svg>
   );
 }

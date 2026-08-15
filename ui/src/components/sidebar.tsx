@@ -9,7 +9,6 @@ import {
   IconEdit,
   IconExport,
   IconImport,
-  IconPlay,
   IconPlus,
   IconPower,
   IconRefresh,
@@ -278,7 +277,6 @@ export function MacroRow({ name, disabled, onRun, onEdit, onDelete }: {
   return (
     <div className="macro-row">
       <button className="macro-run" onClick={onRun} disabled={disabled} title={disabled ? "先打开一个端口再运行宏" : undefined}>
-        <IconPlay />
         <span className="macro-run__label">{name}</span>
       </button>
       <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑" aria-label={`编辑宏 ${name}`}>
@@ -301,7 +299,6 @@ export function ScriptRow({ name, onRun, onEdit, onDelete }: {
   return (
     <div className="macro-row">
       <button className="macro-run" onClick={onRun}>
-        <IconPlay />
         <span className="macro-run__label">{name}</span>
       </button>
       <button className="macro-action macro-action--edit" onClick={onEdit} title="编辑" aria-label={`编辑脚本 ${name}`}>

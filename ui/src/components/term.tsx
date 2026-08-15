@@ -2,13 +2,11 @@
 editor group（标签栏 + 终端区 + 拖拽分栏）、终端内搜索条。 */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
-import type { ITheme } from "@xterm/xterm"; // xterm.css 经 styles.css 统一引入
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import type { ISearchDecorationOptions } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
 import { copyText, parsePortId } from "../lib";
-import { getTheme, subscribe, type Theme } from "../theme";
+import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
 import { IconChevronDown, IconChevronUp, IconClose, IconPlug } from "../icons";
@@ -16,64 +14,13 @@ import { InlineAliasInput, PortLabel } from "./primitives";
 
 // ===== 终端视图 =====
 
-/** xterm 配色映射（按主题查表；canvas 不吃 CSS 变量，故每主题一份）。
- *  新增主题：theme.ts::THEMES 登记后在此加一条。 */
-const TERM_THEMES: Record<Theme, ITheme> = {
-  /** 暗色：仪器风——teal(RX) 光标、graphite 画布，ANSI 色映射到信号调色板。 */
-  dark: {
-    background: "#0e1014",
-    foreground: "#dde5ef",
-    cursor: "#4fd6c2",
-    cursorAccent: "#0e1014",
-    selectionBackground: "rgba(79,214,194,0.22)",
-    black: "#0e1014",
-    brightBlack: "#5c6270",
-    red: "#e5534b",
-    brightRed: "#f2a65a",
-    green: "#7ee787",
-    brightGreen: "#9cf0a6",
-    yellow: "#e3b341",
-    brightYellow: "#f2cc60",
-    blue: "#5ba3d0",
-    brightBlue: "#7fbfdd",
-    magenta: "#c792ea",
-    brightMagenta: "#d6a8f0",
-    cyan: "#4fd6c2",
-    brightCyan: "#7be3d4",
-    white: "#e6e9ef",
-    brightWhite: "#ffffff",
-  },
-  /** 亮色：象牙底 + 深石墨字 + 深青光标。 */
-  light: {
-    background: "#fbfaf5",
-    foreground: "#2c2f36",
-    cursor: "#0c7f73",
-    cursorAccent: "#fbfaf5",
-    selectionBackground: "rgba(12,127,115,0.18)",
-    black: "#fbfaf5",
-    brightBlack: "#8b9099",
-    red: "#c8392f",
-    brightRed: "#b06a16",
-    green: "#187a43",
-    brightGreen: "#1f9352",
-    yellow: "#9a6b0c",
-    brightYellow: "#b07e0a",
-    blue: "#2563a0",
-    brightBlue: "#3b78b8",
-    magenta: "#9b4d96",
-    brightMagenta: "#a85aa6",
-    cyan: "#0c7f73",
-    brightCyan: "#0d9b8a",
-    white: "#2c2f36",
-    brightWhite: "#23262b",
-  },
-};
-
+// xterm 配色在 theme.ts 注册表里集中定义(canvas 不吃 CSS 变量,只能给纯色);
+// 此处仅按当前主题取定义,不再持有本地映射表——新增主题无需改本文件。
 const MONO_STACK =
   "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', Consolas, ui-monospace, monospace";
 
-function termThemeFor(t: Theme): ITheme {
-  return TERM_THEMES[t];
+function termThemeFor(t: Theme) {
+  return themeDefOf(t).term;
 }
 
 export function TermView({
@@ -517,27 +464,9 @@ export function GroupView({
 
 // ===== 终端内搜索（Ctrl+F） =====
 
-/** 搜索高亮配色映射（xterm 要求纯 #RRGGBB，故按主题各给一组，跟着 token 的青系）。
- *  新增主题：在此加一条。 */
-const SEARCH_DECORATIONS: Record<Theme, ISearchDecorationOptions> = {
-  dark: {
-    matchBackground: "#1c4a45",
-    activeMatchBackground: "#11837a",
-    activeMatchBorder: "#4fd6c2",
-    matchOverviewRuler: "#1c4a45",
-    activeMatchColorOverviewRuler: "#4fd6c2",
-  },
-  light: {
-    matchBackground: "#cce3df",
-    activeMatchBackground: "#7fc7bd",
-    activeMatchBorder: "#0c7f73",
-    matchOverviewRuler: "#cce3df",
-    activeMatchColorOverviewRuler: "#0c7f73",
-  },
-};
-
-function searchDecorations(t: Theme): ISearchDecorationOptions {
-  return SEARCH_DECORATIONS[t];
+/** 搜索高亮配色(xterm 要求纯 #RRGGBB)——同样收编进 theme.ts 注册表,按主题取定义。 */
+function searchDecorations(t: Theme) {
+  return themeDefOf(t).search;
 }
 
 export function SearchBar({

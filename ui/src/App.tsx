@@ -83,19 +83,15 @@ import {
   IconPower,
   IconSliders,
   IconTrash,
-  IconMoon,
-  IconSun,
+  IconPalette,
+  IconCheck,
 } from "./icons";
-import { getTheme, nextThemeLabel, subscribe, toggleTheme, type Theme } from "./theme";
+import { getTheme, setTheme, subscribe, toggleTheme, THEMES, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
 
-/** 主题切换按钮图标（按主题查表；新增主题在 theme.ts 登记后在此加一条）。 */
-const THEME_ICONS: Record<Theme, React.ReactNode> = {
-  dark: <IconMoon className="act-icon__svg" />,
-  light: <IconSun className="act-icon__svg" />,
-};
+/* 主题图标/清单均从 theme.ts 注册表读取(THEMES),此处不再持有映射表。 */
 
 /** 把 SerialConfig 渲染成仪器读数字符串：115200 8N1 · LF */
 function formatConfig(c: SerialConfig): string {
@@ -268,6 +264,8 @@ export default function App() {
       return next;
     });
   const [manageMenu, setManageMenu] = useState(false);
+  /** 主题选择菜单(多主题后循环切换不再可用,菜单按 family 分组列出全部主题)。 */
+  const [themeMenu, setThemeMenu] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
@@ -318,11 +316,12 @@ export default function App() {
     if (errorTimer.current !== null) clearTimeout(errorTimer.current);
     errorTimer.current = window.setTimeout(() => setErrorMsg(""), ms);
   }, []);
-  // ===== 运行结果 toast:宏/脚本完成时若对应面板不可见,右下角浮出结果,点击打开面板 =====
-  type Toast = { id: number; ok: boolean; text: string; panel: "macros" | "scripts" };
+  // ===== 运行结果 toast:宏/脚本完成时若对应面板不可见,右下角浮出结果,点击打开面板;
+  // 也承载连接反馈等无面板消息(panel 省略,点击仅关闭) =====
+  type Toast = { id: number; ok: boolean; text: string; panel?: "macros" | "scripts" };
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeq = useRef(0);
-  const pushToast = useCallback((ok: boolean, text: string, panel: "macros" | "scripts") => {
+  const pushToast = useCallback((ok: boolean, text: string, panel?: "macros" | "scripts") => {
     const id = ++toastSeq.current;
     setToasts((prev) => [...prev.slice(-3), { id, ok, text, panel }]); // 最多同时 4 条
     window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ok ? 3000 : 6000);
@@ -691,6 +690,30 @@ export default function App() {
     });
   }, [isLocal, connConfig.host, connConfig.port]);
 
+  // 改连反馈：设置页「应用并重连」后以 toast 报告结果(成功/超时失败),不再点了没反应。
+  const [pendingConn, setPendingConn] = useState<string | null>(null);
+  // 成功判定:pendingConn 置位后 connected 稳定为 true ≥800ms——给旧连接 teardown→重建留时间,
+  // 否则 teardown 前的旧 connected=true 会立刻假成功;connected 后续翻转会重置这 800ms 等待。
+  useEffect(() => {
+    if (!pendingConn) return;
+    const ok = window.setTimeout(() => {
+      if (connected) {
+        pushToast(true, `已连接 ${pendingConn}`);
+        setPendingConn(null);
+      }
+    }, 800);
+    return () => window.clearTimeout(ok);
+  }, [pendingConn, connected, pushToast]);
+  // 失败判定:8s 内未稳定连上
+  useEffect(() => {
+    if (!pendingConn) return;
+    const fail = window.setTimeout(() => {
+      pushToast(false, `连接 ${pendingConn} 失败，请检查地址/端口与防火墙`);
+      setPendingConn(null);
+    }, 8000);
+    return () => window.clearTimeout(fail);
+  }, [pendingConn, pushToast]);
+
   // 服务器配置：Tauri 控制面 invoke 读本地 settings.json(失败可从设置面板重试)
   const [srvFailed, setSrvFailed] = useState(false);
   const loadSrvSettings = useCallback(() => {
@@ -773,7 +796,7 @@ export default function App() {
     };
   }, [isRemote]);
 
-  // 主题：订阅 theme 模块，切换时刷新按钮图标
+  // 主题：订阅 theme 模块，切换时同步菜单当前项勾选（入口图标固定为调色板）
   useEffect(() => subscribe(setThemeState), []);
 
   // 全局快捷键：单一 capture listener——combo 查 global 表 → dispatchAction。
@@ -1202,10 +1225,35 @@ export default function App() {
     scriptPaletteOpen ||
     portPaletteOpen
   );
+  /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
+   *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
+  const menuOpen = themeMenu || manageMenu;
 
-  // 全局快捷键 listener：模态打开时不挂（天然抑制），关闭后重挂。capture 阶段拦截。
+  // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
   useEffect(() => {
-    if (modalOpen) return;
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setThemeMenu(false);
+        setManageMenu(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [menuOpen]);
+
+  // 任一对话框模态打开 → 收起菜单(避免菜单浮层压在模态之上)
+  useEffect(() => {
+    if (modalOpen) {
+      setThemeMenu(false);
+      setManageMenu(false);
+    }
+  }, [modalOpen]);
+
+  // 全局快捷键 listener：模态/菜单打开时不挂（天然抑制），关闭后重挂。capture 阶段拦截。
+  useEffect(() => {
+    if (modalOpen || menuOpen) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       // 焦点在表单控件时跳过（不抢输入）；但 xterm 聚焦时 e.target 是隐藏的
@@ -1232,7 +1280,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [dispatchAction, modalOpen]);
+  }, [dispatchAction, modalOpen, menuOpen]);
 
   // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)。
   // deps 只有 modalOpen:仅在模态关闭那一拍触发;闭包里的 activePort 即当时的活动端口。
@@ -1270,12 +1318,45 @@ export default function App() {
         )}
         <div className="activity-bar__spacer" />
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
-        <ActivityIcon
-          icon={THEME_ICONS[theme]}
-          title={`切换到 ${nextThemeLabel(theme)}`}
-          active={false}
-          onClick={toggleTheme}
-        />
+        <div className="manage">
+          <ActivityIcon
+            icon={<IconPalette className="act-icon__svg" />}
+            title="主题"
+            active={themeMenu}
+            onClick={() => setThemeMenu(!themeMenu)}
+          />
+          {themeMenu && (
+            <>
+              <div className="manage-backdrop" onClick={() => setThemeMenu(false)} />
+              <div className="manage-menu">
+                {THEMES.map((def, i) => {
+                  // family 首条渲染分组标头(注册表有序,相邻同名归一组)
+                  const firstOfFamily = i === 0 || THEMES[i - 1].family !== def.family;
+                  const current = def.id === theme;
+                  return (
+                    <div key={def.id}>
+                      {firstOfFamily && <div className="manage-menu__group">{def.family}</div>}
+                      <button
+                        className="manage-menu__item"
+                        data-current={current || undefined}
+                        onClick={() => {
+                          setTheme(def.id);
+                          setThemeMenu(false);
+                        }}
+                      >
+                        {/* 勾选占位对齐:非当前项隐藏勾,保持文本同列 */}
+                        <span style={{ display: "inline-flex", visibility: current ? "visible" : "hidden" }}>
+                          <IconCheck />
+                        </span>
+                        {def.label}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
         <div className="manage">
           <ActivityIcon icon={<IconSliders className="act-icon__svg" />} title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
           {manageMenu && (
@@ -1286,7 +1367,7 @@ export default function App() {
                   <IconGear /> 设置
                 </button>
                 <button className="manage-menu__item" onClick={() => { setShortcutsOpen(true); setManageMenu(false); }}>
-                  <IconKeyboard /> 键盘快捷键
+                  <IconKeyboard /> 快捷键
                 </button>
                 <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
                   <IconInfo /> 关于
@@ -1511,13 +1592,13 @@ export default function App() {
                 key={t.id}
                 className={`toast toast--${t.ok ? "ok" : "err"}`}
                 onClick={() => {
-                  setActivity(t.panel);
+                  if (t.panel) setActivity(t.panel);
                   setToasts((prev) => prev.filter((x) => x.id !== t.id));
                 }}
               >
                 <span className="toast__mark">{t.ok ? "✓" : "✗"}</span>
                 <span className="toast__text">{t.text}</span>
-                <span className="toast__go">查看</span>
+                {t.panel && <span className="toast__go">查看</span>}
               </button>
             ))}
           </div>
@@ -1627,10 +1708,12 @@ export default function App() {
           srvFailed={srvFailed}
           onRetrySrv={loadSrvSettings}
           showServer={isTauri() && !isRemote}
-          onOpenShortcuts={() => setShortcutsOpen(true)}
           onConnChange={(c) => {
             saveConn(c);
             setConnConfig(c);
+            // 关闭设置页,连接结果走 toast(成功/超时失败,见 pendingConn effects)
+            setPendingConn(`${c.host}:${c.port}`);
+            setSettingsOpen(false);
           }}
           onSaveSrv={async (s) => {
             if (!isTauri()) return;
@@ -1753,8 +1836,8 @@ export default function App() {
   );
 }
 
-/** 分栏拖动手柄宽度(px),与 CSS .pane-divider 的 flex-basis 保持一致(命中区 10px)。 */
-const PANE_DIVIDER_W = 10;
+/** 分栏拖动手柄宽度(px),与 CSS .pane-divider 的 flex-basis 保持一致(命中区 8px)。 */
+const PANE_DIVIDER_W = 8;
 
 /** 分栏拖动手柄:拖动按容器内坐标实时改比例(reducer 内 clamp 0.15–0.85),双击复位 0.5。
  *  容器取 parentElement(即 .pane-split)。比例按"两子格可用空间"算——须扣除手柄自身宽,

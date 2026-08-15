@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Macro, MacroStep, Script, ScriptParam, StepType } from "../types";
 import { downloadJson, parseParamsFromCode } from "../lib";
 import { IconAlert, IconBolt, IconChevronDown, IconChevronUp, IconClose, IconCode, IconCopy, IconExpand, IconExport, IconGrip, IconInfo, IconPlus, IconTrash } from "../icons";
-import { getTheme, subscribe, type Theme } from "../theme";
+import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { ConfigRow, useDialogA11y, useEscClose } from "./primitives";
 import CodeMirror from "@uiw/react-codemirror";
 import { EditorView } from "@codemirror/view";
@@ -30,33 +30,46 @@ const cmBaseTheme = EditorView.theme({
   "&.cm-focused": { outline: "none" },
 });
 
-/** 选中/语法色按明暗两套,hex 与 term.tsx 的 TERM_THEMES 同源。 */
-const cmDark = EditorView.theme(
-  { "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(79, 214, 194, 0.22)" } },
-  { dark: true }
-);
-const cmLight = EditorView.theme(
-  { "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(12, 127, 115, 0.18)" } },
-  { dark: false }
-);
-const cmSyntaxDark = HighlightStyle.define([
-  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "#c792ea" },
-  { tag: [t.string, t.special(t.string)], color: "#e3b341" },
-  { tag: [t.number, t.bool], color: "#f2a65a" },
-  { tag: [t.comment, t.lineComment, t.blockComment], color: "#5c6270", fontStyle: "italic" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#4fd6c2" },
-  { tag: [t.className, t.typeName], color: "#7fbfdd" },
-  { tag: [t.definition(t.variableName)], color: "#7ee787" },
-]);
-const cmSyntaxLight = HighlightStyle.define([
-  { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: "#9b4d96" },
-  { tag: [t.string, t.special(t.string)], color: "#9a6b0c" },
-  { tag: [t.number, t.bool], color: "#b06a16" },
-  { tag: [t.comment, t.lineComment, t.blockComment], color: "#8b9099", fontStyle: "italic" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#0c7f73" },
-  { tag: [t.className, t.typeName], color: "#2563a0" },
-  { tag: [t.definition(t.variableName)], color: "#187a43" },
-]);
+/** 按主题生成 CM 的选中底色 + 语法高亮扩展——色值全部来自 theme.ts 注册表
+ *  (term.selectionBackground 复用为 CM 选中底色,cm 色板与终端 ANSI 同源),
+ *  tag→色的映射关系集中在这里,新增主题无需改本文件。
+ *  结果按主题缓存(HighlightStyle/EditorView.theme 惰性单例):编辑器按键
+ *  高频重渲染不再重复 define,也保住扩展数组引用稳定。 */
+const cmThemeCache = new Map<Theme, ReturnType<typeof buildCmThemeExtensions>>();
+
+function cmThemeExtensions(th: Theme) {
+  let ext = cmThemeCache.get(th);
+  if (!ext) {
+    ext = buildCmThemeExtensions(th);
+    cmThemeCache.set(th, ext);
+  }
+  return ext;
+}
+
+function buildCmThemeExtensions(th: Theme) {
+  const def = themeDefOf(th);
+  return [
+    EditorView.theme(
+      {
+        "&.cm-focused .cm-selectionBackground": {
+          backgroundColor: def.term.selectionBackground ?? "transparent",
+        },
+      },
+      { dark: def.lum === "dark" }
+    ),
+    syntaxHighlighting(
+      HighlightStyle.define([
+        { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: def.cm.keyword },
+        { tag: [t.string, t.special(t.string)], color: def.cm.string },
+        { tag: [t.number, t.bool], color: def.cm.number },
+        { tag: [t.comment, t.lineComment, t.blockComment], color: def.cm.comment, fontStyle: "italic" },
+        { tag: [t.function(t.variableName), t.function(t.propertyName)], color: def.cm.func },
+        { tag: [t.className, t.typeName], color: def.cm.type },
+        { tag: [t.definition(t.variableName)], color: def.cm.defVar },
+      ])
+    ),
+  ];
+}
 
 // ===== 宏编辑器 =====
 
@@ -436,7 +449,7 @@ export function ScriptEditor({
               <CodeMirror
                 value={script.code}
                 onChange={setCode}
-                theme={[cmBaseTheme, cmTheme === "dark" ? cmDark : cmLight, syntaxHighlighting(cmTheme === "dark" ? cmSyntaxDark : cmSyntaxLight)]}
+                theme={[cmBaseTheme, ...cmThemeExtensions(cmTheme)]}
                 extensions={[javascript()]}
                 height="100%"
                 placeholder="// 在此编写 JS 脚本…"

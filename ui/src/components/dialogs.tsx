@@ -1,12 +1,38 @@
 /** 对话框族：串口配置、宏/脚本批量导出、设置面板、快捷键改键、关于（含在线更新）、
 脚本指南、添加远程设备、脚本运行参数收集、通用确认弹窗。 */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionId, ConnConfig, Macro, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings } from "../types";
 import { BAUD_RATES, isTauri } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconPlug } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
+import { marked } from "marked";
+
+/** 遮罩点击关闭的统一判定:必须 mousedown 起点就是遮罩本身。
+ *  不能用 onClick——框内选字拖到遮罩上松手时,click 会派发到公共祖先(恰是遮罩),
+ *  target 判断防不住,误关丢选区。mousedown 判定是标准方案(react-modal 同款)。 */
+function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
+  if (e.target !== e.currentTarget) return; // 按下点在对话框内
+  if (guard?.()) return; // 上下文不允许关(如下载进行中)
+  onClose();
+}
+
+// ===== marked 安全配置(脚本指南 Markdown 预览) =====
+// SKILL 文本并非始终可信:local 模式来自二进制内嵌文档,但远程窗口/Web 模式下
+// 经 transport 取自所连 ss-server(默认无认证),恶意/被劫持的远端可返回任意文本。
+// marked 默认放行内联 HTML → 直接 innerHTML 即注入(远程窗口带 Tauri IPC 特权)。
+// 这里剥离一切 HTML 块/内联,链接 href 仅放行 http(s)/mailto/#/相对锚点。
+marked.use({
+  async: false,
+  renderer: {
+    html: () => "",
+    link({ href, tokens }) {
+      const text = this.parser.parseInline(tokens);
+      return /^(https?:|mailto:|#)/i.test(href ?? "") ? `<a href="${href}">${text}</a>` : text;
+    },
+  },
+});
 
 // ===== 串口配置对话框 =====
 
@@ -197,7 +223,8 @@ export function ExportMacrosDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
   return (
-    <div className="dialog-overlay">
+    /* 遮罩按下关闭(勾选列表误点代价低,重开即可;Esc/Enter 键盘语义不变) */
+    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onCancel)}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="导出宏" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconExport /> EXPORT MACROS
@@ -322,7 +349,6 @@ export function SettingsPanel({
   onConnChange,
   onSaveSrv,
   showServer,
-  onOpenShortcuts,
   onClose,
 }: {
   connConfig: ConnConfig;
@@ -333,7 +359,6 @@ export function SettingsPanel({
   onConnChange: (c: ConnConfig) => void;
   onSaveSrv: (s: SrvSettings) => void;
   showServer: boolean;
-  onOpenShortcuts: () => void;
   onClose: () => void;
 }) {
   const [conn, setConn] = useState<ConnConfig>(connConfig);
@@ -360,14 +385,6 @@ export function SettingsPanel({
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
 
-  // 置于内容与按钮行之间（本地模式在 Telnet 端口下），两分支共用，避免重复。
-  const shortcutEntry = (
-    <button type="button" className="shortcut-entry" onClick={onOpenShortcuts}>
-      <span>键盘快捷键</span>
-      <span className="shortcut-entry__hint">自定义 / 改键</span>
-    </button>
-  );
-
   return (
     <div className="dialog-overlay">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -385,7 +402,6 @@ export function SettingsPanel({
               <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
             </ConfigRow>
             <p className="dialog__hint">改连别的远程 Serial Studio 服务</p>
-            {shortcutEntry}
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onClose}>
                 关闭
@@ -427,7 +443,6 @@ export function SettingsPanel({
                     </span>
                   </label>
                 </ConfigRow>
-                {shortcutEntry}
                 <div className="btn-row">
                   {saved && <span className="btn--save-pulse">已应用</span>}
                   <button className="btn btn--ghost" onClick={onClose}>
@@ -528,7 +543,8 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
   return (
-    <div className="dialog-overlay">
+    /* 遮罩按下关闭(改键即改即存,无"未保存丢失"顾虑;Esc 语义不变) */
+    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="键盘快捷键" className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconGear /> SHORTCUTS
@@ -625,7 +641,9 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
   useDialogA11y(dialogRef);
 
   return (
-    <div className="dialog-overlay">
+    /* 遮罩按下关闭(local 模式的更新流程是有状态操作:下载中/下载完成禁止遮罩关——
+     * 否则进度指示消失而 downloadAndInstall 仍在跑,应用会在用户以为已取消的时刻突然重启) */
+    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose, () => status.state === "downloading" || status.state === "downloadComplete")}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="关于 Serial Studio" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <div className="about">
           <div className="about__mark">
@@ -636,9 +654,9 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
           <p className="about__tagline">
             多形态串口通信工具
             <br />
-            <span className="pip">本地 / 远程</span> 双模式 · Tauri + MCP & WebSocket
+            本地 / 远程 双模式 · Tauri + MCP & WebSocket
             <br />
-            <span className="pip">MCP Url</span> http://IP:PORT/mcp
+            MCP Url http://IP:PORT/mcp
           </p>
 
           {local && (
@@ -678,10 +696,13 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
               )}
             </div>
           )}
-
-          <button className="btn btn--primary" onClick={onClose} autoFocus>
-            关闭
-          </button>
+          {/* Web/远程模式没有更新区(仅 local 渲染)——保留一个关闭按钮,
+              否则对话框内零可聚焦元素,Tab 被圈闭逻辑吞掉,键盘用户只剩不可见的 Esc 出口 */}
+          {!local && (
+            <button className="btn btn--primary" onClick={onClose}>
+              关闭
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -689,7 +710,8 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
 }
 
 /** 脚本编写指南(SKILL 全文):查看 + 一键复制给外部 Agent(Claude/Cursor 等)。
- *  纯文本展示(等宽、pre-wrap);复制的是 SKILL.md 原文,粘给 Agent 即完整 skill。 */
+ *  默认 Markdown 预览(阅读),可切原文(等宽 pre-wrap,核对 Markdown 源);
+ *  复制的始终是 SKILL.md 原文,粘给 Agent 即完整 skill。 */
 export function ScriptSkillDialog({
   text,
   failed,
@@ -704,8 +726,14 @@ export function ScriptSkillDialog({
 }) {
   useEscClose(onClose);
   const [copied, setCopied] = useState(false);
+  const [raw, setRaw] = useState(false); // true=原文,默认 Markdown 预览
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
+  // 只依赖 text 缓存——App 高频重渲染(串口收发)不重复 parse;安全性见模块头 marked.use
+  const html = useMemo(
+    () => (text ? marked.parse(text, { async: false }) : ""),
+    [text]
+  );
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text ?? "");
@@ -716,8 +744,9 @@ export function ScriptSkillDialog({
     }
   };
   return (
-    <div className="dialog-overlay">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="脚本编写指南" className="dialog dialog--med dialog--macro" onClick={(e) => e.stopPropagation()}>
+    /* 遮罩按下关闭(纯阅读无输入;Esc 同) */
+    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="脚本编写指南" className="dialog dialog--wide dialog--macro" onClick={(e) => e.stopPropagation()}>
         <div className="macro-editor__head">
           <h3 className="dialog__title">脚本编写指南</h3>
           <div className="dialog__sub">
@@ -730,14 +759,24 @@ export function ScriptSkillDialog({
               <p style={{ color: "var(--danger)", margin: "0 0 12px" }}>指南加载失败，请检查连接后重试。</p>
               <button className="btn" onClick={onRetry}>重试</button>
             </div>
-          ) : (
+          ) : raw ? (
             <pre className="script-skill__pre">{text ?? "加载中…"}</pre>
+          ) : (
+            <div
+              className="script-skill__md"
+              dangerouslySetInnerHTML={{ __html: html || "<p>加载中…</p>" }}
+            />
           )}
         </div>
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
-          <button className="btn btn--primary" onClick={copy} disabled={failed || !text}>
-            <IconCopy /> {copied ? "已复制 ✓" : "复制给外部 Agent"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn--primary" onClick={copy} disabled={failed || !text}>
+              <IconCopy /> {copied ? "已复制 ✓" : "复制给外部 Agent"}
+            </button>
+            <button className="btn btn--ghost" onClick={() => setRaw((v) => !v)} disabled={failed || !text}>
+              {raw ? "Markdown 预览" : "查看原文"}
+            </button>
+          </div>
           <button className="btn" onClick={onClose}>
             关闭
           </button>
