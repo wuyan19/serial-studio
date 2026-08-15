@@ -81,12 +81,10 @@ export function IconCode({ className }: IconProps) {
 export function IconGlobe({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M3.5 12h17" />
-      <path d="M12 3.5c2.8 2.8 2.8 14.2 0 17" />
-      <path d="M12 3.5c-2.8 2.8-2.8 14.2 0 17" />
-      <path d="M6.2 8.2c1.9 1.5 9.7 1.5 11.6 0" />
-      <path d="M6.2 15.8c1.9-1.5 9.7-1.5 11.6 0" />
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.6 2.6 2.6 15.4 0 18" />
+      <path d="M12 3c-2.6 2.6-2.6 15.4 0 18" />
     </Svg>
   );
 }
