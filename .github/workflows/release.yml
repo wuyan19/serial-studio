@@ -27,23 +27,29 @@ jobs:
           # mac 必须带 app 目标:macOS 更新产物(.app.tar.gz+.sig)由 app bundle 派生,
           # 只打 dmg 会被 bundler 警告 "no updater-enabled targets" → latest.json 缺 darwin 键,
           # mac 端检查更新报 fallback platforms not found(0.7.0/0.8.0 均栽此)。
+          # cache: rust-cache 的缓存键材料——不能用 args(含 "app,dmg" 逗号,GitHub
+          # cache key 不许逗号,校验失败会静默放弃缓存,mac 两次全量编译的根因)。
           - platform: macos-latest
             args: "--target aarch64-apple-darwin --bundles app,dmg"
+            cache: macos-aarch64
           - platform: macos-latest
             args: "--target x86_64-apple-darwin --bundles app,dmg"
+            cache: macos-x64
           - platform: ubuntu-22.04
             args: "--bundles appimage" # deb 不支持自动更新 → 改 AppImage
+            cache: ubuntu-appimage
           - platform: windows-latest
             args: ""
+            cache: windows
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22 # Node 20 已 EOL(2026-04);22 是当前 LTS
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -55,7 +61,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.platform }}-${{ matrix.args }}
+          key: release-${{ matrix.cache }}
 
       - name: Install dependencies (Linux)
         if: matrix.platform == 'ubuntu-22.04'
