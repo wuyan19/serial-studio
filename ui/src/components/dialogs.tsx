@@ -2,7 +2,7 @@
 脚本指南、添加远程设备、脚本运行参数收集、通用确认弹窗。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionId, ConnConfig, Macro, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings } from "../types";
-import { BAUD_RATES, isTauri } from "../lib";
+import { BAUD_RATES, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug } from "../icons";
@@ -849,42 +849,59 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }:
   );
 }
 
-/** 运行时参数收集:按脚本声明 params 渲染表单(string→输入框、select→下拉),确认回调 args。 */
-export function ScriptRunParamsDialog({ scriptName, params, onConfirm, onCancel }: {
+/** 运行时参数收集:按脚本声明 params 渲染表单(string→输入框、select→下拉),确认回调 args。
+ *  预填上次运行的值(initialValues,App 侧 localStorage 缓存)——二次运行只改要动的参数;
+ *  行内 ↺ / 底部「全部重置」回到声明默认(与快捷键对话框同款交互,↺ 变淡即已是默认,
+ *  扫一眼就知道哪些参数被改过)。 */
+export function ScriptRunParamsDialog({ scriptName, params, initialValues, onConfirm, onCancel }: {
   scriptName: string;
   params: ScriptParam[];
+  /** 上次运行的实际参数(localStorage 缓存);无缓存(首次/清库)时全按声明默认。 */
+  initialValues?: Record<string, string>;
   onConfirm: (args: Record<string, string>) => void;
   onCancel: () => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const p of params) init[p.name] = p.default ?? (p.options?.find((o) => o) ?? "");
-    return init;
-  });
+  // defaults 与 values 拆开:前者是重置目标(声明默认),后者随预填/编辑变化
+  const defaults = useMemo(() => prefillRunValues(params, undefined), [params]);
+  const [values, setValues] = useState<Record<string, string>>(() => prefillRunValues(params, initialValues));
+  const setOne = (name: string, v: string) => setValues((prev) => ({ ...prev, [name]: v }));
   useDialogKeys({ onClose: onCancel, onEnter: () => onConfirm(values) });
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`运行参数 ${scriptName}`} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`运行参数 ${scriptName}`} className="dialog dialog--narrow run-params" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title"><IconCode /> 运行参数</h3>
         <div className="dialog__sub">{scriptName}</div>
         {params.map((p) => (
           <ConfigRow key={p.name} label={p.label || p.name}>
             {p.type === "select" ? (
               <select className="field" value={values[p.name] ?? ""}
-                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })}>
+                onChange={(e) => setOne(p.name, e.target.value)}>
                 {(p.options ?? []).filter((o) => o).map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             ) : (
               <input className="field" value={values[p.name] ?? ""}
-                onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} autoCapitalize="off" spellCheck={false} />
+                onChange={(e) => setOne(p.name, e.target.value)} autoCapitalize="off" spellCheck={false} />
             )}
+            <button
+              type="button"
+              className="mini-btn"
+              title="重置默认"
+              aria-label={`重置「${p.label || p.name}」为默认值`}
+              disabled={values[p.name] === defaults[p.name]}
+              onClick={() => setOne(p.name, defaults[p.name])}
+            >
+              ↺
+            </button>
           </ConfigRow>
         ))}
-        <div className="btn-row">
-          <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-          <button className="btn btn--primary" onClick={() => onConfirm(values)}>运行</button>
+        <div className="btn-row" style={{ justifyContent: "space-between" }}>
+          <button className="btn btn--ghost" onClick={() => setValues(defaults)}>恢复默认</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+            <button className="btn btn--primary" onClick={() => onConfirm(values)}>运行</button>
+          </div>
         </div>
       </div>
     </div>

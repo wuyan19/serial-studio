@@ -1682,6 +1682,12 @@ button {
   user-select: text;
   -webkit-user-select: text;
 }
+/* 运行参数收集框:行内重置钮与输入框之间留缝(公共 .row 无 gap,mini-btn 会贴边压住
+   .field 的圆角/聚焦环) */
+.run-params .mini-btn {
+  margin-left: 6px;
+  flex-shrink: 0;
+}
 .dialog--narrow {
   min-width: 340px;
   width: 340px;

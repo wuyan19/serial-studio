@@ -24,9 +24,11 @@ import {
   initConn,
   isTauri,
   loadConfig,
+  loadScriptArgs,
   parsePortId,
   persistMacros,
   persistRemotes,
+  persistScriptArgs,
   persistScripts,
   portIdOf,
   saveConfig,
@@ -228,6 +230,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
   const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
+  /** 脚本上次运行参数(脚本名 → 键值):参数收集框预填,二次运行只改要动的参数。
+   *  localStorage 持久化(三形态统一);点「运行」时写入,「取消」不写。 */
+  const [scriptArgs, setScriptArgs] = useState<Record<string, Record<string, string>>>(loadScriptArgs);
   /** 未查看的失败结果 runId 集合(驱动活动栏红角标;打开对应面板即清——"查看"清偿提醒)。 */
   const [macroUnseen, setMacroUnseen] = useState<Set<string>>(new Set());
   const [scriptUnseen, setScriptUnseen] = useState<Set<string>>(new Set());
@@ -1734,7 +1739,15 @@ export default function App() {
         <ScriptRunParamsDialog
           scriptName={pendingRun}
           params={scripts[pendingRun]!.params!}
-          onConfirm={(args) => { doRun(pendingRun, args); setPendingRun(null); }}
+          initialValues={scriptArgs[pendingRun]}
+          onConfirm={(args) => {
+            // 缓存实际提交的值(而非表单中间态),下次预填;取消不写,保留上次有效值
+            const next = { ...scriptArgs, [pendingRun]: args };
+            setScriptArgs(next);
+            persistScriptArgs(next);
+            setPendingRun(null);
+            doRun(pendingRun, args);
+          }}
           onCancel={() => setPendingRun(null)}
         />
       )}

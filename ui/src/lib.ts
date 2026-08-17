@@ -290,6 +290,55 @@ export async function persistScripts(scripts: Record<string, Script>) {
   }
 }
 
+/** 脚本上次运行参数(脚本名 → 参数键值)。属 UI 运行时状态(同 ConnConfig 一类,非
+ *  宏/脚本库数据),三形态统一 localStorage,不进桌面端 JSON store;预填按脚本当前
+ *  params 声明过滤失效键(见 prefillRunValues),丢了大不了重填。 */
+const SCRIPT_ARGS_KEY = "serial-studio-script-args";
+export function loadScriptArgs(): Record<string, Record<string, string>> {
+  try {
+    const raw = localStorage.getItem(SCRIPT_ARGS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+export function persistScriptArgs(args: Record<string, Record<string, string>>) {
+  try {
+    localStorage.setItem(SCRIPT_ARGS_KEY, JSON.stringify(args));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 参数声明的默认值:string → default,select → default(须在 options 内)否则首个
+ *  非空 option,均无则空串。ScriptRunParamsDialog 的行内重置也用同一结果做目标值。 */
+export function paramDefault(p: ScriptParam): string {
+  if (p.default !== undefined && (p.type !== "select" || (p.options ?? []).includes(p.default))) {
+    return p.default;
+  }
+  return p.options?.find((o) => o) ?? "";
+}
+
+/** 运行参数预填:缓存命中用上次值(用户"按需微调"的语义,优先于声明默认),否则回落
+ *  声明默认。select 的缓存值已不在当前 options(脚本被编辑过)也回落,防下拉悬空;
+ *  string 的空串缓存保留(用户上次显式清空)。纯函数,单测在 lib.test.ts。 */
+export function prefillRunValues(
+  params: ScriptParam[],
+  cached: Record<string, string> | undefined,
+): Record<string, string> {
+  const init: Record<string, string> = {};
+  for (const p of params) {
+    const c = cached?.[p.name];
+    if (c !== undefined && (p.type !== "select" || (p.options ?? []).includes(c))) {
+      init[p.name] = c;
+    } else {
+      init[p.name] = paramDefault(p);
+    }
+  }
+  return init;
+}
+
 const REMOTES_KEY = "serial-studio-remotes";
 export function persistRemotesLocal(remotes: RemoteDevice[]) {
   try {

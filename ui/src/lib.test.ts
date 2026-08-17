@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   dissolveGroup,
   groupBy,
+  paramDefault,
   parseParamsFromCode,
   parsePortId,
   portIdOf,
+  prefillRunValues,
   renameGroup,
   upsertNamed,
 } from "./lib";
+import type { ScriptParam } from "./types";
 
 describe("portIdOf / parsePortId", () => {
   it("往返一致", () => {
@@ -139,5 +142,47 @@ describe("parseParamsFromCode", () => {
       { name: "a", type: "string", default: "1" },
       { name: "b", type: "select", options: ["x", "y"] },
     ]);
+  });
+});
+
+describe("paramDefault / prefillRunValues", () => {
+  const str: ScriptParam = { name: "host", type: "string", default: "192.168.1.1" };
+  const sel: ScriptParam = { name: "mode", type: "select", options: ["fast", "slow"], default: "fast" };
+  const params: ScriptParam[] = [str, sel];
+
+  it("paramDefault：string 取 default；select 取 options 内 default，否则首个非空 option", () => {
+    expect(paramDefault(str)).toBe("192.168.1.1");
+    expect(paramDefault(sel)).toBe("fast");
+    // default 已不在 options（脚本被编辑过）→ 首个 option，防下拉悬空
+    expect(paramDefault({ name: "m", type: "select", options: ["a", "b"], default: "gone" })).toBe("a");
+    expect(paramDefault({ name: "n", type: "string" })).toBe("");
+  });
+
+  it("无缓存 → 全部声明默认", () => {
+    expect(prefillRunValues(params, undefined)).toEqual({ host: "192.168.1.1", mode: "fast" });
+    expect(prefillRunValues(params, {})).toEqual({ host: "192.168.1.1", mode: "fast" });
+  });
+
+  it("缓存命中优先于声明默认（按需微调语义，含作者后来改 default）", () => {
+    expect(prefillRunValues(params, { host: "10.0.0.8", mode: "slow" })).toEqual({
+      host: "10.0.0.8",
+      mode: "slow",
+    });
+  });
+
+  it("缓存部分命中：未命中的参数回落默认", () => {
+    expect(prefillRunValues(params, { mode: "slow" })).toEqual({ host: "192.168.1.1", mode: "slow" });
+  });
+
+  it("select 缓存值已不在 options → 回落默认；string 空串缓存保留（上次显式清空）", () => {
+    expect(prefillRunValues(params, { mode: "turbo" })).toEqual({ host: "192.168.1.1", mode: "fast" });
+    expect(prefillRunValues(params, { host: "" })).toEqual({ host: "", mode: "fast" });
+  });
+
+  it("缓存中多余的参数键（脚本已删该参数）被忽略", () => {
+    expect(prefillRunValues(params, { host: "h", mode: "slow", legacy: "x" })).toEqual({
+      host: "h",
+      mode: "slow",
+    });
   });
 });
