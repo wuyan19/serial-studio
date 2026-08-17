@@ -52,20 +52,17 @@ export function SerialConfigDialog({
   onConfirm: (c: SerialConfig, alias: string) => void;
   onCancel: () => void;
 }) {
-  useEscClose(onCancel);
+  // 键盘走 window 级监听而非按钮焦点:双击端口行弹框时,第二次 click 的 mousedown
+  // 默认行为会把焦点从「打开」按钮抢到 body,焦点方案下 Enter 直接失灵。
+  useDialogKeys({ onClose: onCancel, onEnter: () => onConfirm(config, alias) });
   // 别名是端口语义（每端口独立），用内部状态；config 仍是受控（跨端口沿用）。
   // 调用方 key={port} 保证换端口时重挂、状态重置。
   const [alias, setAlias] = useState(initialAlias);
   const [baud, setBaud] = useState(String(config.baud_rate));
   // 波特率自由输入态(初始:现值不在常用档里则直接进入,如重开 250000 的端口)
   const [customBaud, setCustomBaud] = useState(() => !BAUD_RATES.includes(config.baud_rate));
-  const openRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
-  // 默认聚焦「打开」：用默认串口参数时直接回车即开，免点鼠标。
-  useEffect(() => {
-    openRef.current?.focus();
-  }, []);
   return (
     <div className="dialog-overlay">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="打开串口" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
@@ -173,7 +170,7 @@ export function SerialConfigDialog({
           <button className="btn btn--ghost" onClick={onCancel}>
             取消
           </button>
-          <button ref={openRef} className="btn btn--primary" onClick={() => onConfirm(config, alias)}>
+          <button className="btn btn--primary" onClick={() => onConfirm(config, alias)}>
             打开
           </button>
         </div>

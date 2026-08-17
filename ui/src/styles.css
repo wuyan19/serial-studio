@@ -1643,6 +1643,10 @@ button {
   }
 }
 .dialog {
+  /* 弹出瞬间落下的第二次 click(如双击端口行弹出的此对话框)会触发原生双击选词,
+     文字被高亮选中。对话框是操作面非阅读面,整体禁选;输入框类元素自行恢复。 */
+  user-select: none;
+  -webkit-user-select: none;
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--hairline);
@@ -1660,6 +1664,17 @@ button {
     opacity: 0;
     transform: translateY(8px);
   }
+}
+/* 恢复 .dialog 内需交互/可复制区域的选择:输入类控件、CodeMirror、指南与 JSON 预览 */
+.dialog input,
+.dialog textarea,
+.dialog .cm-editor,
+.dialog .cm-content,
+.dialog .json-preview,
+.dialog .script-skill__pre,
+.dialog .script-skill__md {
+  user-select: text;
+  -webkit-user-select: text;
 }
 .dialog--narrow {
   min-width: 340px;
