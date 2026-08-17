@@ -1665,14 +1665,20 @@ button {
     transform: translateY(8px);
   }
 }
-/* 恢复 .dialog 内需交互/可复制区域的选择:输入类控件、CodeMirror、指南与 JSON 预览 */
+/* 恢复 .dialog 内需交互/可复制区域的选择:输入类控件、CodeMirror、指南与 JSON 预览。
+   阅读面整体恢复——关于正文(版本/标语/MCP 提示/仓库链接)、脚本 API 速查面板
+   (签名待复制进代码)、editor-error 报错(宏/脚本/参数收集框共用,复制搜索用)。
+   这些框均经菜单/按钮单击打开,不在 73bd18b 所修"双击端口行弹框误选"的路径上。 */
 .dialog input,
 .dialog textarea,
 .dialog .cm-editor,
 .dialog .cm-content,
 .dialog .json-preview,
 .dialog .script-skill__pre,
-.dialog .script-skill__md {
+.dialog .script-skill__md,
+.dialog .about,
+.dialog .script-help,
+.dialog .editor-error {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -2619,7 +2625,22 @@ button {
   color: var(--ink-dim);
   font-size: var(--fs-sm);
   line-height: 1.7;
-  margin-bottom: 18px;
+  margin-bottom: 6px;
+}
+/* 仓库链接：强调色（可交互元素专用 token）+ 等宽字体，与版本行同族；
+   承接 tagline 让出的间距，保持与更新区块的原有节奏 */
+.about__repo {
+  margin: 0 0 18px;
+}
+.about__repo a {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+.about__repo a:hover,
+.about__repo a:focus-visible {
+  text-decoration: underline;
 }
 /* 标题里的 .pip 不再单独着色——强调色只留给可交互元素 */
 

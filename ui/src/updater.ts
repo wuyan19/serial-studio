@@ -22,7 +22,10 @@ export interface UpdateStatus {
   message?: string; // 失败时的错误信息
 }
 
-const RELEASES_URL = "https://github.com/wuyan19/serial-studio/releases/latest";
+/** 仓库地址：关于对话框超链接展示，Release 页由此派生。 */
+export const REPO_URL = "https://github.com/wuyan19/serial-studio";
+
+const RELEASES_URL = `${REPO_URL}/releases/latest`;
 
 /** 本地桌面模式：Tauri 且窗口非远程（?remote=）。Web / 远程窗口无本机 updater 意义。 */
 export function isLocalDesktop(): boolean {
@@ -85,6 +88,11 @@ export async function downloadAndInstall(
 /** 打开 Release 页（macOS 发现新版 / 更新失败的回退）。 */
 export async function openReleasesPage(): Promise<void> {
   await openUrl(RELEASES_URL);
+}
+
+/** 打开仓库主页（关于对话框超链接）。仅 Tauri 形态调用——Web 模式走原生 <a> 新标签。 */
+export async function openRepoPage(): Promise<void> {
+  await openUrl(REPO_URL);
 }
 
 function errMsg(e: unknown): string {

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionId, ConnConfig, Macro, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings } from "../types";
 import { BAUD_RATES, isTauri } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
-import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
+import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 import { marked } from "marked";
@@ -653,6 +653,23 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
             本地 / 远程 双模式 · Tauri + MCP & WebSocket
             <br />
             MCP Url http://IP:PORT/mcp
+          </p>
+          <p className="about__repo">
+            {/* Tauri webview 内直接导航会顶掉应用页面 → 拦下交给 opener 开系统浏览器；
+                Web 模式是普通浏览器，走原生 <a> 新标签即可 */}
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                if (isTauri()) {
+                  e.preventDefault();
+                  void openRepoPage();
+                }
+              }}
+            >
+              {REPO_URL}
+            </a>
           </p>
 
           {local && (
