@@ -5,7 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
-import { copyText, parsePortId } from "../lib";
+import { copyText, displayPortName } from "../lib";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
@@ -386,7 +386,7 @@ export function GroupView({
         {group.ports.map((port) => {
           const isActive = port === group.activePort;
           const editingThis = aliasEditTab?.port === port;
-          const portName = parsePortId(port).name;
+          const portName = displayPortName(port); // 多级复合键也只显示串口名(设备归属由 source 标签表达)
           const src = sourceLabelOf?.(port);
           const disconnected = disconnectedOf?.(port) ?? false;
           return (

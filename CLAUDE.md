@@ -56,9 +56,17 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 
 | Crate | 职责与边界 |
 |---|---|
-| `ss-core` (`crates/core`) | 多串口管理引擎。端口占有权、RX 缓冲区、宏执行。**纯运行时——不依赖 axum/clap/tauri,不碰持久化与 UI**,以此保持可测试性。新增此类依赖是回归。 |
-| `ss-server` (`crates/server`) | axum WS/MCP/Telnet + 内嵌 SPA(`rust-embed` 打包 `ui/dist`)。lib + headless bin 双形态,被 Tauri 壳与独立 `ss-server` 共用——"一份后端,两种宿主"。持久化 stores(settings/port_meta/macros/scripts/remotes)在此层。 |
+| `ss-core` (`crates/core`) | 多串口管理引擎。端口占有权、RX 缓冲区、宏执行、**PortIo 抽象**(本地串口实现)。**纯运行时——不依赖 axum/clap/tauri,不碰持久化、UI 与网络**(远程端口实现 `RemotePortIo` 在 server 层),以此保持可测试性。新增此类依赖是回归。 |
+| `ss-server` (`crates/server`) | axum WS/MCP/Telnet + 内嵌 SPA(`rust-embed` 打包 `ui/dist`)+ **远程设备连接层 `device/`**(DeviceClientManager)。lib + headless bin 双形态,被 Tauri 壳与独立 `ss-server` 共用——"一份后端,两种宿主"。持久化 stores(settings/port_meta/macros/scripts/remotes)在此层。 |
 | `serial-studio` (`crates/tauri-app`) | Tauri 壳=控制面。`ServiceSupervisor` 管数据面启停。本地模式下 Tauri IPC 与 axum WS 是同一 core 域的两个出口。 |
+
+### PortIo 与端口复合键(远程串口的根基)
+
+- **`PortIo`**(`core/src/port_io.rs`):全双工字节通道窄 trait(`Read + Write + Send + try_clone`)。read 的 TimedOut=空闲续轮、非 TimedOut=断开(触发 drainer)——语义与 serialport 阻塞读对齐,manager/port_task 不感知传输介质。本地实现 `SerialPortIo`(core);远程实现 `RemotePortIo`(server 层 `device/port_io.rs`,推→拉缓冲 + 命令通道写)。未来 TCP raw / RFC 2217 / BLE 实现同一 trait 即可接入。
+- **复合键**:`${devId}::${portName}`(`local::COM3` / `uuidB::local::COM3`)。compose/split/normalize 三函数在 `core/src/types.rs` 单一定义;**split 只剥首段、后缀整体透传**——多级级联(A 注册 B、B 注册 C)逐层路由无特判。manager 所有端口入口 normalize(map 键恒规范单一形态,裸名与复合键指向同一条目)。**事件 `port` 字段恒为 manager map 键**(与 IO 层远端线名解耦)。
+- **组装点** `create_state()`(server/src/lib.rs):注入 `CompositeOpener`(local → serial::open;非 local → DeviceClientManager,**阻塞同步,在 acquire 的 spawn_blocking 里调**)。
+- **DeviceClientManager**(server/src/device/):每注册设备一条 WS(读 remotes.json,eager 连接,退避重连,协议层 Ping 心跳 10s/20s,断连积压命令在新会话开始时丢弃),挂 AppState 跨热重启保留,`start()` 惰性幂等(supervisor.start 触发)。断连=USB 拔插:RemotePortIo read 返 Err → drainer 标 disconnected 保占有权 → reopen 走新连接。**防环=list 合并的透传深度限 1**:远端桶只收远端自己的口(线名首段 local),丢弃远端的远端桶——否则自连/互注册时列表每轮上报自我复制(回声环,4→8→12…直至消息风暴拖死进程)。自连(把本机地址注册为远程设备)因此成为合法形态:本地口的远程镜像,open 路由回本机(附加到同一端口的占有权)。多级级联的口在所在设备自己的 UI 看(路由仍逐层透传,仅列表不展示)。
+- **list 合并**(server/src/lib.rs::list_ports_with_meta):本地桶(manager 枚举 + 本地别名)⊕ 远端桶(DeviceClient 缓存的远端 PortView 透传,**远端别名归端口所在机器**)⊕ 本地占有权快照覆盖(opened/holders/disconnected 以本地为唯一真相)。
 
 ### 串口占有权模型(session 引用计数)
 
@@ -80,7 +88,7 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 
 ### 数据帧与快路径
 
-- **WS**:控制消息走 Text(JSON),串口数据走 Binary 帧 `[port_len:u8][port UTF-8][data]`。编码在 `ws.rs::data_frame`,解码在 `ui/src/transport.ts::decodeDataFrame`——**两处必须同步**。
+- **WS**:控制消息走 Text(JSON),串口数据走 Binary 帧 `[port_len:u8][port UTF-8][data]`。消息词典与编解码在 `server/src/protocol.rs`(单一定义,ws.rs 出口与 DeviceClient 设备客户端共用);JS 对侧 `ui/src/transport.ts::decodeDataFrame`——**两处必须同步**。Ok/Error 消息带可选 `port` 字段(设备客户端回执路由用,旧客户端忽略)。
 - **Tauri IPC 本地模式**:per-(window,port) `Channel` 二进制直传,跳过合批以降延迟(注释里标为 A/B 对照)。
 
 ### 发送/换行逻辑(集中、勿复制)
@@ -90,6 +98,10 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 ### 前端 Transport 抽象(`ui/src/transport.ts`)
 
 `Transport` 接口屏蔽 IPC/WS 协议差异,组件只懂领域(port/bytes/macro)。`LocalTransport`(Tauri invoke + event)与 `RemoteTransport`(WS)两实现,继承 `TransportEventBase` 共用 on* 事件目录(新增事件只改 `TransportEventsMap` + 基类,勿在两实现各抄一份)。运行形态判定唯一入口 `lib.ts::getMode()`("local" | "remote-window" | "web"),勿在别处重组 `isTauri`/`getRemoteFromUrl`。
+
+**端口键模型(P1 后)**:**线名即 pid**——本地 transport 的事件/列表线名是后端复合键(直通);远程 transport 的线名是远端侧键(加设备前缀,两级级联 `uuidA::local::COM3` 自然产生)。事件 ingest 用 `lib.ts::wireToPid(devId, 线名)`;列表桶内条目用 `bucketPidOf(grpDevId, name)`(幂等);展示名 `displayPortName`(rsplit `::` 末段)。**Transport 命令面收完整 pid**:LocalTransport 直传(Rust 规范化),RemoteTransport 内部 `wireName()` 剥首段。
+
+**桌面 local 形态只有 "local" 一个 transport**——远程设备连接在后端(DeviceClientManager),前端经 `onDevices`(devices-changed 事件)观察在线状态、断连中止、上线重放;设备增删走 save_remotes(后端钩子 update_registry),断开/重连走 `device_disconnect`/`device_connect` 命令。RemoteTransport 仅存在于 web/remote-window 形态(前端直连远端 ss)。`store.ts` 的 `ports_listed` 对本地合并列表按键首段自动分桶。
 
 ### 前端状态与组件分层
 
@@ -115,8 +127,11 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 
 ## 关键不变量(改代码时守住)
 
-- **`ss-core` 零 UI/服务依赖**——保可测试性。
-- **`AppState` 跨 `ServiceSupervisor` 重启保留**,只换 listener(热重启不丢串口连接/宏)。
+- **`ss-core` 零 UI/服务/网络依赖**——保可测试性(线协议知识只住 `server/src/protocol.rs`)。
+- **`AppState` 跨 `ServiceSupervisor` 重启保留**,只换 listener(热重启不丢串口连接/宏/设备连接)。
 - **WS 出站必须经 `RemoteTransport.send()`(await open)**,禁止裸 `ws.send`——CONNECTING 态会抛 `InvalidStateError`。
 - **数据帧 layout** 和 **换行逻辑** 各自只有一处定义,改一处要找另一处。
-- 服务器默认绑 `0.0.0.0` 且**无认证**——任何人可达即可开/发/读串口。安全相关改动需顾及此默认。
+- **复合键解析只按首个 `::` 切分、后缀整体透传**(级联根基);**manager 端口入口恒 normalize**(裸名与复合键同一条目,占有权单一事实);**事件 `port` 字段恒为 map 键**。
+- **设备连接的写/开/关走同一 unbounded 命令通道**(单写者保序,close 不走旁路);RemotePortIo 的 write 回执用 std mpsc 限时等待(spawn_blocking 线程必返回)。
+- **DeviceClient 收到的通知类消息(MetaChanged/事件)不得直接扇出本地 meta_bus**——本地 meta_bus 会把 MetaChanged 推给所有连接(含自连这条),自连时形成回授环(消息风暴,CPU 100%)。变更一律走 RefreshList 重拉 → Ports 缓存 **diff** → 真变了才通知本地,传播一轮即收敛。
+- 服务器默认绑 `0.0.0.0` 且**无认证**——任何人可达即可开/发/读串口。安全相关改动需顾及此默认;远程设备下沉后,本机脚本可主动连出任意注册设备(SSRF 面=remotes.json 白名单)。

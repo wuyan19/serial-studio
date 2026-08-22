@@ -103,6 +103,35 @@ pub enum LineEnding {
     CRLF,
 }
 
+/// 本机设备 id:复合键的第一段,裸端口名(无前缀)一律视为本机。
+pub const LOCAL_DEVICE_ID: &str = "local";
+
+/// 端口复合键分隔符:`${devId}::${portName}`。
+pub const PORT_KEY_SEP: &str = "::";
+
+/// 组装端口复合键:`${devId}::${portName}`。
+pub fn compose_port_key(dev_id: &str, port_name: &str) -> String {
+    format!("{}{}{}", dev_id, PORT_KEY_SEP, port_name)
+}
+
+/// 解析端口复合键:按首个 `::` 切分,只剥第一段,**后缀整体透传**——
+/// 多级级联(A 注册 B、B 注册 C)时 `uuidB::uuidC::COM3` 剥出 (uuidB, "uuidC::COM3"),
+/// 逐层路由无特判。无分隔符视为本机端口(与前端 parsePortId 的旧值兼容语义一致)。
+pub fn split_port_key(key: &str) -> (&str, &str) {
+    match key.split_once(PORT_KEY_SEP) {
+        Some((dev, rest)) => (dev, rest),
+        None => (LOCAL_DEVICE_ID, key),
+    }
+}
+
+/// 规范化端口键:裸名补 `local::` 前缀,复合键原样返回。
+/// manager 所有端口入口都经此规范化,保证 map 键单一形态
+/// (裸名与复合键不会指向同一物理口却成两个条目)。
+pub fn normalize_port_key(key: &str) -> String {
+    let (dev, name) = split_port_key(key);
+    compose_port_key(dev, name)
+}
+
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// 会话标识：一条 WS 连接或一个 Tauri 窗口的唯一身份，进程内全局单调递增。
@@ -122,10 +151,16 @@ impl SessionId {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AcquireResult {
     /// 本次真正打开或重连(reopen)了端口。holders 为当前持有者数(open=1,reopen=保留的 N)。
-    Opened { config: SerialConfig, holders: usize },
+    Opened {
+        config: SerialConfig,
+        holders: usize,
+    },
     /// 端口已开，本次为附加（持有者 +1）。config 为端口当前实际配置
     /// （请求的配置被忽略），调用方应据此告知用户。
-    Attached { config: SerialConfig, holders: usize },
+    Attached {
+        config: SerialConfig,
+        holders: usize,
+    },
 }
 
 /// release 的结果：本会话退出持有的实际效果。
@@ -142,7 +177,10 @@ pub enum ReleaseOutcome {
 
 /// 端口信息（含是否已由本管理器打开及当前持有者数）。纯运行时事实；
 /// 用户元数据（别名等）由 server 层的 PortView 组合，不在 core。
-#[derive(Debug, Clone, Serialize)]
+/// Deserialize 供 server 层设备客户端解析远端上报的端口表(PortView flatten);
+/// PartialEq 供设备客户端做缓存 diff(自连时防 MetaChanged 回授环——
+/// 未变化的 Ports 重复到达不得再扇出本地通知)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PortInfo {
     pub name: String,
     pub opened: bool,
@@ -170,6 +208,28 @@ pub struct RemoteDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_key_roundtrip() {
+        let key = compose_port_key("local", "COM3");
+        assert_eq!(key, "local::COM3");
+        assert_eq!(split_port_key(&key), ("local", "COM3"));
+    }
+
+    #[test]
+    fn port_key_bare_name_falls_back_to_local() {
+        // 裸名(旧客户端/手工输入)→ 本机;normalize 补前缀
+        assert_eq!(split_port_key("COM7"), ("local", "COM7"));
+        assert_eq!(normalize_port_key("COM7"), "local::COM7");
+        assert_eq!(normalize_port_key("local::COM7"), "local::COM7");
+    }
+
+    #[test]
+    fn port_key_multihop_cascade_splits_first_segment_only() {
+        // 级联:A 注册 B(uuid1)、B 注册 C(uuid2)——首段路由,后缀整体透传
+        let key = compose_port_key("uuid1", "uuid2::COM3");
+        assert_eq!(split_port_key(&key), ("uuid1", "uuid2::COM3"));
+    }
 
     #[test]
     fn config_default_values() {

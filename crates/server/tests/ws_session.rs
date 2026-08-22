@@ -9,7 +9,7 @@
 //! 也是先前两次 bug（广播加标签 / 附加不发 HoldersChanged）的发源地。
 
 use futures_util::{SinkExt, StreamExt};
-use ss_core::{EventBus, PortOpener, SerialConfig, SerialError, SerialManager};
+use ss_core::{EventBus, PortIo, PortOpener, SerialConfig, SerialError, SerialManager};
 use ss_server::{create_router, AppState};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +18,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 /// connect_async 返回的流类型（MaybeTlsStream 包裹）。
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 // ===== 内存桩串口（与 core 单测同款：read 返 TimedOut 模拟空闲,保持端口连接态） =====
 
@@ -38,39 +39,15 @@ impl std::io::Write for FakePort {
         Ok(())
     }
 }
-impl serialport::SerialPort for FakePort {
-    fn name(&self) -> Option<String> { None }
-    fn baud_rate(&self) -> Result<u32, serialport::Error> { Ok(0) }
-    fn data_bits(&self) -> Result<serialport::DataBits, serialport::Error> { Ok(serialport::DataBits::Eight) }
-    fn flow_control(&self) -> Result<serialport::FlowControl, serialport::Error> { Ok(serialport::FlowControl::None) }
-    fn parity(&self) -> Result<serialport::Parity, serialport::Error> { Ok(serialport::Parity::None) }
-    fn stop_bits(&self) -> Result<serialport::StopBits, serialport::Error> { Ok(serialport::StopBits::One) }
-    fn timeout(&self) -> Duration { Duration::from_millis(100) }
-    fn set_baud_rate(&mut self, _: u32) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_data_bits(&mut self, _: serialport::DataBits) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_flow_control(&mut self, _: serialport::FlowControl) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_parity(&mut self, _: serialport::Parity) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_stop_bits(&mut self, _: serialport::StopBits) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_timeout(&mut self, _: Duration) -> Result<(), serialport::Error> { Ok(()) }
-    fn write_request_to_send(&mut self, _: bool) -> Result<(), serialport::Error> { Ok(()) }
-    fn write_data_terminal_ready(&mut self, _: bool) -> Result<(), serialport::Error> { Ok(()) }
-    fn read_clear_to_send(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-    fn read_data_set_ready(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-    fn read_ring_indicator(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-    fn read_carrier_detect(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-    fn bytes_to_read(&self) -> Result<u32, serialport::Error> { Ok(0) }
-    fn bytes_to_write(&self) -> Result<u32, serialport::Error> { Ok(0) }
-    fn clear(&self, _: serialport::ClearBuffer) -> Result<(), serialport::Error> { Ok(()) }
-    fn clear_break(&self) -> Result<(), serialport::Error> { Ok(()) }
-    fn set_break(&self) -> Result<(), serialport::Error> { Ok(()) }
-    fn try_clone(&self) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+impl PortIo for FakePort {
+    fn try_clone(&self) -> std::io::Result<Box<dyn PortIo>> {
         Ok(Box::new(FakePort))
     }
 }
 
 struct FakeOpener;
 impl PortOpener for FakeOpener {
-    fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+    fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn PortIo>, SerialError> {
         Ok(Box::new(FakePort))
     }
 }
@@ -84,12 +61,14 @@ async fn boot() -> (String, Arc<SerialManager>) {
     let state = AppState {
         manager: manager.clone(),
         event_bus,
-        meta_bus: Arc::new(meta_tx),
+        meta_bus: Arc::new(meta_tx.clone()),
         script_bus: Arc::new(script_tx),
         enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        // 测试无远程设备(集成测试用 DeviceClientManager::empty + update_registry 注入)
+        devices: Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx)),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -127,16 +106,36 @@ async fn open_returns_acquired_and_attach_shows_holders() {
 
     // 客户端 A：首开 → acquired(opened=true)
     let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
-    send_text(&mut a, r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#).await;
+    send_text(
+        &mut a,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#,
+    )
+    .await;
     let acquired = recv_until(&mut a, "\"type\":\"acquired\"").await;
-    assert!(acquired.contains("\"opened\":true"), "首开应为 opened=true: {}", acquired);
+    assert!(
+        acquired.contains("\"opened\":true"),
+        "首开应为 opened=true: {}",
+        acquired
+    );
 
     // 客户端 B：附加 → acquired(opened=false, holders=2)
     let mut b = tokio_tungstenite::connect_async(&url).await.unwrap().0;
-    send_text(&mut b, r#"{"action":"open","port":"COM7","config":{"baud_rate":9600}}"#).await;
+    send_text(
+        &mut b,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":9600}}"#,
+    )
+    .await;
     let attached = recv_until(&mut b, "\"type\":\"acquired\"").await;
-    assert!(attached.contains("\"opened\":false"), "第二客户端应附加: {}", attached);
-    assert!(attached.contains("\"holders\":2"), "附加应显示 2 持有者: {}", attached);
+    assert!(
+        attached.contains("\"opened\":false"),
+        "第二客户端应附加: {}",
+        attached
+    );
+    assert!(
+        attached.contains("\"holders\":2"),
+        "附加应显示 2 持有者: {}",
+        attached
+    );
     // 清理:close 两客户端(末位 teardown 退出读线程,免 runtime drop 卡在 spawn_blocking)
     send_text(&mut a, r#"{"action":"close","port":"COM7"}"#).await;
     send_text(&mut b, r#"{"action":"close","port":"COM7"}"#).await;
@@ -148,11 +147,19 @@ async fn disconnect_releases_holders_no_leak() {
     let (url, manager) = boot().await;
 
     let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
-    send_text(&mut a, r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#).await;
+    send_text(
+        &mut a,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#,
+    )
+    .await;
     let _ = recv_until(&mut a, "\"type\":\"acquired\"").await;
 
     let mut b = tokio_tungstenite::connect_async(&url).await.unwrap().0;
-    send_text(&mut b, r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#).await;
+    send_text(
+        &mut b,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#,
+    )
+    .await;
     let _ = recv_until(&mut b, "\"type\":\"acquired\"").await;
     assert_eq!(manager.holder_count("COM7").await, Some(2));
 
@@ -178,7 +185,11 @@ async fn last_close_tears_down_port() {
     let (url, manager) = boot().await;
 
     let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
-    send_text(&mut a, r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#).await;
+    send_text(
+        &mut a,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#,
+    )
+    .await;
     let _ = recv_until(&mut a, "\"type\":\"acquired\"").await;
 
     // A close → 末位 → 端口拆毁
@@ -206,4 +217,76 @@ async fn version_action_returns_server_version() {
     let resp = recv_until(&mut a, "\"type\":\"version\"").await;
     let want = format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"));
     assert!(resp.contains(&want), "期望包含 {}，实际: {}", want, resp);
+}
+
+/// 复合键线格式(P1 契约):端口列表 name 带设备前缀;open 接受复合键与裸名
+/// (裸名规范化为 local:: 前缀,与复合键指向同一条目);acquired 回显复合键。
+#[tokio::test]
+async fn composite_port_key_wire_format() {
+    let (url, manager) = boot().await;
+    let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    // ① 复合键首开
+    send_text(
+        &mut a,
+        r#"{"action":"open","port":"local::COM7","config":{"baud_rate":115200}}"#,
+    )
+    .await;
+    let acquired = recv_until(&mut a, "\"type\":\"acquired\"").await;
+
+    // ② 列表 name 应为复合键
+    send_text(&mut a, r#"{"action":"list"}"#).await;
+    let listed = recv_until(&mut a, "\"type\":\"ports\"").await;
+
+    // ③ 裸名(旧客户端)从**另一条连接**(不同 session)附加——若裸名与复合键分裂成
+    // 两个条目,这次会是 Opened 而非 Attached;同条目则 holders=2
+    let mut b = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut b,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":9600}}"#,
+    )
+    .await;
+    let attached = recv_until(&mut b, "\"type\":\"acquired\"").await;
+    let holders = manager.holder_count("local::COM7").await;
+
+    // ④ 清理先行(读线程退出,runtime 才能干净关闭——panic 早退会留 FakePort 读线程,
+    // spawn_blocking 读循环只有 Close 才退出,runtime drop 会挂死),断言全部押后
+    send_text(&mut b, r#"{"action":"close","port":"COM7"}"#).await;
+    let _ = recv_until(&mut b, "\"type\":\"ok\"").await;
+    send_text(&mut a, r#"{"action":"close","port":"local::COM7"}"#).await;
+    let _ = recv_until(&mut a, "\"type\":\"ok\"").await;
+
+    assert!(
+        acquired.contains("\"port\":\"local::COM7\""),
+        "acquired 应回显复合键: {}",
+        acquired
+    );
+    assert!(
+        acquired.contains("\"opened\":true"),
+        "首开应为 opened=true: {}",
+        acquired
+    );
+    // 列表条目恒为复合键格式(list = 系统枚举 + map 状态,COM7 是 FakeOpener 假口
+    // 不在系统枚举里,故断言"存在的条目全部带前缀"而非特定端口)
+    assert!(
+        listed.contains("\"name\":\"local::"),
+        "端口列表 name 应带 local:: 前缀: {}",
+        listed
+    );
+    assert!(
+        !listed.contains("\"name\":\"COM"),
+        "端口列表不得再出现无前缀裸名: {}",
+        listed
+    );
+    assert!(
+        attached.contains("\"opened\":false"),
+        "裸名应附加到复合键条目(非新开): {}",
+        attached
+    );
+    assert!(
+        attached.contains("\"holders\":2"),
+        "裸名与复合键同条目,两 session 应 holders=2: {}",
+        attached
+    );
+    assert_eq!(holders, Some(2));
 }

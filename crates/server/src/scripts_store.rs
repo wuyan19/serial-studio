@@ -83,7 +83,9 @@ fn write_locked(p: &Path, map: &BTreeMap<String, Script>) -> Result<(), String> 
 
 /// 读 scripts.json(不存在或解析失败 → 空)。
 pub fn load() -> BTreeMap<String, Script> {
-    crate::config::config_dir().map(|d| load_from(&d)).unwrap_or_default()
+    crate::config::config_dir()
+        .map(|d| load_from(&d))
+        .unwrap_or_default()
 }
 
 /// 全量写 scripts.json(前端 Tauri 用:内存权威整张覆盖)。
@@ -112,11 +114,8 @@ mod tests {
     fn fresh_dir() -> PathBuf {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ss-scripts-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ss-scripts-test-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -206,6 +205,11 @@ mod tests {
             h.join().unwrap();
         }
         let map = load_from(&dir);
-        assert_eq!(map.len(), 8, "并发写不同 key 应全部保留: {:?}", map.keys().collect::<Vec<_>>());
+        assert_eq!(
+            map.len(),
+            8,
+            "并发写不同 key 应全部保留: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
     }
 }

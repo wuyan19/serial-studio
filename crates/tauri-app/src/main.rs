@@ -1,6 +1,9 @@
 // release 模式 Windows 用 GUI 子系统：双击不弹 cmd 黑窗。
 // debug 保留 console，方便看 tracing/panic。
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 //! Serial Studio Tauri 桌面应用（控制面）。
 //!
@@ -13,13 +16,16 @@
 
 use clap::Parser;
 use ss_core::SessionId;
-use ss_server::AppState;
-use tauri::{ipc::{Channel, InvokeResponseBody}, Emitter, Manager};
+use ss_server::create_state;
 use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
-use ss_server::create_state;
+use ss_server::AppState;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use tauri::{
+    ipc::{Channel, InvokeResponseBody},
+    Emitter, Manager,
+};
 
 #[derive(Parser)]
 #[command(name = "serial-studio", version, about = "Serial Studio 桌面应用")]
@@ -109,9 +115,10 @@ async fn save_settings(
     settings: Settings,
 ) -> Result<(), String> {
     ss_server::settings::save(&settings)?;
-    state
-        .enable_scripting
-        .store(settings.enable_scripting, std::sync::atomic::Ordering::Relaxed);
+    state.enable_scripting.store(
+        settings.enable_scripting,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Ok(())
 }
 
@@ -125,9 +132,10 @@ async fn apply_settings(
     supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
 ) -> Result<(), String> {
     ss_server::settings::save(&settings)?;
-    state
-        .enable_scripting
-        .store(settings.enable_scripting, std::sync::atomic::Ordering::Relaxed);
+    state.enable_scripting.store(
+        settings.enable_scripting,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     match supervisor.restart(&settings).await {
         Ok(()) => {
             let _ = app.emit("service-status", serde_json::json!({ "running": true }));
@@ -170,10 +178,39 @@ async fn load_remotes() -> Result<Vec<ss_core::RemoteDevice>, String> {
     Ok(ss_server::remotes_store::load())
 }
 
-/// 保存远程设备列表到 remotes.json。
+/// 保存远程设备列表到 remotes.json。落盘后同步设备连接池(新增即建连,删除即断连)。
 #[tauri::command]
-async fn save_remotes(remotes: Vec<ss_core::RemoteDevice>) -> Result<(), String> {
-    ss_server::remotes_store::save(&remotes)
+async fn save_remotes(
+    state: tauri::State<'_, AppState>,
+    remotes: Vec<ss_core::RemoteDevice>,
+) -> Result<(), String> {
+    ss_server::remotes_store::save(&remotes)?;
+    state.devices.update_registry(&remotes);
+    state.devices.start(); // 首次保存设备时拉起(幂等)
+    Ok(())
+}
+
+/// 设备在线状态快照(设备卡状态点初始态;后续增量走 devices-changed 事件)。
+#[tauri::command]
+async fn list_devices(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ss_server::protocol::DeviceStateView>, String> {
+    Ok(state.devices.device_states())
+}
+
+/// 手动断开设备(断开按钮):停止重连,端口转断开态。
+#[tauri::command]
+async fn device_disconnect(
+    state: tauri::State<'_, AppState>,
+    dev_id: String,
+) -> Result<(), String> {
+    state.devices.disconnect(&dev_id)
+}
+
+/// 手动重连设备(重连按钮):删旧连接建新。
+#[tauri::command]
+async fn device_connect(state: tauri::State<'_, AppState>, dev_id: String) -> Result<(), String> {
+    state.devices.reconnect(&dev_id)
 }
 
 /// 加载用户脚本(配置目录 scripts.json)。与宏一样是用户配置,跟着用户走。
@@ -308,6 +345,8 @@ async fn open_port_stream(
 ) -> Result<ss_core::AcquireResult, String> {
     let session = sessions.get_or_create(window.label());
     let label = window.label().to_string();
+    // 端口键规范化(裸名补 local::):channel 注册键与事件转发的 map 键(复合键)恒一致
+    let port = ss_core::normalize_port_key(&port);
     channels.register(&label, &port, on_event);
     match state.manager.acquire(port.clone(), config, session).await {
         Ok(result) => Ok(result),
@@ -329,6 +368,7 @@ async fn close_port_stream(
     port: String,
 ) -> Result<ss_core::ReleaseOutcome, String> {
     let session = sessions.get_or_create(window.label());
+    let port = ss_core::normalize_port_key(&port); // 与 open_port_stream 的注册键同形态
     let outcome = state
         .manager
         .release(&port, session)
@@ -363,13 +403,17 @@ async fn force_close_port(
 
 /// 设置端口别名（""/None = 清除）。写配置目录 ports.json 并广播元数据变更，
 /// 让已连的远程 WS 客户端刷新。open 命令不碰磁盘——别名一律走此入口。
+/// 远端设备的别名转发是同步阻塞 RPC(最长 10s)——包 spawn_blocking 勿占 worker。
 #[tauri::command]
 async fn set_port_alias(
     state: tauri::State<'_, AppState>,
     port: String,
     alias: Option<String>,
 ) -> Result<(), String> {
-    ss_server::set_alias_and_notify(&state, &port, alias)
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || ss_server::set_alias_and_notify(&st, &port, alias))
+        .await
+        .map_err(|e| format!("join 错误: {}", e))?
 }
 
 /// 弹出原生保存对话框让用户选位置，写 JSON 文本。桌面端导出用（Web 走浏览器 blob 下载）。
@@ -383,7 +427,10 @@ async fn save_json_file(default_name: String, content: String) -> Result<bool, S
         .await;
     match file {
         Some(handle) => {
-            handle.write(content.as_bytes()).await.map_err(|e| e.to_string())?;
+            handle
+                .write(content.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(true)
         }
         None => Ok(false),
@@ -419,7 +466,10 @@ async fn run_macro(
     let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.script_runs.lock().unwrap().insert(
         run_id.clone(),
-        ss_server::ScriptRun { abort: abort.clone(), owner: ss_server::ScriptOwner::Window(window.label().to_string()) },
+        ss_server::ScriptRun {
+            abort: abort.clone(),
+            owner: ss_server::ScriptOwner::Window(window.label().to_string()),
+        },
     );
     let script_runs = state.script_runs.clone();
     let run_id_for_cleanup = run_id.clone();
@@ -428,7 +478,9 @@ async fn run_macro(
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
-            Err(ss_core::MacroError::Aborted) => (false, ss_core::MacroError::Aborted.display_message()),
+            Err(ss_core::MacroError::Aborted) => {
+                (false, ss_core::MacroError::Aborted.display_message())
+            }
             Err(e) => (false, e.to_string()),
         };
         let _ = app.emit(
@@ -458,18 +510,32 @@ async fn run_script(
     let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.script_runs.lock().unwrap().insert(
         run_id.clone(),
-        ss_server::ScriptRun { abort: abort.clone(), owner: ss_server::ScriptOwner::Window(window.label().to_string()) },
+        ss_server::ScriptRun {
+            abort: abort.clone(),
+            owner: ss_server::ScriptOwner::Window(window.label().to_string()),
+        },
     );
     let script_runs = state.script_runs.clone();
     let run_id_for_cleanup = run_id.clone();
     tokio::spawn(async move {
         // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
-        let result = ss_core::run_script_with_timeout(&port, &script.code, manager, None, args, &run_id, abort).await;
+        let result = ss_core::run_script_with_timeout(
+            &port,
+            &script.code,
+            manager,
+            None,
+            args,
+            &run_id,
+            abort,
+        )
+        .await;
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);
         let (success, message) = match result {
             Ok(()) => (true, "完成".to_string()),
             // Aborted 用 display_message(「已停止」)对齐 WS 路径;其它本地保留 Display 详情。
-            Err(ss_core::ScriptError::Aborted) => (false, ss_core::ScriptError::Aborted.display_message()),
+            Err(ss_core::ScriptError::Aborted) => {
+                (false, ss_core::ScriptError::Aborted.display_message())
+            }
             Err(e) => (false, e.to_string()),
         };
         let _ = app.emit(
@@ -483,7 +549,12 @@ async fn run_script(
 /// 停止运行中的脚本:set 对应 run_id 的 abort flag,脚本经 sleep 分段轮询退出(秒级)。
 #[tauri::command]
 async fn stop_script(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
-    let flag = state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone());
+    let flag = state
+        .script_runs
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|r| r.abort.clone());
     match flag {
         Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
         None => tracing::warn!("stop_script: run_id {} 未找到(已结束?)", run_id),
@@ -494,7 +565,12 @@ async fn stop_script(state: tauri::State<'_, AppState>, run_id: String) -> Resul
 /// 停止运行中的宏:与 stop_script 同表(script_runs),set abort flag → 宏经 Delay 分段/Expect select! 退出。
 #[tauri::command]
 async fn stop_macro(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
-    let flag = state.script_runs.lock().unwrap().get(&run_id).map(|r| r.abort.clone());
+    let flag = state
+        .script_runs
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|r| r.abort.clone());
     match flag {
         Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
         None => tracing::warn!("stop_macro: run_id {} 未找到(已结束?)", run_id),
@@ -513,12 +589,22 @@ fn spawn_event_emitter(
     event_bus: std::sync::Arc<ss_core::EventBus>,
     meta_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
     script_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
+    devices: std::sync::Arc<ss_server::device::DeviceClientManager>,
 ) {
     let app_meta = app.clone(); // 第二个 spawn 用；下面的 async move 会 move 掉 app
     let app_script = app.clone(); // 第三个 spawn（script_bus）用
+    let app_dev = app.clone(); // 第四个 spawn（device_bus）用
     let mut rx = event_bus.subscribe();
     tauri::async_runtime::spawn(async move {
-        while let Ok(event) = rx.recv().await {
+        // 主事件流必须容忍 Lagged(broadcast 积压丢弃后 continue)——while-let-Ok 写法
+        // 一次 Lagged 即永久退出,本地桌面 UI 从此收不到任何串口数据(预存在坑,
+        // 与本文件其余三个 spawn 的 match 写法对齐)。
+        loop {
+            let event = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             match event {
                 ss_core::SerialEvent::DataReceived { port, data } => {
                     // 本地字节直传：per-(window,port) channel 二进制快路径。
@@ -554,7 +640,9 @@ fn spawn_event_emitter(
                         serde_json::json!({ "message": format!("{}: {}", port, message) }),
                     );
                 }
-                ss_core::SerialEvent::ScriptLog { run_id, message, .. } => {
+                ss_core::SerialEvent::ScriptLog {
+                    run_id, message, ..
+                } => {
                     // 脚本 log() 输出:按 run_id 路由到对应运行实例的日志区(port 不转发)。
                     let _ = app.emit(
                         "script-log",
@@ -574,6 +662,20 @@ fn spawn_event_emitter(
             match meta_rx.recv().await {
                 Ok(()) => {
                     let _ = app_meta.emit("ports-meta-changed", ());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // 设备上下线 → 通知本地前端刷新设备卡状态(与 ws.rs 的 Devices 推送同接 device_bus)
+    let mut device_rx = devices.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match device_rx.recv().await {
+                Ok(_) => {
+                    let _ = app_dev.emit("devices-changed", ());
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -605,7 +707,10 @@ fn run_headless() -> anyhow::Result<()> {
         let state = create_state();
         let supervisor = ServiceSupervisor::new(state);
         let settings = ss_server::settings::load();
-        supervisor.start(&settings).await.map_err(anyhow::Error::msg)?;
+        supervisor
+            .start(&settings)
+            .await
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("headless 运行中，Ctrl+C 退出");
         shutdown_signal().await;
         supervisor.stop().await;
@@ -696,7 +801,7 @@ fn run_gui() {
             app.manage(PortChannels::default());
 
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
-            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone());
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone());
 
             // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
             // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。
@@ -729,6 +834,9 @@ fn run_gui() {
             load_macros,
             save_macros,
             load_remotes,
+            list_devices,
+            device_disconnect,
+            device_connect,
             save_remotes,
             load_scripts,
             save_scripts,

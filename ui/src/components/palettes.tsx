@@ -1,6 +1,7 @@
 /** 命令面板族：宏（Ctrl+O）、脚本（Ctrl+B）、串口（Ctrl+I）。模糊搜索 + 键盘导航。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Macro, PortId, PortInfo, Script } from "../types";
+import { displayPortName } from "../lib";
 import { PortLabel, useDialogA11y } from "./primitives";
 
 // ===== 宏命令面板（Ctrl+O） =====
@@ -350,7 +351,7 @@ export function PortPalette({
               onClick={() => commit(pid)}
             >
               <span className="palette__name">
-                <PortLabel name={byPid[pid]?.name ?? pid} alias={byPid[pid]?.alias} />
+                <PortLabel name={displayPortName(byPid[pid]?.name ?? pid)} alias={byPid[pid]?.alias} />
               </span>
             </button>
           ))}

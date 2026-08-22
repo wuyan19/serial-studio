@@ -159,6 +159,26 @@ export function parsePortId(id: PortId): { devId: string; name: string } {
   return { devId: id.slice(0, idx), name: id.slice(idx + 2) };
 }
 
+/** 线上端口名 → 完整 pid（事件 ingest 用）。本地 transport 的线名已是复合键
+ *  （pid ≡ 线名，直通）；远程 transport 的线名是远端侧键（远端旧版为裸名），
+ *  需加本设备前缀——两级 "uuid::local::COM3" 即在此自然产生（级联）。 */
+export function wireToPid(devId: string, wirePort: string): PortId {
+  return devId === "local" ? (wirePort as PortId) : portIdOf(devId, wirePort);
+}
+
+/** pid 的展示名：最后一个 `::` 之后（多级级联也只显示串口名，设备归属由分桶表达）。
+ *  串口名不含 `::` 是既有不变量。 */
+export function displayPortName(pid: PortId): string {
+  const idx = pid.lastIndexOf("::");
+  return idx < 0 ? pid : pid.slice(idx + 2);
+}
+
+/** 桶内条目名 → pid（列表消费侧，幂等）：条目键首段已等于桶 devId（本地 transport
+ *  的合并视图，键为完整 pid）则直通；否则（远程 transport 的远端侧键）加桶前缀。 */
+export function bucketPidOf(grpDevId: string, name: string): PortId {
+  return parsePortId(name).devId === grpDevId ? (name as PortId) : portIdOf(grpDevId, name);
+}
+
 // ===== localStorage 持久化（跟着用户走的配置） =====
 
 const CONFIG_KEY = "serial-studio-config";

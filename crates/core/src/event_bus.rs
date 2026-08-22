@@ -63,7 +63,9 @@ mod tests {
     async fn publish_subscribe() {
         let bus = EventBus::new(8);
         let mut rx = bus.subscribe();
-        bus.publish(SerialEvent::PortOpened { port: "COM1".into() });
+        bus.publish(SerialEvent::PortOpened {
+            port: "COM1".into(),
+        });
         let evt = rx.recv().await.unwrap();
         assert!(matches!(evt, SerialEvent::PortOpened { .. }));
     }

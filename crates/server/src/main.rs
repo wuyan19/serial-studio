@@ -6,7 +6,11 @@ use clap::Parser;
 use ss_server::{create_router, create_state};
 
 #[derive(Parser)]
-#[command(name = "ss-server", version, about = "Serial Studio WebSocket 网关 (headless)")]
+#[command(
+    name = "ss-server",
+    version,
+    about = "Serial Studio WebSocket 网关 (headless)"
+)]
 struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
@@ -29,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let state = create_state();
+    // 远程设备连接池启动(惰性幂等;headless 不走 supervisor,这里显式拉起)
+    state.devices.start();
 
     // 启动 Telnet 服务器（独立 TCP，与 axum 并行）
     let telnet_addr = format!("{}:{}", args.host, args.telnet_port);
@@ -43,7 +49,11 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Serial Studio server: ws://{}/ws · http://{}/api/ports", addr, addr);
+    tracing::info!(
+        "Serial Studio server: ws://{}/ws · http://{}/api/ports",
+        addr,
+        addr
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

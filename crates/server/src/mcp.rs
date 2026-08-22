@@ -17,25 +17,10 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// axum POST /mcp 入口。
 pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Json<Value> {
-    Json(
-        handle_request(
-            &body,
-            &state.manager,
-            state.enable_scripting.load(std::sync::atomic::Ordering::Relaxed),
-            &state.script_semaphore,
-            &state.script_bus,
-        )
-        .await,
-    )
+    Json(handle_request(&body, &state).await)
 }
 
-pub async fn handle_request(
-    body: &str,
-    manager: &Arc<SerialManager>,
-    enable_scripting: bool,
-    semaphore: &tokio::sync::Semaphore,
-    script_bus: &broadcast::Sender<()>,
-) -> Value {
+pub async fn handle_request(body: &str, state: &AppState) -> Value {
     let request: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
@@ -63,7 +48,7 @@ pub async fn handle_request(
         "initialize" => json!(handle_initialize()),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "tools/list" => json!(handle_tools_list()),
-        "tools/call" => handle_tools_call(&params, manager, enable_scripting, semaphore, script_bus).await,
+        "tools/call" => handle_tools_call(&params, state).await,
         "prompts/list" => json!(handle_prompts_list()),
         "prompts/get" => json!(handle_prompts_get(&params)),
         "ping" => json!({}),
@@ -226,46 +211,52 @@ fn handle_tools_list() -> Value {
     })
 }
 
-async fn handle_tools_call(
-    params: &Value,
-    manager: &Arc<SerialManager>,
-    enable_scripting: bool,
-    semaphore: &tokio::sync::Semaphore,
-    script_bus: &broadcast::Sender<()>,
-) -> Value {
+async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
+    let manager = &state.manager;
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return error_text("Missing tool name".into()),
     };
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     match name {
-        "serial_list" => tool_serial_list(arguments, &**manager).await,
+        "serial_list" => tool_serial_list(arguments, state).await,
         "serial_send" => tool_serial_send(arguments, &**manager).await,
         "serial_read" => tool_serial_read(arguments, &**manager).await,
         "serial_status" => tool_serial_status(arguments, &**manager).await,
         "serial_grep" => tool_serial_grep(arguments, &**manager).await,
         "serial_clear" => tool_serial_clear(arguments, &**manager).await,
-        "serial_run_script" => tool_serial_run_script(arguments, manager, enable_scripting, semaphore).await,
-        "serial_save_script" => tool_serial_save_script(arguments, script_bus).await,
+        "serial_run_script" => {
+            let enable_scripting = state
+                .enable_scripting
+                .load(std::sync::atomic::Ordering::Relaxed);
+            tool_serial_run_script(
+                arguments,
+                manager,
+                enable_scripting,
+                &state.script_semaphore,
+            )
+            .await
+        }
+        "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
-        "serial_delete_script" => tool_serial_delete_script(arguments, script_bus).await,
+        "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
         other => error_text(format!("Unknown tool: {}", other)),
     }
 }
 
 async fn resolve_port(args: &Value, manager: &SerialManager) -> Result<String, String> {
     if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
-        // 精确端口名优先：是已开端口就直接用
+        // 精确端口名优先：是已开端口就直接用(已开列表即复合键,精确命中含远端设备端口)
         let open = manager.list_open_ports().await;
         if open.iter().any(|x| x == p) {
             return Ok(p.to_string());
         }
-        // 否则按别名反查 ports.json
+        // 否则按别名反查 ports.json(本地本机端口的别名,裸名键 → 组复合键)
         let meta = crate::port_meta_store::load();
         if let Some((port, _)) = meta.iter().find(|(_, m)| m.alias.as_deref() == Some(p)) {
-            return Ok(port.clone());
+            return Ok(ss_core::compose_port_key(ss_core::LOCAL_DEVICE_ID, port));
         }
-        // 既非已开端口名也非别名：透传，下游 NotOpen 兜底（保留原行为）
+        // 既非已开端口名也非别名：透传，下游 NotOpen 兜底（保留原行为;裸名经 manager 规范化）
         return Ok(p.to_string());
     }
     let open = manager.list_open_ports().await;
@@ -276,23 +267,24 @@ async fn resolve_port(args: &Value, manager: &SerialManager) -> Result<String, S
     }
 }
 
-async fn tool_serial_list(_args: Value, manager: &SerialManager) -> Value {
-    let ports = manager.list_ports().await;
-    if ports.is_empty() {
+async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
+    // 合并视图(本地 + 远端设备桶 + 别名 + 本地占有权覆盖)——与 UI/REST/WS 同一数据源,
+    // 远程设备的端口对 MCP 可见且带远端别名(下沉后 MCP 免费获得远程能力的落点)
+    let views = crate::list_ports_with_meta(state).await;
+    if views.is_empty() {
         return ok_text("未发现任何串口".into());
     }
-    let meta = crate::port_meta_store::load();
-    let mut out = Vec::with_capacity(ports.len());
-    for p in ports {
-        let alias = meta.get(&p.name).and_then(|m| m.alias.as_deref());
-        let label = match alias {
-            Some(a) => format!("{} ({})", p.name, a),
-            None => p.name.clone(),
+    let mut out = Vec::with_capacity(views.len());
+    for v in views {
+        let label = match &v.alias {
+            Some(a) => format!("{} ({})", v.info.name, a),
+            None => v.info.name.clone(),
         };
-        let line = if p.opened {
-            match manager.holder_count(&p.name).await {
-                Some(n) if n > 0 => format!("{} (open, {} holder(s))", label, n),
-                _ => format!("{} (open)", label),
+        let line = if v.info.opened {
+            if v.info.holders > 0 {
+                format!("{} (open, {} holder(s))", label, v.info.holders)
+            } else {
+                format!("{} (open)", label)
             }
         } else {
             format!("{} (closed)", label)
@@ -311,7 +303,10 @@ async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
         Some(d) => d,
         None => return error_text("Missing required parameter: data".into()),
     };
-    let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("text");
+    let format = args
+        .get("format")
+        .and_then(|f| f.as_str())
+        .unwrap_or("text");
     let auto_newline = args
         .get("auto_newline")
         .and_then(|a| a.as_bool())
@@ -329,7 +324,11 @@ async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
                     .drain_buffer_quiet(&port, timeout_ms, 40)
                     .await
                     .unwrap_or_default();
-                ok_text(format!("Sent {} bytes. Response: {}", n, String::from_utf8_lossy(&resp)))
+                ok_text(format!(
+                    "Sent {} bytes. Response: {}",
+                    n,
+                    String::from_utf8_lossy(&resp)
+                ))
             } else {
                 ok_text(format!("Sent {} bytes", n))
             }
@@ -343,15 +342,25 @@ async fn tool_serial_read(args: Value, manager: &SerialManager) -> Value {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
-    let timeout_ms = args.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(100);
-    let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("text");
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(100);
+    let format = args
+        .get("format")
+        .and_then(|f| f.as_str())
+        .unwrap_or("text");
 
     let data = match manager.drain_buffer(&port, timeout_ms).await {
         Ok(d) => d,
         Err(e) => return error_text(e.to_string()),
     };
     let output = match format {
-        "hex" => data.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(""),
+        "hex" => data
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<_>>()
+            .join(""),
         _ => String::from_utf8_lossy(&data).to_string(),
     };
     ok_text(output)
@@ -365,8 +374,9 @@ async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
     match manager.status(&port).await {
         Some(cfg) => {
             let holders = manager.holder_count(&port).await.unwrap_or(0);
+            // ports.json 按裸名存——复合键先剥前缀再查
             let alias = crate::port_meta_store::load()
-                .get(&port)
+                .get(crate::bare_name_of(&port))
                 .and_then(|m| m.alias.clone());
             let alias_line = match alias {
                 Some(a) => format!("Alias: {}\n", a),
@@ -390,8 +400,14 @@ async fn tool_serial_grep(args: Value, manager: &SerialManager) -> Value {
         Some(p) => p,
         None => return error_text("Missing required parameter: pattern".into()),
     };
-    let timeout_ms = args.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(1000);
-    let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("text");
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(1000);
+    let format = args
+        .get("format")
+        .and_then(|f| f.as_str())
+        .unwrap_or("text");
 
     if format == "hex" {
         let pat = match hex_to_bytes(pattern) {
@@ -411,7 +427,11 @@ async fn tool_serial_grep(args: Value, manager: &SerialManager) -> Value {
         let out: Vec<String> = matches
             .iter()
             .map(|(pos, ctx)| {
-                let hex: String = ctx.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+                let hex: String = ctx
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 format!("offset {}: {}", pos, hex)
             })
             .collect();
@@ -505,17 +525,31 @@ async fn tool_serial_save_script(args: Value, script_bus: &broadcast::Sender<()>
         Some(c) => c.to_string(),
         None => return error_text("Missing required parameter: code".into()),
     };
-    let description = args.get("description").and_then(|v| v.as_str()).map(String::from);
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let group = args.get("group").and_then(|v| v.as_str()).map(String::from);
     // params 反序列化为 ScriptParam;格式不符则当空(宽松,不因 params 误填阻断保存)。
     let params: Vec<ss_core::ScriptParam> = args
         .get("params")
         .and_then(|p| serde_json::from_value(p.clone()).ok())
         .unwrap_or_default();
-    let script = ss_core::Script { description, group, params, code };
+    let script = ss_core::Script {
+        description,
+        group,
+        params,
+        code,
+    };
     match crate::scripts_store::upsert(&name, script) {
-        Ok(Some(_)) => { let _ = script_bus.send(()); ok_text(format!("已覆盖脚本「{}」", name)) }
-        Ok(None) => { let _ = script_bus.send(()); ok_text(format!("已保存新脚本「{}」", name)) }
+        Ok(Some(_)) => {
+            let _ = script_bus.send(());
+            ok_text(format!("已覆盖脚本「{}」", name))
+        }
+        Ok(None) => {
+            let _ = script_bus.send(());
+            ok_text(format!("已保存新脚本「{}」", name))
+        }
         Err(e) => error_text(format!("保存失败: {}", e)),
     }
 }
@@ -543,7 +577,10 @@ async fn tool_serial_delete_script(args: Value, script_bus: &broadcast::Sender<(
         _ => return error_text("Missing required parameter: name".into()),
     };
     match crate::scripts_store::remove(&name) {
-        Ok(Some(_)) => { let _ = script_bus.send(()); ok_text(format!("已删除脚本「{}」", name)) }
+        Ok(Some(_)) => {
+            let _ = script_bus.send(());
+            ok_text(format!("已删除脚本「{}」", name))
+        }
         Ok(None) => ok_text(format!("无脚本「{}」(无需删除)", name)),
         Err(e) => error_text(format!("删除失败: {}", e)),
     }
@@ -642,38 +679,61 @@ mod tests {
     use ss_core::{EventBus, RealPortOpener, SerialManager};
     use std::sync::Arc;
 
-    fn make_manager() -> Arc<SerialManager> {
-        Arc::new(SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener)))
+    /// 测试用 AppState(RealPortOpener + 空设备表;script_bus receiver 丢弃——
+    /// 验证广播的测试自建 channel 保留 rx)。
+    fn make_state() -> AppState {
+        let (tx, _) = broadcast::channel::<()>(16);
+        make_state_with_script_bus(tx)
     }
 
-    /// 测试用 script_bus(丢弃 receiver,仅满足签名;验证广播的测试自建 channel 保留 rx)。
-    fn bus() -> broadcast::Sender<()> {
-        broadcast::channel(16).0
+    fn make_state_with_script_bus(script_tx: broadcast::Sender<()>) -> AppState {
+        let event_bus = Arc::new(EventBus::new(16));
+        let (meta_tx, _) = broadcast::channel(16);
+        AppState {
+            manager: Arc::new(SerialManager::new(
+                event_bus.clone(),
+                Arc::new(RealPortOpener),
+            )),
+            event_bus,
+            meta_bus: Arc::new(meta_tx),
+            script_bus: Arc::new(script_tx.clone()),
+            enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            devices: Arc::new(crate::device::DeviceClientManager::empty(script_tx)),
+        }
     }
 
     #[tokio::test]
     async fn parse_error() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request("not json", &m, false, &sem, &bus()).await;
+        let resp = handle_request("not json", &make_state()).await;
         assert_eq!(resp["error"]["code"], -32700);
     }
 
     #[tokio::test]
     async fn initialize() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &m, false, &sem, &bus()).await;
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            &make_state(),
+        )
+        .await;
         assert_eq!(resp["result"]["serverInfo"]["name"], "serial-studio");
     }
 
     #[tokio::test]
     async fn tools_list_has_ten() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &m, false, &sem, &bus()).await;
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            &make_state(),
+        )
+        .await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10, "7 个执行类 + 3 个脚本库管理(save/list/delete)");
+        assert_eq!(
+            tools.len(),
+            10,
+            "7 个执行类 + 3 个脚本库管理(save/list/delete)"
+        );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"serial_save_script"));
         assert!(names.contains(&"serial_list_scripts"));
@@ -683,37 +743,33 @@ mod tests {
     /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_run_script 应被拒。
     #[tokio::test]
     async fn serial_run_script_disabled_by_default() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"code":"await sleep(1)"}}}"#;
-        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
     }
 
     #[tokio::test]
     async fn serial_list_returns_text() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
-        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(req, &make_state()).await;
         assert!(resp["result"]["content"][0]["text"].is_string());
     }
 
     #[tokio::test]
     async fn serial_status_no_port_opened() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_status","arguments":{}}}"#;
-        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
     }
 
     /// prompts/list 含 serial_script_guide,且 prompts/get 返回的指南含关键约束。
     #[tokio::test]
     async fn prompts_include_script_guide() {
-        let m = make_manager();
-    let sem = tokio::sync::Semaphore::new(4);
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#, &m, false, &sem, &bus()).await;
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list"}"#,
+            &make_state(),
+        )
+        .await;
         let names: Vec<&str> = resp["result"]["prompts"]
             .as_array()
             .unwrap()
@@ -722,17 +778,17 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"serial_script_guide"),
-            "prompts 应含 serial_script_guide: {:?}", names
+            "prompts 应含 serial_script_guide: {:?}",
+            names
         );
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"serial_script_guide"}}"#,
-            &m,
-            false,
-            &sem,
-            &bus(),
+            &make_state(),
         )
         .await;
-        let text = resp["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        let text = resp["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
         assert!(text.contains("expect"), "脚本指南应含 expect 说明");
         assert!(text.contains("正则字符串"), "脚本指南应含 pattern 约束");
     }
@@ -764,16 +820,17 @@ mod tests {
     /// save 不受 enable_scripting 限制:默认 false 也能存(数据管理非执行)。
     #[tokio::test]
     async fn save_script_not_blocked_by_enable_scripting() {
-        let m = make_manager();
-        let sem = tokio::sync::Semaphore::new(4);
         ensure_test_config_dir();
         let name = unique_name("save");
         let req = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
             name
         );
-        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
-        assert_ne!(resp["result"]["isError"], true, "enable_scripting=false 不应拦 save");
+        let resp = handle_request(&req, &make_state()).await;
+        assert_ne!(
+            resp["result"]["isError"], true,
+            "enable_scripting=false 不应拦 save"
+        );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("已保存"), "应提示已保存: {}", text);
     }
@@ -781,8 +838,6 @@ mod tests {
     /// 端到端:save(带 code marker)→ list(含 name,不含 code 全文)→ delete(已删除)→ delete(幂等)。
     #[tokio::test]
     async fn save_list_delete_roundtrip() {
-        let m = make_manager();
-        let sem = tokio::sync::Semaphore::new(4);
         ensure_test_config_dir();
         let name = unique_name("roundtrip");
         let marker = format!("SECRET-CODE-{}", name);
@@ -791,33 +846,34 @@ mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await send('{}')","description":"e2e"}}}}}}"#,
             name, marker
         );
-        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(&req, &make_state()).await;
         assert_ne!(resp["result"]["isError"], true);
 
         // list:含刚保存的 name,但不含 code 全文(marker)。
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#,
-            &m,
-            false,
-            &sem,
-            &bus(),
+            &make_state(),
         )
         .await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains(&name), "list 应含刚保存的 name");
-        assert!(!text.contains(&marker), "list 不应泄露 code 全文(marker): {}", text);
+        assert!(
+            !text.contains(&marker),
+            "list 不应泄露 code 全文(marker): {}",
+            text
+        );
 
         // delete:命中 → 已删除。
         let req = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_delete_script","arguments":{{"name":"{}"}}}}}}"#,
             name
         );
-        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(&req, &make_state()).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("已删除"), "删存在的应提示已删除: {}", text);
 
         // delete 幂等:再删 → 非 isError,提示无需删除。
-        let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(&req, &make_state()).await;
         assert_ne!(resp["result"]["isError"], true, "删不存在应幂等成功");
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("无需删除"), "幂等应提示无需删除: {}", text);
@@ -826,8 +882,6 @@ mod tests {
     /// save 覆盖语义:同名再存,提示"已覆盖"。
     #[tokio::test]
     async fn save_script_overwrites() {
-        let m = make_manager();
-        let sem = tokio::sync::Semaphore::new(4);
         ensure_test_config_dir();
         let name = unique_name("overwrite");
         for code in ["v1", "v2"] {
@@ -835,40 +889,39 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await send('{}')"}}}}}}"#,
                 name, code
             );
-            let resp = handle_request(&req, &m, false, &sem, &bus()).await;
+            let resp = handle_request(&req, &make_state()).await;
             assert_ne!(resp["result"]["isError"], true);
         }
         // 第二次应提示已覆盖(list 验证只剩一份)
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#,
-            &m, false, &sem, &bus(),
+            &make_state(),
         ).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
-        let mine: Vec<_> = entries.iter().filter(|e| e["name"].as_str() == Some(&name)).collect();
+        let mine: Vec<_> = entries
+            .iter()
+            .filter(|e| e["name"].as_str() == Some(&name))
+            .collect();
         assert_eq!(mine.len(), 1, "覆盖后应只剩一份: {:?}", mine);
     }
 
     /// save 缺必填参数(name/code)→ isError。
     #[tokio::test]
     async fn save_script_missing_params_errors() {
-        let m = make_manager();
-        let sem = tokio::sync::Semaphore::new(4);
         // 缺 code
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"x"}}}"#;
-        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
         // 缺 name
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"code":"x"}}}"#;
-        let resp = handle_request(req, &m, false, &sem, &bus()).await;
+        let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
     }
 
     /// save/delete 命中触发 script_bus 广播;list 不触发;delete 幂等(None)不触发。
     #[tokio::test]
     async fn save_delete_broadcast_script_bus() {
-        let m = make_manager();
-        let sem = tokio::sync::Semaphore::new(4);
         ensure_test_config_dir();
         let (tx, mut rx) = broadcast::channel::<()>(16);
         let name = unique_name("bcast");
@@ -878,12 +931,12 @@ mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
             name
         );
-        handle_request(&req, &m, false, &sem, &tx).await;
+        handle_request(&req, &make_state_with_script_bus(tx.clone())).await;
         assert!(rx.try_recv().is_ok(), "save 应触发 script_bus");
 
         // list → 不广播(只读)
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#;
-        handle_request(req, &m, false, &sem, &tx).await;
+        handle_request(req, &make_state_with_script_bus(tx.clone())).await;
         assert!(rx.try_recv().is_err(), "list 不应触发 script_bus");
 
         // delete(命中)→ 广播
@@ -891,11 +944,14 @@ mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_delete_script","arguments":{{"name":"{}"}}}}}}"#,
             name
         );
-        handle_request(&req, &m, false, &sem, &tx).await;
+        handle_request(&req, &make_state_with_script_bus(tx.clone())).await;
         assert!(rx.try_recv().is_ok(), "delete 命中应触发 script_bus");
 
         // delete(幂等 None)→ 不广播
-        handle_request(&req, &m, false, &sem, &tx).await;
-        assert!(rx.try_recv().is_err(), "delete 幂等未变更不应触发 script_bus");
+        handle_request(&req, &make_state_with_script_bus(tx.clone())).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "delete 幂等未变更不应触发 script_bus"
+        );
     }
 }

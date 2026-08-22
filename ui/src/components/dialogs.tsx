@@ -71,7 +71,7 @@ export function SerialConfigDialog({
         </h3>
         <div className="dialog__sub">{port}</div>
         <ConfigRow label="别名">
-          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，描述此端口连接的设备" className="field" autoCapitalize="off" spellCheck={false} />
+          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="可选，留空清除" className="field" autoCapitalize="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="波特率">
           {/* 常用档 select + 「自定义…」切自由输入(如 250000,WS2812/DMX 常用)。

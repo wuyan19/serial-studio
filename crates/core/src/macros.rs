@@ -14,8 +14,8 @@
 use crate::error::SerialError;
 use crate::manager::SerialManager;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 一个宏定义。
@@ -40,7 +40,9 @@ pub enum MacroStep {
         #[serde(default = "default_auto_newline")]
         auto_newline: bool,
     },
-    Delay { ms: u64 },
+    Delay {
+        ms: u64,
+    },
     Expect {
         pattern: String,
         #[serde(default = "default_expect_timeout")]
@@ -198,7 +200,10 @@ mod tests {
 
     /// 不 open 真实端口:Delay 中断测试只依赖分段轮询,不碰串口。
     fn mgr() -> Arc<SerialManager> {
-        Arc::new(SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(RealPortOpener)))
+        Arc::new(SerialManager::new(
+            Arc::new(EventBus::new(16)),
+            Arc::new(RealPortOpener),
+        ))
     }
     fn abort_flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
@@ -252,7 +257,12 @@ mod tests {
     fn default_values_applied() {
         let json = r#"{"steps":[{"type":"send","data":"X"}]}"#;
         let m: Macro = serde_json::from_str(json).unwrap();
-        if let MacroStep::Send { format, auto_newline, .. } = &m.steps[0] {
+        if let MacroStep::Send {
+            format,
+            auto_newline,
+            ..
+        } = &m.steps[0]
+        {
             assert_eq!(format, "text");
             assert!(*auto_newline);
         }
@@ -275,7 +285,15 @@ mod tests {
         let start = Instant::now();
         let result = run_macro("COM0", &mac, &mgr(), abort).await;
         stopper.await.unwrap();
-        assert!(matches!(result, Err(MacroError::Aborted)), "应被中断: {:?}", result);
-        assert!(start.elapsed() < Duration::from_secs(2), "应秒级返回: {:?}", start.elapsed());
+        assert!(
+            matches!(result, Err(MacroError::Aborted)),
+            "应被中断: {:?}",
+            result
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "应秒级返回: {:?}",
+            start.elapsed()
+        );
     }
 }

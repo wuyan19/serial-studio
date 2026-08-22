@@ -38,6 +38,8 @@ export interface Transport {
   onPortClosed(cb: (port: string) => void): () => void;
   /** 设备意外断开(USB 拔出):前端保留 tab 可重连(区别于 onPortClosed 的删 tab)。 */
   onPortDisconnected(cb: (port: string) => void): () => void;
+  /** 远程设备在线状态快照变化(设备上下线/增删)。本地:后端 devices-changed 事件;远程:透传远端 ss 的 devices 消息。 */
+  onDevices(cb: (devices: { id: string; online: boolean }[]) => void): () => void;
   /** 持有者数量变化（有人加入/退出，端口未关）。 */
   onHolders(cb: (port: string, holders: number) => void): () => void;
   /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
@@ -87,6 +89,7 @@ export interface TransportEventsMap {
   opened: (port: string) => void;
   closed: (port: string) => void;
   disconnected: (port: string) => void;
+  devices: (devices: { id: string; online: boolean }[]) => void;
   holders: (port: string, holders: number) => void;
   metaChanged: () => void;
   scriptsChanged: () => void;
@@ -115,6 +118,7 @@ abstract class TransportEventBase {
     scriptResult: new Set(),
     scriptLog: new Set(),
     connected: new Set(),
+    devices: new Set(),
   };
 
   onData(cb: TransportEventsMap["data"]) {
@@ -136,6 +140,10 @@ abstract class TransportEventBase {
   onPortDisconnected(cb: TransportEventsMap["disconnected"]) {
     this.handlers.disconnected.add(cb);
     return () => { this.handlers.disconnected.delete(cb); };
+  }
+  onDevices(cb: TransportEventsMap["devices"]) {
+    this.handlers.devices.add(cb);
+    return () => { this.handlers.devices.delete(cb); };
   }
   onHolders(cb: TransportEventsMap["holders"]) {
     this.handlers.holders.add(cb);
@@ -274,6 +282,10 @@ export class RemoteTransport extends TransportEventBase implements Transport {
         case "meta_changed":
           this.handlers.metaChanged.forEach((cb) => cb());
           break;
+        case "devices":
+          // 远端 ss 的设备快照(其注册的远程设备)——透传给上层(web/远窗形态可见级联设备)
+          this.handlers.devices.forEach((cb) => cb(msg.devices ?? []));
+          break;
         case "scripts_changed":
           this.handlers.scriptsChanged.forEach((cb) => cb());
           break;
@@ -367,6 +379,13 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     this.ws.send(payload);
   }
 
+  /** 完整 pid → 远端侧线名（egress 剥首段设备前缀；无前缀的旧值原样）。
+   *  本 transport 的端口键模型：App 层统一用完整 pid（`devId::...`），线上只说远端侧键。 */
+  private wireName(pid: string): string {
+    const idx = pid.indexOf("::");
+    return idx < 0 ? pid : pid.slice(idx + 2);
+  }
+
   async list() {
     await this.send(JSON.stringify({ action: "list" }));
   }
@@ -375,31 +394,32 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
+    const wire = this.wireName(port);
     // 先挂 controller 再发：确保 "acquired" 回复到达时 controller 已就位（不靠微任务时序）。
     const result = new Promise<AcquiredResult>((resolve, reject) => {
-      this.openResolvers.set(port, { resolve, reject });
+      this.openResolvers.set(wire, { resolve, reject });
     });
-    await this.send(JSON.stringify({ action: "open", port, config }));
+    await this.send(JSON.stringify({ action: "open", port: wire, config }));
     return result;
   }
   async close(port: string) {
-    await this.send(JSON.stringify({ action: "close", port }));
+    await this.send(JSON.stringify({ action: "close", port: this.wireName(port) }));
   }
   async setAlias(port: string, alias: string) {
-    await this.send(JSON.stringify({ action: "set_alias", port, alias }));
+    await this.send(JSON.stringify({ action: "set_alias", port: this.wireName(port), alias }));
   }
   async forceClose(_port: string) {
     // 强制关闭是本地特权，远程不可用（防止远程误操作踢掉他人）
     throw new Error("强制关闭仅本地可用");
   }
   async write(port: string, data: string) {
-    await this.send(JSON.stringify({ action: "write", port, data, encoding: "text" }));
+    await this.send(JSON.stringify({ action: "write", port: this.wireName(port), data, encoding: "text" }));
   }
   async runMacro(name: string, port: string, macro: Macro, runId: string) {
-    await this.send(JSON.stringify({ action: "run_macro", name, port, macro, run_id: runId }));
+    await this.send(JSON.stringify({ action: "run_macro", name, port: this.wireName(port), macro, run_id: runId }));
   }
   async runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string) {
-    await this.send(JSON.stringify({ action: "run_script", name, port, script, args, run_id: runId }));
+    await this.send(JSON.stringify({ action: "run_script", name, port: this.wireName(port), script, args, run_id: runId }));
   }
   async stopScript(runId: string) {
     await this.send(JSON.stringify({ action: "stop_script", run_id: runId }));
@@ -504,6 +524,17 @@ export class LocalTransport extends TransportEventBase implements Transport {
       this.unlisten.push(
         await listen("scripts-changed", () =>
           this.handlers.scriptsChanged.forEach((cb) => cb()))
+      );
+      this.unlisten.push(
+        await listen("devices-changed", async () => {
+          // 快照式:事件只触发拉取,状态以后端为唯一真相
+          try {
+            const devices = await tauriInvoke<{ id: string; online: boolean }[]>("list_devices");
+            this.handlers.devices.forEach((cb) => cb(devices));
+          } catch (e) {
+            console.error("拉取设备状态失败", e);
+          }
+        })
       );
     };
     setup().catch((e) => console.error("本地事件订阅失败", e));

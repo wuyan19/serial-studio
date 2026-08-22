@@ -9,6 +9,7 @@
 
 use crate::error::SerialError;
 use crate::event_bus::{EventBus, SerialEvent};
+use crate::port_io::PortIo;
 use crate::rx_buffer::RxBuffer;
 use crate::types::{SerialConfig, SessionId};
 use bytes::Bytes;
@@ -42,6 +43,10 @@ pub struct PhysicalLayer {
     pub join_handle: JoinHandle<()>,
     pub abort_handle: AbortHandle,
     pub command_tx: mpsc::Sender<PortCommand>,
+    /// 读线程退出旗标。teardown 的 abort 路径必须显式置位——run() 被 abort 时
+    /// 收尾代码(skip),不置位则读线程永循环、端口句柄永不 Drop(远端端口的
+    /// ClosePort 发不出 → 远端泄漏;本地口则 OS 句柄不释放)。
+    pub quit: Arc<AtomicBool>,
 }
 
 /// 端口任务句柄(SerialManager 持有)。逻辑层 + 物理层解耦。
@@ -62,7 +67,8 @@ pub struct PortHandle {
 
 pub async fn run(
     port_name: String,
-    port: Box<dyn serialport::SerialPort>,
+    port: Box<dyn PortIo>,
+    quit: Arc<AtomicBool>,
     mut command_rx: mpsc::Receiver<PortCommand>,
     event_bus: Arc<EventBus>,
     rx_buffer: Arc<RxBuffer>,
@@ -93,8 +99,8 @@ pub async fn run(
 
     // 读：持续 blocking 线程（spawn_blocking 内 loop read），无每次 spawn 的调度间隙。
     // 直接 push + publish（都是同步调用，blocking 线程可直接做）。
-    // quit flag 控制 close 时退出。
-    let quit = Arc::new(AtomicBool::new(false));
+    // quit 由调用方(manager)创建并持有于 PhysicalLayer——teardown 的 abort 路径
+    // 也要能置位(running 内部创建的话 abort 后无人能触达)。
     let quit_read = Arc::clone(&quit);
     let port_for_read = Arc::clone(&read_port);
     let event_bus_read = Arc::clone(&event_bus);
@@ -112,41 +118,55 @@ pub async fn run(
             // “忽快忽慢”。代价：数据最多等一个周期(~5ms)才被读。
             // 5ms ≈ 每帧(rAF 16ms)约 3 批；要更匀调大、要更低延迟调小。
             std::thread::sleep(Duration::from_millis(5));
+            // 周期内 drain 到空:n < buf.len() 视为缓冲已尽(串口 read 语义),
+            // 满读(== buf.len())则连读——否则 5ms×1024B 封顶 ~205KB/s,
+            // 3M baud 设备会静默丢近半数据(OS 缓冲先溢出)。
             let mut buf = [0u8; 1024];
-            let n = {
-                let mut guard = match port_for_read.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                match guard.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        continue;
-                    }
-                    Err(e) => {
-                        event_bus_read.publish(SerialEvent::Error {
-                            port: name_for_read.clone(),
-                            message: format!("读取错误: {}", e),
-                        });
-                        // 设备断开:通知 manager drainer(标 disconnected + 发 PortDisconnected)。
-                        // spawn_blocking 内不能 .await,用 try_send 同步发;通道满(极端)丢则 warn 留痕
-                        if disconnect_tx_read
-                            .try_send(Disconnect { port: name_for_read.clone(), instance: instance_read })
-                            .is_err()
-                        {
-                            tracing::warn!("端口 {} 断开通知被丢弃(drainer 通道满,可能留僵尸)", name_for_read);
+            loop {
+                let n = {
+                    let mut guard = match port_for_read.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    match guard.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                            break; // 本周期无数据(或已读尽)
                         }
-                        return;
+                        Err(e) => {
+                            event_bus_read.publish(SerialEvent::Error {
+                                port: name_for_read.clone(),
+                                message: format!("读取错误: {}", e),
+                            });
+                            // 设备断开:通知 manager drainer(标 disconnected + 发 PortDisconnected)。
+                            // spawn_blocking 内不能 .await,用 try_send 同步发;通道满(极端)丢则 warn 留痕
+                            if disconnect_tx_read
+                                .try_send(Disconnect {
+                                    port: name_for_read.clone(),
+                                    instance: instance_read,
+                                })
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    "端口 {} 断开通知被丢弃(drainer 通道满,可能留僵尸)",
+                                    name_for_read
+                                );
+                            }
+                            return;
+                        }
                     }
+                };
+                if n > 0 {
+                    let data = buf[..n].to_vec();
+                    rx_buffer_read.push(&data);
+                    event_bus_read.publish(SerialEvent::DataReceived {
+                        port: name_for_read.clone(),
+                        data,
+                    });
                 }
-            };
-            if n > 0 {
-                let data = buf[..n].to_vec();
-                rx_buffer_read.push(&data);
-                event_bus_read.publish(SerialEvent::DataReceived {
-                    port: name_for_read.clone(),
-                    data,
-                });
+                if n < buf.len() {
+                    break; // 缓冲已尽,回到 5ms 匀化节奏
+                }
             }
         }
     });

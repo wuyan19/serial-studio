@@ -11,7 +11,10 @@ use crate::opener::PortOpener;
 use crate::port_task::{self, Disconnect, PhysicalLayer, PortCommand, PortHandle};
 use crate::rx_buffer::RxBuffer;
 use crate::serial;
-use crate::types::{AcquireResult, PortInfo, ReleaseOutcome, SerialConfig, SessionId};
+use crate::types::{
+    compose_port_key, normalize_port_key, AcquireResult, PortInfo, ReleaseOutcome, SerialConfig,
+    SessionId, LOCAL_DEVICE_ID,
+};
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,19 +87,39 @@ impl SerialManager {
     }
 
     /// 列出系统串口，附加本管理器的 opened 状态与持有者数。
+    /// 端口名为复合键(`local::COM3`),与 map 键同一形态——远端设备的端口由
+    /// server 层的设备客户端另行合并(见 snapshot_open_states)。
     pub async fn list_ports(&self) -> Vec<PortInfo> {
         let names = serial::list_port_names();
         let ports = self.ports.lock().await;
         names
             .into_iter()
             .map(|name| {
-                let handle = ports.get(&name);
+                let key = compose_port_key(LOCAL_DEVICE_ID, &name);
+                let handle = ports.get(&key);
                 PortInfo {
                     opened: handle.is_some(),
                     holders: handle.map(|h| h.holders.len()).unwrap_or(0),
                     disconnected: handle.map(|h| h.disconnected).unwrap_or(false),
-                    name,
+                    name: key,
                 }
+            })
+            .collect()
+    }
+
+    /// 已占有端口的运行时快照(键含远端复合键,本机枚举之外的条目)。
+    /// server 层合并远端设备端口列表时,用本地占有权覆盖远端缓存——
+    /// opened/holders/disconnected 以本地为唯一真相(远端 WS 断后其缓存是陈旧的)。
+    pub async fn snapshot_open_states(&self) -> Vec<PortInfo> {
+        self.ports
+            .lock()
+            .await
+            .iter()
+            .map(|(name, h)| PortInfo {
+                name: name.clone(),
+                opened: true,
+                holders: h.holders.len(),
+                disconnected: h.disconnected,
             })
             .collect()
     }
@@ -105,17 +128,25 @@ impl SerialManager {
     pub async fn list_open_ports(&self) -> Vec<String> {
         // 排除 disconnected(占有权在但物理断、不可操作):telnet 列表 / mcp resolve_port
         // 只该列当前可用的已开端口,断开的不应被自动选/连
-        self.ports.lock().await.iter().filter(|(_, h)| !h.disconnected).map(|(p, _)| p.clone()).collect()
+        self.ports
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, h)| !h.disconnected)
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// 占有端口份额：首个持有者真正打开，后续持有者附加（忽略其 config）。
     /// 并发安全：慢路径打开后做 TOCTOU 重检，避免泄漏句柄与相互覆盖。
+    /// 端口键入口规范化(裸名补 `local::`),map 键恒为复合键单一形态。
     pub async fn acquire(
         &self,
         port: String,
         config: SerialConfig,
         session: SessionId,
     ) -> Result<AcquireResult, SerialError> {
+        let port = normalize_port_key(&port);
         self.maybe_spawn_drainer(); // 首次 acquire 启动 drainer(new() 不能 spawn:无 reactor 会 panic)
 
         // 锁内判定三分支 + 附加(HashSet 幂等,同 session 重复 acquire 不重复计数):
@@ -123,7 +154,10 @@ impl SerialManager {
         //   Reopen — 端口已占有但设备断开(disconnected) → 重建物理层,复用占有权(holders 不动)
         //   Open   — 端口未占有 → 真正打开
         enum Action {
-            Attach { config: SerialConfig, holders: usize },
+            Attach {
+                config: SerialConfig,
+                holders: usize,
+            },
             Reopen,
             Open,
         }
@@ -138,10 +172,15 @@ impl SerialManager {
                     let was_new = handle.holders.insert(session);
                     let holders = handle.holders.len();
                     if was_new {
-                        self.event_bus
-                            .publish(SerialEvent::HoldersChanged { port: port.clone(), holders });
+                        self.event_bus.publish(SerialEvent::HoldersChanged {
+                            port: port.clone(),
+                            holders,
+                        });
                     }
-                    Action::Attach { config: handle.config.clone(), holders }
+                    Action::Attach {
+                        config: handle.config.clone(),
+                        holders,
+                    }
                 }
             } else {
                 Action::Open
@@ -179,9 +218,18 @@ impl SerialManager {
                     let task_name = port.clone();
                     let disconnect_tx_task = self.disconnect_tx.clone();
                     let new_instance = NEXT_PORT_INSTANCE.fetch_add(1, Ordering::Relaxed);
+                    let quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let quit_for_task = Arc::clone(&quit);
                     let join_handle = tokio::spawn(async move {
                         port_task::run(
-                            task_name, opened, command_rx, event_bus, rx_buf_clone, disconnect_tx_task, new_instance,
+                            task_name,
+                            opened,
+                            quit_for_task,
+                            command_rx,
+                            event_bus,
+                            rx_buf_clone,
+                            disconnect_tx_task,
+                            new_instance,
                         )
                         .await;
                     });
@@ -189,9 +237,17 @@ impl SerialManager {
                     handle.config = config.clone();
                     handle.instance = new_instance;
                     handle.disconnected = false;
-                    handle.physical = Some(PhysicalLayer { join_handle, abort_handle, command_tx });
+                    handle.physical = Some(PhysicalLayer {
+                        join_handle,
+                        abort_handle,
+                        command_tx,
+                        quit,
+                    });
                     if was_new {
-                        self.event_bus.publish(SerialEvent::HoldersChanged { port: port.clone(), holders });
+                        self.event_bus.publish(SerialEvent::HoldersChanged {
+                            port: port.clone(),
+                            holders,
+                        });
                     }
                     AcquireResult::Opened { config, holders }
                 } else {
@@ -200,9 +256,15 @@ impl SerialManager {
                     let was_new = handle.holders.insert(session);
                     let holders = handle.holders.len();
                     if was_new {
-                        self.event_bus.publish(SerialEvent::HoldersChanged { port: port.clone(), holders });
+                        self.event_bus.publish(SerialEvent::HoldersChanged {
+                            port: port.clone(),
+                            holders,
+                        });
                     }
-                    AcquireResult::Attached { config: handle.config.clone(), holders }
+                    AcquireResult::Attached {
+                        config: handle.config.clone(),
+                        holders,
+                    }
                 }
             } else if is_open {
                 // Open:构造新 PortHandle
@@ -213,9 +275,18 @@ impl SerialManager {
                 let task_name = port.clone();
                 let disconnect_tx_task = self.disconnect_tx.clone();
                 let instance = NEXT_PORT_INSTANCE.fetch_add(1, Ordering::Relaxed);
+                let quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let quit_for_task = Arc::clone(&quit);
                 let join_handle = tokio::spawn(async move {
                     port_task::run(
-                        task_name, opened, command_rx, event_bus, rx_buf_clone, disconnect_tx_task, instance,
+                        task_name,
+                        opened,
+                        quit_for_task,
+                        command_rx,
+                        event_bus,
+                        rx_buf_clone,
+                        disconnect_tx_task,
+                        instance,
                     )
                     .await;
                 });
@@ -228,7 +299,12 @@ impl SerialManager {
                         rx_buffer,
                         instance,
                         disconnected: false,
-                        physical: Some(PhysicalLayer { join_handle, abort_handle, command_tx }),
+                        physical: Some(PhysicalLayer {
+                            join_handle,
+                            abort_handle,
+                            command_tx,
+                            quit,
+                        }),
                     },
                 );
                 AcquireResult::Opened { config, holders: 1 }
@@ -252,6 +328,8 @@ impl SerialManager {
         port: &str,
         session: SessionId,
     ) -> Result<ReleaseOutcome, SerialError> {
+        let key = normalize_port_key(port);
+        let port = key.as_str();
         // 锁内：判定效果；末位则取出 handle 以便锁外拆毁
         let (outcome, mut teardown_handle) = {
             let mut ports = self.ports.lock().await;
@@ -264,7 +342,12 @@ impl SerialManager {
             if handle.holders.is_empty() {
                 (ReleaseOutcome::Closed, ports.remove(port))
             } else {
-                (ReleaseOutcome::Released { remaining: handle.holders.len() }, None)
+                (
+                    ReleaseOutcome::Released {
+                        remaining: handle.holders.len(),
+                    },
+                    None,
+                )
             }
         };
         // 锁外：发布事件 + 拆毁
@@ -279,8 +362,9 @@ impl SerialManager {
                 if let Some(handle) = teardown_handle.take() {
                     Self::teardown(handle).await;
                 }
-                self.event_bus
-                    .publish(SerialEvent::PortClosed { port: port.to_string() });
+                self.event_bus.publish(SerialEvent::PortClosed {
+                    port: port.to_string(),
+                });
             }
             ReleaseOutcome::NotHeld => {}
         }
@@ -320,6 +404,8 @@ impl SerialManager {
         port: &str,
         keep: &HashSet<SessionId>,
     ) -> Result<Vec<SessionId>, SerialError> {
+        let key = normalize_port_key(port);
+        let port = key.as_str();
         let (before, remaining, kicked, teardown) = {
             let mut ports = self.ports.lock().await;
             let handle = ports
@@ -327,17 +413,26 @@ impl SerialManager {
                 .ok_or_else(|| SerialError::NotOpen(port.to_string()))?;
             let before = handle.holders.len();
             // 收集被踢的 session(retain 前非 keep 的),用于发 Kicked 通知 WS 断开连接
-            let kicked: Vec<SessionId> =
-                handle.holders.iter().filter(|s| !keep.contains(s)).copied().collect();
+            let kicked: Vec<SessionId> = handle
+                .holders
+                .iter()
+                .filter(|s| !keep.contains(s))
+                .copied()
+                .collect();
             handle.holders.retain(|s| keep.contains(s));
             let remaining = handle.holders.len();
-            let teardown = if remaining == 0 { ports.remove(port) } else { None };
+            let teardown = if remaining == 0 {
+                ports.remove(port)
+            } else {
+                None
+            };
             (before, remaining, kicked, teardown)
         };
         if let Some(handle) = teardown {
             Self::teardown(handle).await;
-            self.event_bus
-                .publish(SerialEvent::PortClosed { port: port.to_string() });
+            self.event_bus.publish(SerialEvent::PortClosed {
+                port: port.to_string(),
+            });
         } else if remaining < before {
             self.event_bus.publish(SerialEvent::HoldersChanged {
                 port: port.to_string(),
@@ -349,16 +444,25 @@ impl SerialManager {
 
     /// 端口的当前持有者数量（给 UI/status 用）。
     pub async fn holder_count(&self, port: &str) -> Option<usize> {
-        self.ports.lock().await.get(port).map(|h| h.holders.len())
+        let key = normalize_port_key(port);
+        self.ports
+            .lock()
+            .await
+            .get(key.as_str())
+            .map(|h| h.holders.len())
     }
 
-    /// 拆毁端口任务：发 Close → abort → join。release 末位与 force_close_others 共用。
+    /// 拆毁端口任务：发 Close → 置 quit → abort → join。release 末位与 force_close_others 共用。
+    /// quit 必须在 abort **前**置位:Close 2s 超时(慢写阻塞时)会走 abort,被 abort 的
+    /// run() 跳过收尾置位——不预置则读线程永循环、句柄永不 Drop(远端口 ClosePort
+    /// 发不出=远端泄漏;本地口 OS 句柄不释放)。
     async fn teardown(handle: PortHandle) {
         // 仅连接中(physical=Some)需停 port_task;disconnected 时物理层已 None,drop handle 即可
         if let Some(physical) = handle.physical {
             let (tx, rx) = oneshot::channel();
             let _ = physical.command_tx.send(PortCommand::Close(tx)).await;
             let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
+            physical.quit.store(true, Ordering::Relaxed); // abort 路径的读线程退出保障
             physical.abort_handle.abort();
             let _ = tokio::time::timeout(Duration::from_secs(5), physical.join_handle).await;
         }
@@ -366,6 +470,7 @@ impl SerialManager {
 
     /// 写入数据。
     pub async fn write(&self, port: String, data: Bytes) -> Result<usize, SerialError> {
+        let port = normalize_port_key(&port);
         let command_tx = {
             let ports = self.ports.lock().await;
             let handle = ports
@@ -374,7 +479,12 @@ impl SerialManager {
             if handle.disconnected {
                 return Err(SerialError::Disconnected(port));
             }
-            handle.physical.as_ref().expect("connected 必有物理层").command_tx.clone()
+            handle
+                .physical
+                .as_ref()
+                .expect("connected 必有物理层")
+                .command_tx
+                .clone()
         };
 
         let (tx, rx) = oneshot::channel();
@@ -392,32 +502,50 @@ impl SerialManager {
 
     /// 端口是否已打开。
     pub async fn is_open(&self, port: &str) -> bool {
-        self.ports.lock().await.contains_key(port)
+        let key = normalize_port_key(port);
+        self.ports.lock().await.contains_key(key.as_str())
     }
 
     /// 端口是否处于设备断开态(占有权在、物理层已释放,等 reopen)。
     pub async fn is_disconnected(&self, port: &str) -> bool {
-        self.ports.lock().await.get(port).map(|h| h.disconnected).unwrap_or(false)
+        let key = normalize_port_key(port);
+        self.ports
+            .lock()
+            .await
+            .get(key.as_str())
+            .map(|h| h.disconnected)
+            .unwrap_or(false)
     }
 
     // ===== 接收缓冲区方法（MCP / 宏用）=====
 
     async fn get_rx_buffer(&self, port: &str) -> Result<Arc<RxBuffer>, SerialError> {
+        let key = normalize_port_key(port);
         let ports = self.ports.lock().await;
         ports
-            .get(port)
+            .get(key.as_str())
             .map(|h| Arc::clone(&h.rx_buffer))
             .ok_or_else(|| SerialError::NotOpen(port.to_string()))
     }
 
     /// 返回端口配置（status 用）。
     pub async fn status(&self, port: &str) -> Option<SerialConfig> {
-        self.ports.lock().await.get(port).map(|h| h.config.clone())
+        let key = normalize_port_key(port);
+        self.ports
+            .lock()
+            .await
+            .get(key.as_str())
+            .map(|h| h.config.clone())
     }
 
     /// 端口的换行设置（send 用）。
     pub async fn port_line_ending(&self, port: &str) -> Option<crate::types::LineEnding> {
-        self.ports.lock().await.get(port).map(|h| h.config.line_ending)
+        let key = normalize_port_key(port);
+        self.ports
+            .lock()
+            .await
+            .get(key.as_str())
+            .map(|h| h.config.line_ending)
     }
 
     /// 高层发送：text/hex 编码 + 按端口 line_ending 追加换行 + write。
@@ -457,9 +585,11 @@ impl SerialManager {
         idle_ms: u64,
     ) -> Result<Vec<u8>, SerialError> {
         let buf = self.get_rx_buffer(port).await?;
-        Ok(tokio::task::spawn_blocking(move || buf.drain_quiet(deadline_ms, idle_ms))
-            .await
-            .unwrap_or_default())
+        Ok(
+            tokio::task::spawn_blocking(move || buf.drain_quiet(deadline_ms, idle_ms))
+                .await
+                .unwrap_or_default(),
+        )
     }
 
     /// 清空缓冲区。
@@ -476,11 +606,14 @@ impl SerialManager {
         pattern: &str,
         timeout_ms: u64,
     ) -> Result<Vec<String>, SerialError> {
-        let re = regex::Regex::new(pattern).map_err(|e| SerialError::InvalidConfig(e.to_string()))?;
+        let re =
+            regex::Regex::new(pattern).map_err(|e| SerialError::InvalidConfig(e.to_string()))?;
         let buf = self.get_rx_buffer(port).await?;
-        Ok(tokio::task::spawn_blocking(move || buf.grep_text(&re, timeout_ms))
-            .await
-            .unwrap_or_default())
+        Ok(
+            tokio::task::spawn_blocking(move || buf.grep_text(&re, timeout_ms))
+                .await
+                .unwrap_or_default(),
+        )
     }
 
     /// 字节序列匹配缓冲区（非破坏）。
@@ -505,13 +638,16 @@ mod tests {
     //! 桩串口的 read 立即返回非超时错误 → port_task 读循环自行退出，避免阻塞测试运行时。
 
     use super::*;
+    use crate::port_io::PortIo;
     use crate::types::{DataBits, FlowControl, LineEnding, Parity, StopBits};
     use std::io::{self, Read, Write};
     use std::time::Duration;
 
     /// 内存桩串口。disconnect=false:read 返 TimedOut(空闲,读循环 continue,端口保持开);
     /// disconnect=true:read 返非 timeout 错误(模拟设备拔出 → 读循环走断开路径)。
-    struct FakePort { disconnect: bool }
+    struct FakePort {
+        disconnect: bool,
+    }
 
     impl Read for FakePort {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
@@ -530,39 +666,21 @@ mod tests {
             Ok(())
         }
     }
-    impl serialport::SerialPort for FakePort {
-        fn name(&self) -> Option<String> { None }
-        fn baud_rate(&self) -> Result<u32, serialport::Error> { Ok(0) }
-        fn data_bits(&self) -> Result<serialport::DataBits, serialport::Error> { Ok(serialport::DataBits::Eight) }
-        fn flow_control(&self) -> Result<serialport::FlowControl, serialport::Error> { Ok(serialport::FlowControl::None) }
-        fn parity(&self) -> Result<serialport::Parity, serialport::Error> { Ok(serialport::Parity::None) }
-        fn stop_bits(&self) -> Result<serialport::StopBits, serialport::Error> { Ok(serialport::StopBits::One) }
-        fn timeout(&self) -> Duration { Duration::from_millis(100) }
-        fn set_baud_rate(&mut self, _: u32) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_data_bits(&mut self, _: serialport::DataBits) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_flow_control(&mut self, _: serialport::FlowControl) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_parity(&mut self, _: serialport::Parity) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_stop_bits(&mut self, _: serialport::StopBits) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_timeout(&mut self, _: Duration) -> Result<(), serialport::Error> { Ok(()) }
-        fn write_request_to_send(&mut self, _: bool) -> Result<(), serialport::Error> { Ok(()) }
-        fn write_data_terminal_ready(&mut self, _: bool) -> Result<(), serialport::Error> { Ok(()) }
-        fn read_clear_to_send(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-        fn read_data_set_ready(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-        fn read_ring_indicator(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-        fn read_carrier_detect(&mut self) -> Result<bool, serialport::Error> { Ok(false) }
-        fn bytes_to_read(&self) -> Result<u32, serialport::Error> { Ok(0) }
-        fn bytes_to_write(&self) -> Result<u32, serialport::Error> { Ok(0) }
-        fn clear(&self, _: serialport::ClearBuffer) -> Result<(), serialport::Error> { Ok(()) }
-        fn clear_break(&self) -> Result<(), serialport::Error> { Ok(()) }
-        fn set_break(&self) -> Result<(), serialport::Error> { Ok(()) }
-        fn try_clone(&self) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
-            Ok(Box::new(FakePort { disconnect: self.disconnect }))
+    impl PortIo for FakePort {
+        fn try_clone(&self) -> io::Result<Box<dyn PortIo>> {
+            Ok(Box::new(FakePort {
+                disconnect: self.disconnect,
+            }))
         }
     }
 
     struct FakeOpener;
     impl PortOpener for FakeOpener {
-        fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+        fn open(
+            &self,
+            _port: &str,
+            _config: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, SerialError> {
             Ok(Box::new(FakePort { disconnect: false }))
         }
     }
@@ -570,10 +688,94 @@ mod tests {
     /// 慢 opener：open 时 sleep，强制并发 acquire 同时停在慢路径，确定性触发 TOCTOU 重检。
     struct SlowFakeOpener;
     impl PortOpener for SlowFakeOpener {
-        fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+        fn open(
+            &self,
+            _port: &str,
+            _config: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, SerialError> {
             std::thread::sleep(Duration::from_millis(50));
             Ok(Box::new(FakePort { disconnect: false }))
         }
+    }
+
+    /// 回环桩:write 写入的字节可从 read 读回(读写共享同一队列,验证 PortIo
+    /// 读写分离语义——try_clone 的两个句柄见同一底层流)。空读返 TimedOut。
+    struct LoopbackPort {
+        q: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
+    }
+    impl Read for LoopbackPort {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let mut q = self.q.lock().unwrap();
+            if q.is_empty() {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            let n = buf.len().min(q.len());
+            for slot in buf.iter_mut().take(n) {
+                *slot = q.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+    impl Write for LoopbackPort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.q.lock().unwrap().extend(buf.iter().copied());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl PortIo for LoopbackPort {
+        fn try_clone(&self) -> io::Result<Box<dyn PortIo>> {
+            Ok(Box::new(LoopbackPort {
+                q: std::sync::Arc::clone(&self.q),
+            }))
+        }
+    }
+    struct LoopbackOpener;
+    impl PortOpener for LoopbackOpener {
+        fn open(
+            &self,
+            _port: &str,
+            _config: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, SerialError> {
+            Ok(Box::new(LoopbackPort {
+                q: std::sync::Arc::default(),
+            }))
+        }
+    }
+
+    /// PortIo 端到端:write 经命令通道进 PortIo → 读循环拉取 → RxBuffer → drain 读回。
+    /// 证明窄 trait 上的读写分离 + RxBuffer 管道成立(远端 backend 复用同一路径)。
+    #[tokio::test]
+    async fn loopback_port_io_end_to_end() {
+        let m = SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(LoopbackOpener));
+        let s = SessionId::next();
+        m.acquire("COM7".into(), cfg(115200), s).await.unwrap();
+        let n = m
+            .write("COM7".into(), bytes::Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        assert_eq!(n, 5);
+        // 读循环节奏 5ms/批,给一点余量
+        let data = m.drain_buffer("COM7", 2000).await.unwrap();
+        assert_eq!(data, b"hello".to_vec(), "回环数据应经 RxBuffer 流回");
+        let _ = m.release_all(s).await;
+    }
+
+    /// 裸名与复合键指向同一端口条目:入口规范化保证 map 单一形态,
+    /// 裸名 acquire 不会与复合键引用分裂成两个条目(占有权单一事实)。
+    #[tokio::test]
+    async fn bare_name_and_composite_key_are_same_entry() {
+        let m = mgr();
+        let s = SessionId::next();
+        m.acquire("COM7".into(), cfg(115200), s).await.unwrap(); // 裸名进
+        assert!(m.is_open("COM7").await, "裸名查询应命中");
+        assert!(m.is_open("local::COM7").await, "复合键查询应命中同一条目");
+        assert_eq!(m.holder_count("local::COM7").await, Some(1));
+        let res = m.release("COM7", s).await.unwrap(); // 裸名释放
+        assert!(matches!(res, ReleaseOutcome::Closed));
+        assert!(!m.is_open("local::COM7").await);
     }
 
     fn mgr() -> SerialManager {
@@ -636,7 +838,10 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(SerialEvent::HoldersChanged { port, holders }) => {
-                    assert_eq!(port, "COM7");
+                    assert_eq!(
+                        port, "local::COM7",
+                        "事件端口应为复合键(裸名 acquire 已规范化)"
+                    );
                     assert_eq!(holders, 2);
                     found = true;
                     break;
@@ -656,7 +861,11 @@ mod tests {
         let s = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), s).await.unwrap();
         m.acquire("COM7".into(), cfg(115200), s).await.unwrap();
-        assert_eq!(m.holder_count("COM7").await, Some(1), "重复 acquire 不应重复计数");
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(1),
+            "重复 acquire 不应重复计数"
+        );
         let _ = m.release_all(s).await;
     }
 
@@ -693,7 +902,11 @@ mod tests {
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap();
         let out = m.release("COM7", s2).await.unwrap();
         assert!(matches!(out, ReleaseOutcome::NotHeld));
-        assert_eq!(m.holder_count("COM7").await, Some(1), "旁观者 release 不影响端口");
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(1),
+            "旁观者 release 不影响端口"
+        );
         let _ = m.release_all(s1).await; // s1 仍持有,清掉以退出读线程
     }
 
@@ -723,7 +936,10 @@ mod tests {
     #[tokio::test]
     async fn force_close_others_not_open_errors() {
         let m = mgr();
-        let err = m.force_close_others("COM7", &HashSet::new()).await.unwrap_err();
+        let err = m
+            .force_close_others("COM7", &HashSet::new())
+            .await
+            .unwrap_err();
         assert!(matches!(err, SerialError::NotOpen(_)));
     }
 
@@ -734,8 +950,12 @@ mod tests {
         let remote1 = SessionId::next();
         let remote2 = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), local).await.unwrap();
-        m.acquire("COM7".into(), cfg(115200), remote1).await.unwrap();
-        m.acquire("COM7".into(), cfg(115200), remote2).await.unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote1)
+            .await
+            .unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote2)
+            .await
+            .unwrap();
         let keep = HashSet::from([local]);
         let kicked = m.force_close_others("COM7", &keep).await.unwrap();
         assert_eq!(kicked.len(), 2, "踢掉 2 个远程");
@@ -749,8 +969,12 @@ mod tests {
         let m = mgr();
         let remote1 = SessionId::next();
         let remote2 = SessionId::next();
-        m.acquire("COM7".into(), cfg(115200), remote1).await.unwrap();
-        m.acquire("COM7".into(), cfg(115200), remote2).await.unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote1)
+            .await
+            .unwrap();
+        m.acquire("COM7".into(), cfg(115200), remote2)
+            .await
+            .unwrap();
         let keep = HashSet::new(); // 无本地持有者
         let kicked = m.force_close_others("COM7", &keep).await.unwrap();
         assert_eq!(kicked.len(), 2);
@@ -769,14 +993,21 @@ mod tests {
         );
         let (r1, r2) = (r1.unwrap(), r2.unwrap());
         // 恰好一个 Opened、一个 Attached
-        let n_opened = [matches!(r1, AcquireResult::Opened { .. }), matches!(r2, AcquireResult::Opened { .. })]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let n_opened = [
+            matches!(r1, AcquireResult::Opened { .. }),
+            matches!(r2, AcquireResult::Opened { .. }),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
         assert_eq!(n_opened, 1, "应有且仅有一个 Opened（另一为 Attached）");
         assert_eq!(m.holder_count("COM7").await, Some(2));
         // 关键：端口任务只有一个（旧 open 的并发竞态会泄漏/覆盖 handle）
-        assert_eq!(m.list_open_ports().await.len(), 1, "并发 acquire 不应产生重复端口任务");
+        assert_eq!(
+            m.list_open_ports().await.len(),
+            1,
+            "并发 acquire 不应产生重复端口任务"
+        );
         let _ = m.release_all(s1).await;
         let _ = m.release_all(s2).await;
     }
@@ -784,7 +1015,11 @@ mod tests {
     /// 断开型 opener:每次 open 返回 disconnect=true 桩(模拟设备一上电就被拔)。
     struct DisconnectingOpener;
     impl PortOpener for DisconnectingOpener {
-        fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+        fn open(
+            &self,
+            _port: &str,
+            _config: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, SerialError> {
             Ok(Box::new(FakePort { disconnect: true }))
         }
     }
@@ -794,7 +1029,11 @@ mod tests {
     #[derive(Default)]
     struct ReopeningOpener(std::sync::atomic::AtomicUsize);
     impl PortOpener for ReopeningOpener {
-        fn open(&self, _port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+        fn open(
+            &self,
+            _port: &str,
+            _config: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, SerialError> {
             let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(Box::new(FakePort { disconnect: n == 0 }))
         }
@@ -805,12 +1044,15 @@ mod tests {
     #[derive(Default)]
     struct FailingReopenOpener(std::sync::atomic::AtomicUsize);
     impl PortOpener for FailingReopenOpener {
-        fn open(&self, port: &str, _config: &SerialConfig) -> Result<Box<dyn serialport::SerialPort>, SerialError> {
+        fn open(&self, port: &str, _config: &SerialConfig) -> Result<Box<dyn PortIo>, SerialError> {
             let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if n == 0 {
                 Ok(Box::new(FakePort { disconnect: true }))
             } else {
-                Err(SerialError::OpenFailed { port: port.into(), message: "设备未插回".into() })
+                Err(SerialError::OpenFailed {
+                    port: port.into(),
+                    message: "设备未插回".into(),
+                })
             }
         }
     }
@@ -827,7 +1069,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(SerialEvent::PortDisconnected { port }) => {
-                    assert_eq!(port, "COM7");
+                    assert_eq!(port, "local::COM7", "事件端口应为复合键");
                     got = true;
                     break;
                 }
@@ -844,29 +1086,44 @@ mod tests {
 
     #[tokio::test]
     async fn reopen_after_disconnect() {
-        let m = SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(ReopeningOpener::default()));
+        let m = SerialManager::new(
+            Arc::new(EventBus::new(16)),
+            Arc::new(ReopeningOpener::default()),
+        );
         let mut rx = m.event_bus().subscribe();
         let s = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), s).await.unwrap();
         // 等首次断开(PortDisconnected)
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) { break; }
+            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(m.is_open("COM7").await, "断开后占有权保留(端口在 map)");
         assert_eq!(m.holder_count("COM7").await, Some(1));
         // reopen(后续 opener 返 disconnect=false):复用 holder、重建物理层 → Opened
         let res = m.acquire("COM7".into(), cfg(115200), s).await.unwrap();
-        assert!(matches!(res, AcquireResult::Opened { .. }), "reopen 应返回 Opened(物理层重建)");
-        assert_eq!(m.holder_count("COM7").await, Some(1), "reopen 后 holder 复用(仍是 1)");
+        assert!(
+            matches!(res, AcquireResult::Opened { .. }),
+            "reopen 应返回 Opened(物理层重建)"
+        );
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(1),
+            "reopen 后 holder 复用(仍是 1)"
+        );
         let _ = m.release_all(s).await;
     }
 
     #[tokio::test]
     async fn close_after_reopen_non_last() {
         // 根治验证:两 session 共享端口 → 断开(两端 holder 保留)→ reopen(其一)→ 关其一 = 非末位
-        let m = SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(ReopeningOpener::default()));
+        let m = SerialManager::new(
+            Arc::new(EventBus::new(16)),
+            Arc::new(ReopeningOpener::default()),
+        );
         let mut rx = m.event_bus().subscribe();
         let s1 = SessionId::next();
         let s2 = SessionId::next();
@@ -875,15 +1132,24 @@ mod tests {
         // 等首次断开(PortDisconnected)
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) { break; }
+            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(m.holder_count("COM7").await, Some(2), "断开后两端 holder 都保留");
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(2),
+            "断开后两端 holder 都保留"
+        );
         // reopen(s1):物理层重建(复用两端 holder)
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap();
         // 关 s1:非末位(s2 仍持有)→ Released,端口保持(不 PortClosed 波及 s2)
         let out = m.release("COM7", s1).await.unwrap();
-        assert!(matches!(out, ReleaseOutcome::Released { remaining: 1 }), "关其一应非末位(根治:不波及另一端)");
+        assert!(
+            matches!(out, ReleaseOutcome::Released { remaining: 1 }),
+            "关其一应非末位(根治:不波及另一端)"
+        );
         assert!(m.is_open("COM7").await, "s2 仍持有,端口保持");
         assert_eq!(m.holder_count("COM7").await, Some(1));
         let _ = m.release("COM7", s2).await; // 清理读线程
@@ -892,23 +1158,36 @@ mod tests {
     #[tokio::test]
     async fn reopen_failure_leaves_no_phantom_holder() {
         // M1:reopen 失败(设备没插回)→ session 不应留 phantom holder
-        let m = SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(FailingReopenOpener::default()));
+        let m = SerialManager::new(
+            Arc::new(EventBus::new(16)),
+            Arc::new(FailingReopenOpener::default()),
+        );
         let mut rx = m.event_bus().subscribe();
         let s1 = SessionId::next();
         let s2 = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap(); // 首次(n=0,断)
-        // 等断开
+                                                                  // 等断开
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) { break; }
+            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(m.holder_count("COM7").await, Some(1), "断开后 s1 holder 保留");
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(1),
+            "断开后 s1 holder 保留"
+        );
         // s2 尝试 reopen(设备没插回 → open 失败)
         let res = m.acquire("COM7".into(), cfg(115200), s2).await;
         assert!(res.is_err(), "reopen 失败(设备未插回)应返 Err");
         // M1 核心:s2 未留 phantom holder,holders 仍是 s1(1)
-        assert_eq!(m.holder_count("COM7").await, Some(1), "reopen 失败不留 phantom holder");
+        assert_eq!(
+            m.holder_count("COM7").await,
+            Some(1),
+            "reopen 失败不留 phantom holder"
+        );
         // s1 仍能正常 release(末位 → 拆除)
         let out = m.release("COM7", s1).await.unwrap();
         assert!(matches!(out, ReleaseOutcome::Closed));
@@ -924,11 +1203,16 @@ mod tests {
         // 等断开
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) { break; }
+            if matches!(rx.try_recv(), Ok(SerialEvent::PortDisconnected { .. })) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let res = m.write("COM7".into(), Bytes::from_static(b"AT")).await;
-        assert!(matches!(res, Err(SerialError::Disconnected(_))), "断开态 write 返 Disconnected");
+        assert!(
+            matches!(res, Err(SerialError::Disconnected(_))),
+            "断开态 write 返 Disconnected"
+        );
         let _ = m.release_all(s).await;
     }
 }

@@ -11,7 +11,7 @@
  * 端口实际配置、editor-group 分栏（groups + layout 树 + 焦点）。
  * 不持有：UI 开关（对话框/侧栏）、宏/脚本库、remotes、运行卡片（那些不经 transport 回调读取）。
  */
-import { parsePortId, portIdOf } from "./lib";
+import { parsePortId, wireToPid } from "./lib";
 import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
 import type { Group, PaneHalf, PaneNode, PortId, PortInfo, SerialConfig } from "./types";
 
@@ -100,8 +100,20 @@ function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId:
 
 function reduce(s: SessionState, a: SessionAction): SessionState {
   switch (a.type) {
-    case "ports_listed":
-      return { ...s, portsByDev: { ...s.portsByDev, [a.devId]: a.ports } };
+    case "ports_listed": {
+      // 两种列表形态:
+      // - 本地 transport(devId="local"):后端合并视图(本地 + 远端设备桶),
+      //   条目键是本机视角完整键 → 按首段分桶入位(级联条目归直连设备卡,平铺);
+      // - 远程 transport(devId=uuid/"remote"):条目键是远端侧键 → 整体归该桶。
+      const target = (p: PortInfo) => (a.devId === "local" ? parsePortId(p.name).devId : a.devId);
+      const buckets: Record<string, PortInfo[]> = {};
+      for (const p of a.ports) {
+        (buckets[target(p)] ??= []).push(p);
+      }
+      // 只覆盖出现的桶——离线设备的桶不随列表到达(后端缓存保留),由 devOnline 表达状态
+      const portsByDev = { ...s.portsByDev, ...buckets };
+      return { ...s, portsByDev };
+    }
 
     case "dev_online": {
       const devOnline = { ...s.devOnline, [a.devId]: a.online };
@@ -125,7 +137,8 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
     }
 
     case "port_opened_evt": {
-      const pid = portIdOf(a.devId, a.port);
+      // 线名 → pid:本地 transport 线名即复合键(直通),远程才加设备前缀
+      const pid = wireToPid(a.devId, a.port);
       if (!s.disconnectedPorts.has(pid)) return s;
       const disconnectedPorts = new Set(s.disconnectedPorts);
       disconnectedPorts.delete(pid);
@@ -133,7 +146,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
     }
 
     case "port_disconnected_evt": {
-      const pid = portIdOf(a.devId, a.port);
+      const pid = wireToPid(a.devId, a.port);
       if (s.disconnectedPorts.has(pid)) return s;
       const disconnectedPorts = new Set(s.disconnectedPorts);
       disconnectedPorts.add(pid);

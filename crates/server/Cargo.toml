@@ -27,9 +27,8 @@ anyhow = { workspace = true }
 hex = { workspace = true }
 dirs = "6"
 futures-util = "0.3"
+tokio-tungstenite = "0.21"
 rust-embed = "8"
 mime_guess = "2"
 
 [dev-dependencies]
-tokio-tungstenite = "0.21"
-serialport = { workspace = true }

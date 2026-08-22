@@ -39,10 +39,20 @@ describe("port_acquired", () => {
 
   it("acquire 成功清除断开标记（重连路径）", () => {
     let s = withPorts("local::COM3");
-    s = sessionReducer(s, { type: "port_disconnected_evt", devId: "local", port: "COM3" });
+    // 本地 transport 的线名已是复合键(pid ≡ 线名,wireToPid 直通)
+    s = sessionReducer(s, { type: "port_disconnected_evt", devId: "local", port: "local::COM3" });
     expect(s.disconnectedPorts.has("local::COM3")).toBe(true);
     s = sessionReducer(s, { type: "port_acquired", pid: "local::COM3", config: CFG });
     expect(s.disconnectedPorts.has("local::COM3")).toBe(false);
+  });
+
+  it("port_disconnected_evt:远程线名加设备前缀(裸名=旧版远端)", () => {
+    let s = withPorts("uuidA::COM3");
+    // 远程线名是远端侧键:新版远端为复合键、旧版为裸名,wireToPid 均产出设备前缀 pid
+    s = sessionReducer(s, { type: "port_disconnected_evt", devId: "uuidA", port: "COM3" });
+    expect(s.disconnectedPorts.has("uuidA::COM3")).toBe(true);
+    s = sessionReducer(s, { type: "port_disconnected_evt", devId: "uuidA", port: "local::COM3" });
+    expect(s.disconnectedPorts.has("uuidA::local::COM3")).toBe(true);
   });
 
   it("已在某 group 的端口再 acquire（重连重放）不重复进焦点 group——INV-1", () => {

@@ -19,6 +19,7 @@ import type {
 import { leafGroupIds } from "./pane-tree";
 import {
   DEFAULT_CONFIG,
+  displayPortName,
   downloadJson,
   getMode,
   initConn,
@@ -34,6 +35,8 @@ import {
   saveConfig,
   saveConn,
   tauriInvoke,
+  wireToPid,
+  bucketPidOf,
 } from "./lib";
 import { initialSession, sessionReducer } from "./store";
 import {
@@ -456,37 +459,37 @@ export default function App() {
   // 脚本入口显隐：本地主权恒显；远程/Web 取决于服务端 enable_scripting
   const showScripts = isLocal || scriptEnabled;
 
-  // activeTabCount：每设备的活跃 Tab 数（端口在任一 group.ports 中）。驱动远程按需连接。
-  const activeTabCount = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const g of Object.values(groups))
-      for (const pid of g.ports) {
-        const { devId } = parsePortId(pid);
-        counts[devId] = (counts[devId] ?? 0) + 1;
-      }
-    return counts;
-  }, [groups]);
+  /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
+   *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
+   *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
+   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。 */
+  const cmdTransport = useCallback(
+    (): Transport | undefined =>
+      transportsRef.current.get(isLocal ? "local" : (remotes[0]?.id ?? "")),
+    // isLocal 是模块常量;remotes 变化时 key 可能变(web 改连)
+    [remotes]
+  );
 
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
    *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
   const openPort = useCallback(async (pid: PortId, config: SerialConfig) => {
-    const { devId, name } = parsePortId(pid);
     try {
-      const res = await transportsRef.current.get(devId)?.open(name, config);
+      // transport 命令面收完整 pid:本地 IPC 直传(Rust 规范化),WS 侧剥首段成远端线名
+      const res = await cmdTransport()?.open(pid, config);
       if (!res) return undefined;
       // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
       dispatch({ type: "port_acquired", pid, config: res.config });
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置
         const c = res.config;
-        libNotify(`已加入 ${res.port}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。如需修改配置，请强制关闭该端口后重新打开。`, 8000);
+        libNotify(`已加入 ${displayPortName(pid)}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。如需修改配置，请强制关闭该端口后重新打开。`, 8000);
       }
       return res;
     } catch (e) {
       libError(String(e));
       return undefined;
     }
-  }, [libNotify, libError]);
+  }, [libNotify, libError, cmdTransport]);
 
   /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
    *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
@@ -499,63 +502,85 @@ export default function App() {
   /** 把 Transport 的所有事件绑到指定 devId。事件回调只 dispatch（永不 stale），
    *  重连重放经 sessionRef 读最新会话状态。返回取消函数。 */
   const bindTransport = useCallback((devId: string, t: Transport): (() => void)[] => {
+    /** 某 devId 掉线:运行中卡片转"已中止"失败态(不删除——结果可回看,而非静默蒸发)。
+     *  只转 running——已完成(✓/✗)的结果是既成事实,断线不该把它翻写成失败。
+     *  被中断的进未读角标;面板不可见时 toast(与自然完成的反馈通道对齐)。
+     *  transport 断连(WS 整体)与设备离线(DeviceClient 单设备)两路共用。 */
+    const abortRunningFor = (downDev: string) => {
+      const interruptedMacros = [...macroRunsRef.current.entries()].filter(
+        ([, c]) => c.devId === downDev && c.status === "running"
+      );
+      const interruptedScripts = [...scriptRunsRef.current.entries()].filter(
+        ([, c]) => c.devId === downDev && c.status === "running"
+      );
+      if (interruptedMacros.length) {
+        setMacroUnseen((prev) => new Set([...prev, ...interruptedMacros.map(([rid]) => rid)]));
+        if (activityViewRef.current !== "macros") {
+          pushToast(false, `连接断开，宏「${interruptedMacros.map(([, c]) => c.name).join("」「")}」已中止`, "macros");
+        }
+      }
+      if (interruptedScripts.length) {
+        setScriptUnseen((prev) => new Set([...prev, ...interruptedScripts.map(([rid]) => rid)]));
+        if (activityViewRef.current !== "scripts") {
+          pushToast(false, `连接断开，脚本「${interruptedScripts.map(([, c]) => c.name).join("」「")}」已中止`, "scripts");
+        }
+      }
+      setScriptRuns((prev) => {
+        const n = new Map(prev);
+        for (const [rid, card] of n) {
+          if (card.devId === downDev && card.status === "running") {
+            n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
+          }
+        }
+        return n;
+      });
+      setMacroRuns((prev) => {
+        const n = new Map(prev);
+        for (const [rid, card] of n) {
+          if (card.devId === downDev && card.status === "running") {
+            n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
+          }
+        }
+        return n;
+      });
+    };
+    /** 某 devId 上线:重放断开待重连的端口(首次连上时集合为空 → 空操作)。 */
+    const replayDisconnected = (upDev: string) => {
+      const st = sessionRef.current;
+      for (const pid of st.disconnectedPorts) {
+        if (parsePortId(pid).devId !== upDev) continue;
+        void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
+      }
+    };
     return [
       t.onPorts((list) => dispatch({ type: "ports_listed", devId, ports: list })),
       t.onConnectedChange((conn) => {
         dispatch({ type: "dev_online", devId, online: conn });
         if (conn) {
           t.list();
-          // 重连成功：重放本设备断开待重连的端口（首次连上时集合为空 → 空操作，天然区分首次/重连）。
-          // 配置取 acquire 时记录的 portConfigs（断开待重连的端口必有记录），失败则 tab 保持断开态待手动重试。
-          const st = sessionRef.current;
-          for (const pid of st.disconnectedPorts) {
-            if (parsePortId(pid).devId !== devId) continue;
-            void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
-          }
+          replayDisconnected(devId);
         } else {
-          // 断连:运行中卡片转"已中止"失败态(不删除——结果可回看,而非静默蒸发)。
-          // 只转 running——已完成(✓/✗)的结果是既成事实,断线不该把它翻写成失败。
-          // 被中断的进未读角标;面板不可见时 toast(与自然完成的反馈通道对齐)。
-          const interruptedMacros = [...macroRunsRef.current.entries()].filter(
-            ([, c]) => c.devId === devId && c.status === "running"
-          );
-          const interruptedScripts = [...scriptRunsRef.current.entries()].filter(
-            ([, c]) => c.devId === devId && c.status === "running"
-          );
-          if (interruptedMacros.length) {
-            setMacroUnseen((prev) => new Set([...prev, ...interruptedMacros.map(([rid]) => rid)]));
-            if (activityViewRef.current !== "macros") {
-              pushToast(false, `连接断开，宏「${interruptedMacros.map(([, c]) => c.name).join("」「")}」已中止`, "macros");
-            }
-          }
-          if (interruptedScripts.length) {
-            setScriptUnseen((prev) => new Set([...prev, ...interruptedScripts.map(([rid]) => rid)]));
-            if (activityViewRef.current !== "scripts") {
-              pushToast(false, `连接断开，脚本「${interruptedScripts.map(([, c]) => c.name).join("」「")}」已中止`, "scripts");
-            }
-          }
-          setScriptRuns((prev) => {
-            const n = new Map(prev);
-            for (const [rid, card] of n) {
-              if (card.devId === devId && card.status === "running") {
-                n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
-              }
-            }
-            return n;
-          });
-          setMacroRuns((prev) => {
-            const n = new Map(prev);
-            for (const [rid, card] of n) {
-              if (card.devId === devId && card.status === "running") {
-                n.set(rid, { ...card, status: "done", success: false, message: "连接断开，已中止" });
-              }
-            }
-            return n;
-          });
+          abortRunningFor(devId);
         }
       }),
+      // 设备在线快照(桌面:后端 DeviceClientManager;远程:透传远端 ss 的设备表)。
+      // 设备级上下线与 transport 级连接共用同一套中止/重放语义。
+      t.onDevices((devices) => {
+        let anyOnline = false;
+        for (const d of devices) {
+          dispatch({ type: "dev_online", devId: d.id, online: d.online });
+          if (d.online) {
+            anyOnline = true;
+            replayDisconnected(d.id);
+          } else {
+            abortRunningFor(d.id);
+          }
+        }
+        // 列表是合并视图,刷新一次即可(勿在循环内逐设备拉——D 台在线会放大 D 倍)
+        if (anyOnline) t.list();
+      }),
       t.onData((port, data) => {
-        const pid = portIdOf(devId, port);
+        const pid = wireToPid(devId, port); // 本地线名即 pid;远程线名加设备前缀
         touch(pid, "rx"); // 签名：收到字节 → RX 亮
         terminalsRef.current.get(pid)?.term.write(data);
       }),
@@ -567,7 +592,7 @@ export default function App() {
       }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
-        prunePort(portIdOf(devId, port));
+        prunePort(wireToPid(devId, port));
         t.list();
       }),
       t.onPortDisconnected((port) => {
@@ -645,14 +670,14 @@ export default function App() {
     };
   }, [isLocal, bindTransport]);
 
-  // 远程 Transport 引用计数（按需）：需求 = 卡展开 OR 该 devId 有活跃 Tab。
-  // false→true 建连（RemoteTransport + 绑回调 + list），true→false 断开（dispose + 清状态）。
-  // 地址变化（Web 改连接 / 编辑设备 host）→ 销毁旧实例按新地址重建。Web 单设备默认在 expandedRemotes，自动建连。
+  // 远程 Transport 引用计数（按需）——仅 Web/远程窗口形态:前端直连远端 ss。
+  // 桌面形态远程设备已下沉到后端(DeviceClientManager),本地只有 "local" 一个 transport,
+  // 设备连接/重连/断开全由 Rust 侧管理,前端经 devices 事件观察状态。
   useEffect(() => {
-    const wanted = new Set<string>();
-    for (const d of remotes) {
-      if (expandedRemotes.has(d.id) || (activeTabCount[d.id] ?? 0) > 0) wanted.add(d.id);
-    }
+    if (isLocal) return;
+    // Web/远窗是单 transport 形态:所有口(含远端设备桶)都走它,恒保持连接——
+    // 活跃 tab 计数按 pid 首段统计,远端设备的口不会计入本设备 id,不能作拆连依据。
+    const wanted = new Set(remotes.map((d) => d.id));
     const map = transportsRef.current;
     const addrMap = remoteAddrRef.current;
     const teardown = (id: string) => {
@@ -683,7 +708,7 @@ export default function App() {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remotes, expandedRemotes, activeTabCount, bindTransport]);
+  }, [remotes, bindTransport]);
 
   // Web/远程窗口：connConfig 变 → 同步单设备 remotes[0] 的 host/port（驱动上面的引用计数 effect 重连）。
   useEffect(() => {
@@ -737,8 +762,9 @@ export default function App() {
     if (isTauri()) loadSrvSettings();
   }, [loadSrvSettings]);
 
-  // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）；Web/远程窗口不加载
-  // （由 connConfig 派生单设备）。加载后全展开 → 引用计数 effect 自动重连之前的设备。
+  // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）+ 设备在线快照
+  // （后端 DeviceClientManager 已在 Rust 侧建连,前端只取状态观察）;Web/远程窗口不加载
+  // （由 connConfig 派生单设备,连接走前端 RemoteTransport）。
   useEffect(() => {
     if (!isLocal) return;
     tauriInvoke<RemoteDevice[]>("load_remotes")
@@ -747,6 +773,11 @@ export default function App() {
         setExpandedRemotes(new Set(loaded.map((r) => r.id)));
       })
       .catch((e) => console.error("加载远程设备失败", e));
+    tauriInvoke<{ id: string; online: boolean }[]>("list_devices")
+      .then((devices) => {
+        for (const d of devices) dispatch({ type: "dev_online", devId: d.id, online: d.online });
+      })
+      .catch((e) => console.error("加载设备状态失败", e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -824,17 +855,20 @@ export default function App() {
     if (!pid) return;
     saveConfig(config);
     setPendingPort(null);
-    const res = await openPort(pid, config);
+    // 对话框打开时的初始别名(open 之前取——列表状态未变,最可靠)。
+    // 语义:确认即最终状态——与初始值不同才写;**空串 = 清除**(后端 apply_alias
+    // 把空串归一为清除)。此前"留空直接 return"把清空误当不设置,旧别名残留。
+    const initial = (aliasOf(pid) ?? "").trim();
     const trimmed = alias.trim();
-    if (!trimmed) return;
+    const res = await openPort(pid, config);
     if (res?.opened) {
-      // 首开：别名生效
-      const { devId, name } = parsePortId(pid);
-      try {
-        await transportsRef.current.get(devId)?.setAlias(name, trimmed);
-        refreshPorts(devId);
-      } catch (e) {
-        libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
+      if (trimmed !== initial) {
+        try {
+          await cmdTransport()?.setAlias(pid, trimmed);
+          refreshPorts();
+        } catch (e) {
+          libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
+        }
       }
     } else if (res && !res.opened) {
       // 附加：别名未生效（端口已被其它会话先开）
@@ -846,25 +880,23 @@ export default function App() {
   const closePort = (pid: PortId) => {
     // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
     if (aliasEdit?.port === pid) setAliasEdit(null);
-    const { devId, name } = parsePortId(pid);
-    transportsRef.current.get(devId)?.close(name);
+    cmdTransport()?.close(pid);
     prunePort(pid);
   };
 
   const forceClosePort = (pid: PortId) => {
-    const { name } = parsePortId(pid);
     setConfirmState({
       title: "强制关闭端口",
       icon: <IconPower />,
-      message: `强制关闭 ${name}？将断开所有远程客户端并关闭该端口。`,
+      message: `强制关闭 ${displayPortName(pid)}？将断开所有远程客户端并关闭该端口。`,
       confirmText: "强制关闭",
       tone: "danger",
       onConfirm: async () => {
         const t = transportsRef.current.get("local");
         if (t) {
           try {
-            await t.forceClose(name); // 踢远程持有者（force_close_others）
-            await t.close(name);      // 本地释放（远程已踢 → 末位 → 拆毁端口）
+            await t.forceClose(pid); // 踢远程持有者（force_close_others）
+            await t.close(pid);      // 本地释放（远程已踢 → 末位 → 拆毁端口）
           } catch {
             /* 端口可能已被 force_close 拆毁，忽略 */
           }
@@ -964,8 +996,7 @@ export default function App() {
         onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
         onWrite={(p, data) => {
           touch(p, "tx");
-          const { devId, name } = parsePortId(p);
-          transportsRef.current.get(devId)?.write(name, data);
+          cmdTransport()?.write(p, data);
         }}
         onReady={(p, inst) => {
           if (inst) terminalsRef.current.set(p, inst);
@@ -1005,8 +1036,8 @@ export default function App() {
       if (gid) switchTabInGroup(gid, pid);
       else switchPort(pid);
     } else {
-      const { devId, name } = parsePortId(pid);
-      const info = portsByDev[devId]?.find((p) => p.name === name);
+      const { devId } = parsePortId(pid);
+      const info = portsByDev[devId]?.find((p) => bucketPidOf(devId, p.name) === pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
       else setPendingPort(pid); // 未开：弹配置框
     }
@@ -1018,19 +1049,17 @@ export default function App() {
       return;
     }
     const runId = crypto.randomUUID();
-    const { devId, name: portName } = parsePortId(activePort);
+    const devId = parsePortId(activePort).devId; // 卡片归属(展示用);命令面走形态 transport
     setMacroRuns((prev) => new Map(prev).set(runId, { name, devId, status: "running" }));
-    transportsRef.current.get(devId)?.runMacro(name, portName, macros[name], runId);
+    cmdTransport()?.runMacro(name, activePort, macros[name], runId);
   };
 
   const doRun = (name: string, args: Record<string, string>) => {
     // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
     // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
-    // devId(transport):有 tab 用其设备;无 tab → 本地 "local" / 远程第一个 remote。
-    const { devId, name: portName } = activePort
-      ? parsePortId(activePort)
-      : { devId: isLocal ? "local" : (remotes[0]?.id ?? ""), name: "" };
-    const transport = transportsRef.current.get(devId);
+    const mainPort = activePort ?? "";
+    const devId = activePort ? parsePortId(activePort).devId : isLocal ? "local" : (remotes[0]?.id ?? "");
+    const transport = cmdTransport();
     if (!transport) {
       libError(isLocal ? "本地服务未就绪，无法运行脚本；请重启应用后重试" : "尚无可用连接，请先添加并连接一台远程设备");
       return;
@@ -1038,7 +1067,7 @@ export default function App() {
     const runId = crypto.randomUUID();
     setScriptRuns((prev) => new Map(prev).set(runId, { name, devId, status: "running", logs: [] }));
     setExpandedLog(runId); // 新运行自动展开:实时看进度;结束后同卡片继续展开看完整历史
-    transport.runScript(name, portName, scripts[name], args, runId);
+    transport.runScript(name, mainPort, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
     // 脚本声明了参数 → 弹收集框;否则直接跑。
@@ -1078,12 +1107,17 @@ export default function App() {
       tone: "danger",
       onConfirm: () => {
         openPorts.filter((p) => parsePortId(p).devId === dev.id).forEach((pid) => prunePort(pid));
-        unsubsByDev.current.get(dev.id)?.forEach((fn) => fn());
-        unsubsByDev.current.delete(dev.id);
-        transportsRef.current.get(dev.id)?.dispose();
-        transportsRef.current.delete(dev.id);
-        remoteAddrRef.current.delete(dev.id);
-        dispatch({ type: "teardown_dev", devId: dev.id });
+        if (isLocal) {
+          // 桌面:设备在后端——save_remotes 的落盘钩子触发 update_registry(断连+移除)
+          dispatch({ type: "teardown_dev", devId: dev.id });
+        } else {
+          unsubsByDev.current.get(dev.id)?.forEach((fn) => fn());
+          unsubsByDev.current.delete(dev.id);
+          transportsRef.current.get(dev.id)?.dispose();
+          transportsRef.current.delete(dev.id);
+          remoteAddrRef.current.delete(dev.id);
+          dispatch({ type: "teardown_dev", devId: dev.id });
+        }
         setRemotes((prev) => {
           const next = prev.filter((r) => r.id !== dev.id);
           if (isLocal) persistRemotes(next);
@@ -1099,8 +1133,12 @@ export default function App() {
     });
   };
 
-  /** 手动重连：dispose 旧 transport + 清地址缓存 + 确保 wanted → 引用计数 effect 重建（重试 WS）。 */
+  /** 手动重连。桌面:后端删旧连接建新(device_connect);远程窗口/Web:前端重建 transport。 */
   const reconnectRemote = (dev: RemoteDevice) => {
+    if (isLocal) {
+      void tauriInvoke("device_connect", { devId: dev.id }).catch((e) => libError(String(e)));
+      return;
+    }
     unsubsByDev.current.get(dev.id)?.forEach((fn) => fn());
     unsubsByDev.current.delete(dev.id);
     transportsRef.current.get(dev.id)?.dispose();
@@ -1115,12 +1153,18 @@ export default function App() {
   };
 
   /** 断开在线设备:有开着的 tab 先确认(一并关闭);无 tab 直接断。
-   *  实现 = 关 tab + 移出 expandedRemotes → 引用计数 effect 自动 dispose。
+   *  桌面:后端 device_disconnect(端口转断开态,tab 保留可重连);
+   *  远程窗口/Web:关 tab + 移出 expandedRemotes → 引用计数 effect 自动 dispose。
    *  与「删除设备」的差别:保留设备定义,可随时重连。 */
   const disconnectRemote = (dev: RemoteDevice) => {
     const label = dev.nickname?.trim() || `${dev.host}:${dev.port}`;
     const tabs = openPorts.filter((p) => parsePortId(p).devId === dev.id);
     const doDisconnect = () => {
+      if (isLocal) {
+        // 后端断连;断开事件会经 devices-changed 到达,tab 保留(Rust 侧 drainer 标 disconnected)
+        void tauriInvoke("device_disconnect", { devId: dev.id }).catch((e) => libError(String(e)));
+        return;
+      }
       tabs.forEach((pid) => prunePort(pid));
       setExpandedRemotes((prev) => {
         const n = new Set(prev);
@@ -1128,7 +1172,7 @@ export default function App() {
         return n;
       });
     };
-    if (tabs.length > 0) {
+    if (tabs.length > 0 && !isLocal) {
       setConfirmState({
         title: "断开远程设备",
         icon: <IconPower />,
@@ -1145,25 +1189,25 @@ export default function App() {
     }
   };
 
-  const refreshPorts = (devId?: string) => {
-    if (devId) transportsRef.current.get(devId)?.list();
-    else transportsRef.current.forEach((t) => t.list());
+  const refreshPorts = (_devId?: string) => {
+    // 列表来自形态 transport 的合并视图(web 下含远端设备桶),整体刷新
+    cmdTransport()?.list();
   };
 
-  /** 按复合键查端口信息（devId 桶 + 裸 name）。多 Transport 端口查找的唯一入口。 */
+  /** 按复合键查端口信息。桶内条目名经 bucketPidOf 幂等转 pid 后比对——本地合并
+   *  视图条目名即完整 pid(直通),web 形态条目名是远端侧键(加桶前缀),两种形态统一命中。 */
   const portInfoOf = (pid: PortId): PortInfo | undefined => {
-    const { devId, name } = parsePortId(pid);
-    return portsByDev[devId]?.find((p) => p.name === name);
+    const { devId } = parsePortId(pid);
+    return portsByDev[devId]?.find((p) => bucketPidOf(devId, p.name) === pid);
   };
   const aliasOf = (pid: PortId) => portInfoOf(pid)?.alias;
 
   /** 提交别名：写 ports.json + 刷新列表使别名立即显示。空串 = 清除。 */
   const commitAlias = async (pid: PortId, alias: string) => {
     setAliasEdit(null);
-    const { devId, name } = parsePortId(pid);
     try {
-      await transportsRef.current.get(devId)?.setAlias(name, alias);
-      refreshPorts(devId);
+      await cmdTransport()?.setAlias(pid, alias);
+      refreshPorts();
     } catch (e) {
       libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
     }
@@ -1185,8 +1229,8 @@ export default function App() {
       ports: portsByDev[d.id] ?? [],
     })),
   ];
-  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。 */
-  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: portIdOf(g.devId, p.name) })));
+  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。 */
+  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
 
@@ -1448,7 +1492,7 @@ export default function App() {
                 hasLogs={false}
                 expandedLog={null}
                 onToggleExpand={() => {}}
-                onStop={(runId, devId) => transportsRef.current.get(devId)?.stopMacro(runId)}
+                onStop={(runId) => cmdTransport()?.stopMacro(runId)}
                 onDismiss={(runId) => setMacroRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; })}
               />
             </NamedLibraryPanel>
@@ -1504,7 +1548,7 @@ export default function App() {
                 hasLogs
                 expandedLog={expandedLog}
                 onToggleExpand={(runId) => setExpandedLog((v) => (v === runId ? null : runId))}
-                onStop={(runId, devId) => transportsRef.current.get(devId)?.stopScript(runId)}
+                onStop={(runId) => cmdTransport()?.stopScript(runId)}
                 onDismiss={(runId) => {
                   setScriptRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; });
                   if (expandedLog === runId) setExpandedLog(null);
@@ -1618,8 +1662,7 @@ export default function App() {
                 focused={!!g && gid === focusedGroupId && g.activePort === port}
                 onWrite={(p, data) => {
                   touch(p, "tx");
-                  const { devId, name } = parsePortId(p);
-                  transportsRef.current.get(devId)?.write(name, data);
+                  cmdTransport()?.write(p, data);
                 }}
                 onReady={(inst) => {
                   if (inst) terminalsRef.current.set(port, inst);

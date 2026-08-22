@@ -21,22 +21,46 @@ fn path() -> Option<PathBuf> {
     Some(crate::config::config_dir()?.join("ports.json"))
 }
 
-/// 读 ports.json（不存在或解析失败 → 空）。
+/// 内存缓存(mtime 失效):list 是高频路径(每客户端 × 每 meta 变更都拉),每次
+/// 读盘在 async 线程上是 IO 尖峰;写路径单入口(save 后主动更新缓存),外部改动
+/// (手工编辑)最迟下次 mtime 变化后可见——零一致性风险。
+static CACHE: std::sync::Mutex<Option<(std::time::SystemTime, BTreeMap<String, PortMeta>)>> =
+    std::sync::Mutex::new(None);
+
+/// 读 ports.json(带 mtime 缓存;不存在或解析失败 → 空)。
 pub fn load() -> BTreeMap<String, PortMeta> {
-    match path() {
-        Some(p) if p.exists() => match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => BTreeMap::new(),
-        },
-        _ => BTreeMap::new(),
+    let p = match path() {
+        Some(p) => p,
+        None => return BTreeMap::new(),
+    };
+    let mtime = p
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((cached_mtime, map)) = cache.as_ref() {
+        if *cached_mtime == mtime {
+            return map.clone();
+        }
     }
+    let map = match std::fs::read_to_string(&p) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => BTreeMap::new(),
+    };
+    *cache = Some((mtime, map.clone()));
+    map
 }
 
-/// 写 ports.json。
+/// 写 ports.json(同步更新缓存)。
 pub fn save(map: &BTreeMap<String, PortMeta>) -> Result<(), String> {
     let p = path().ok_or("无法定位配置目录")?;
     let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
     std::fs::write(&p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
+    let mtime = p
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    *CACHE.lock().unwrap() = Some((mtime, map.clone()));
     Ok(())
 }
 
@@ -46,7 +70,11 @@ pub fn save(map: &BTreeMap<String, PortMeta>) -> Result<(), String> {
 pub fn apply_alias(map: &mut BTreeMap<String, PortMeta>, port: &str, alias: Option<String>) {
     let cleaned = alias.and_then(|s| {
         let t = s.trim();
-        if t.is_empty() { None } else { Some(t.to_string()) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     });
     // 去重：从其它端口摘掉同名别名
     if let Some(ref a) = cleaned {
@@ -80,17 +108,35 @@ mod tests {
     use super::*;
 
     fn meta(alias: Option<&str>) -> PortMeta {
-        PortMeta { alias: alias.map(str::to_string) }
+        PortMeta {
+            alias: alias.map(str::to_string),
+        }
+    }
+
+    /// 空串 = 清除别名(打开对话框清空后确认的路径):apply_alias 把 Some("") 归一为
+    /// None——前端 setAlias("") 经此清除,不留残留。
+    #[test]
+    fn apply_alias_empty_string_clears() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("COM3".to_string(), meta(Some("GPS")));
+        apply_alias(&mut map, "COM3", Some("".to_string()));
+        assert_eq!(map.get("COM3").unwrap().alias, None, "空串应清除别名");
     }
 
     #[test]
     fn apply_alias_sets_and_inserts() {
         let mut map = BTreeMap::new();
         apply_alias(&mut map, "COM7", Some("GPS".into()));
-        assert_eq!(map.get("COM7").and_then(|m| m.alias.as_deref()), Some("GPS"));
+        assert_eq!(
+            map.get("COM7").and_then(|m| m.alias.as_deref()),
+            Some("GPS")
+        );
         // 已存在的端口：覆盖
         apply_alias(&mut map, "COM7", Some("Alt".into()));
-        assert_eq!(map.get("COM7").and_then(|m| m.alias.as_deref()), Some("Alt"));
+        assert_eq!(
+            map.get("COM7").and_then(|m| m.alias.as_deref()),
+            Some("Alt")
+        );
     }
 
     #[test]
@@ -100,7 +146,10 @@ mod tests {
         map.insert("COM3".into(), meta(Some("Sensor")));
         // 把 GPS 赋给 COM3 → COM7 的 GPS 应被摘掉
         apply_alias(&mut map, "COM3", Some("GPS".into()));
-        assert_eq!(map.get("COM3").and_then(|m| m.alias.as_deref()), Some("GPS"));
+        assert_eq!(
+            map.get("COM3").and_then(|m| m.alias.as_deref()),
+            Some("GPS")
+        );
         assert_ne!(
             map.get("COM7").and_then(|m| m.alias.as_deref()),
             Some("GPS"),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   dissolveGroup,
+  displayPortName,
   groupBy,
   paramDefault,
   parseParamsFromCode,
@@ -9,6 +10,7 @@ import {
   prefillRunValues,
   renameGroup,
   upsertNamed,
+  wireToPid,
 } from "./lib";
 import type { ScriptParam } from "./types";
 
@@ -27,6 +29,23 @@ describe("portIdOf / parsePortId", () => {
 
   it("仅按首个 :: 切分", () => {
     expect(parsePortId("a::b::c")).toEqual({ devId: "a", name: "b::c" });
+  });
+});
+
+describe("wireToPid(线名→pid)/ displayPortName(pid→展示名)", () => {
+  it("本地线名即复合键,直通(新版后端事件)", () => {
+    expect(wireToPid("local", "local::COM3")).toBe("local::COM3");
+  });
+
+  it("远程线名加设备前缀:新版远端复合键 → 两级级联;旧版裸名 → 单级", () => {
+    expect(wireToPid("uuidA", "COM3")).toBe("uuidA::COM3");
+    expect(wireToPid("uuidA", "local::COM3")).toBe("uuidA::local::COM3");
+  });
+
+  it("展示名取最后一个 :: 之后(级联也只显示串口名)", () => {
+    expect(displayPortName("local::COM3")).toBe("COM3");
+    expect(displayPortName("uuidA::local::COM3")).toBe("COM3");
+    expect(displayPortName("COM3")).toBe("COM3");
   });
 });
 

@@ -87,7 +87,10 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
     let open = state.manager.list_open_ports().await;
     if open.is_empty() {
         let _ = stream
-            .write_all("\r\nserial-studio telnet\r\n没有已打开的串口，请先在 UI 打开后重连。\r\n".as_bytes())
+            .write_all(
+                "\r\nserial-studio telnet\r\n没有已打开的串口，请先在 UI 打开后重连。\r\n"
+                    .as_bytes(),
+            )
             .await;
         return Ok(());
     }
@@ -116,11 +119,16 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
             break;
         }
     }
-    let port: String = port
-        .trim_matches(|c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0')
-        .to_string();
+    // 规范化为复合键:裸名(旧习惯输入)补 local:: 前缀——后续事件过滤按 map 键
+    // 比对,不规范化时写方向正常但读方向静默无回显
+    let port: String = ss_core::normalize_port_key(
+        port.trim_matches(|c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0'),
+    );
 
-    if port.is_empty() || !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
+    if port.is_empty()
+        || !state.manager.is_open(&port).await
+        || state.manager.is_disconnected(&port).await
+    {
         let _ = stream
             .write_all(format!("串口 {} 未打开或已断开，断开。\r\n", port).as_bytes())
             .await;
@@ -173,7 +181,9 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
                     return;
                 }
                 Ok(SerialEvent::PortDisconnected { port: p }) if p == port => {
-                    let _ = wr.write_all("\r\n[设备已断开 — 请在桌面端重连]\r\n".as_bytes()).await;
+                    let _ = wr
+                        .write_all("\r\n[设备已断开 — 请在桌面端重连]\r\n".as_bytes())
+                        .await;
                     return;
                 }
                 Ok(SerialEvent::Error { port: p, message }) if p == port => {

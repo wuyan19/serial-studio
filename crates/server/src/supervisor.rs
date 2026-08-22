@@ -52,6 +52,10 @@ impl ServiceSupervisor {
             return Err("服务已在运行".into());
         }
 
+        // 远程设备连接池:惰性幂等启动(挂 AppState,热重启 restart 不重复 spawn,
+        // 设备连接不重建——与"串口连接不丢"的既有不变量对齐)
+        self.state.devices.start();
+
         let ws_addr = format!("{}:{}", settings.ws_host, settings.ws_port);
         let telnet_addr = format!("{}:{}", settings.ws_host, settings.telnet_port);
 
@@ -72,14 +76,15 @@ impl ServiceSupervisor {
         });
 
         // Telnet（失败则回滚 WS）
-        let telnet = match crate::telnet::start_telnet(telnet_addr.clone(), self.state.clone()).await {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = ws_shutdown.send(());
-                let _ = ws_join.await;
-                return Err(format!("Telnet 绑定 {} 失败: {}", telnet_addr, e));
-            }
-        };
+        let telnet =
+            match crate::telnet::start_telnet(telnet_addr.clone(), self.state.clone()).await {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = ws_shutdown.send(());
+                    let _ = ws_join.await;
+                    return Err(format!("Telnet 绑定 {} 失败: {}", telnet_addr, e));
+                }
+            };
 
         *current = Some(ServiceInstance {
             ws_addr,
@@ -99,7 +104,11 @@ impl ServiceSupervisor {
             let _ = inst.ws_shutdown.send(());
             let _ = inst.ws_join.await;
             inst.telnet.stop().await;
-            tracing::info!("服务已停止（WS {} / Telnet {}）", inst.ws_addr, inst.telnet_addr);
+            tracing::info!(
+                "服务已停止（WS {} / Telnet {}）",
+                inst.ws_addr,
+                inst.telnet_addr
+            );
         }
     }
 

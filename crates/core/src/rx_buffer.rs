@@ -244,8 +244,16 @@ mod tests {
         let r = b.drain_quiet(40, 1000);
         assert!(r.is_empty());
         let elapsed = start.elapsed();
-        assert!(elapsed < Duration::from_millis(300), "idle>deadline 不应挂死: {:?}", elapsed);
-        assert!(elapsed >= Duration::from_millis(35), "应被 deadline 兜底: {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "idle>deadline 不应挂死: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed >= Duration::from_millis(35),
+            "应被 deadline 兜底: {:?}",
+            elapsed
+        );
     }
 
     #[test]

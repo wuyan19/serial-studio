@@ -4,7 +4,7 @@
  */
 import type { RefObject } from "react";
 import type { PortId, PortInfo, RemoteDevice } from "../types";
-import { groupBy } from "../lib";
+import { bucketPidOf, displayPortName, getMode, groupBy } from "../lib";
 import {
   IconEdit,
   IconExport,
@@ -105,10 +105,15 @@ export function PortsPanel({
                 </p>
               ) : (
                 grp.ports.map((p) => {
-                  const pid = `${grp.devId}::${p.name}` as PortId;
+                  // 条目键首段已是桶 devId(本地合并视图的完整 pid)则直通;
+                  // 远程 transport 的远端侧键则加桶前缀。幂等。
+                  const pid = bucketPidOf(grp.devId, p.name);
+                  const shown = displayPortName(p.name); // 展示剥设备前缀,只留串口名
                   const isActive = pid === activePort;
                   const editingThis = aliasEditPort === pid;
-                  const canForce = grp.devId === "local" && p.opened;
+                  // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
+                  // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
+                  const canForce = getMode() === "local" && p.opened;
                   return (
                     <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
                       <div
@@ -131,20 +136,20 @@ export function PortsPanel({
                           {editingThis ? (
                             <InlineAliasInput
                               initial={p.alias ?? ""}
-                              placeholder={`为 ${p.name} 设置别名`}
+                              placeholder={`为 ${shown} 设置别名`}
                               onCommit={(alias) => onCommitAlias(pid, alias)}
                               onCancel={onCancelAlias}
                             />
                           ) : (
-                            <PortLabel name={p.name} alias={p.alias} />
+                            <PortLabel name={shown} alias={p.alias} />
                           )}
                         </span>
                         {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
                       </div>
                       <button
                         className="port-item__edit"
-                        title={`设置 ${p.name} 别名`}
-                        aria-label={`设置 ${p.name} 别名`}
+                        title={`设置 ${shown} 别名`}
+                        aria-label={`设置 ${shown} 别名`}
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => onSetAliasEdit(pid)}
                       >
@@ -153,8 +158,8 @@ export function PortsPanel({
                       {canForce && (
                         <button
                           className="port-item__force"
-                          title={`强制关闭 ${p.name}（断开远程）`}
-                          aria-label={`强制关闭 ${p.name}`}
+                          title={`强制关闭 ${shown}（断开远程）`}
+                          aria-label={`强制关闭 ${shown}`}
                           onClick={() => onForceClose(pid)}
                         >
                           <IconPower />
