@@ -31,6 +31,8 @@ pub enum ServerMsg {
     /// `resolved` = 服务端实际打开的 map 键(别名解析后)。缺省 = 旧版服务端
     /// (无别名解析,port 即真名)——设备客户端据此以真名登记 IO,
     /// 否则数据帧(map 键口径)与登记键(请求串)分裂,RX 静默断流。
+    /// `req` = 请求关联 id(回带客户端 Open 的 req):新↔新按 req 精确配对回执,
+    /// 防同端口 close/write 回执误配在途 open;缺省 = 旧版服务端(按端口路由兜底)。
     Acquired {
         port: String,
         opened: bool,
@@ -38,6 +40,8 @@ pub enum ServerMsg {
         holders: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     /// 持有者数量变化(有人加入/退出,端口未关)。
     Holders {
@@ -50,16 +54,23 @@ pub enum ServerMsg {
     ScriptsChanged,
     /// 错误。port 可选:open/write/set_alias 等命令的失败回复带上端口名,
     /// 设备客户端据此路由在途回执;旧客户端忽略该字段(线向后兼容)。
+    /// `req` = 请求关联 id(回带);缺省 = 旧版服务端,客户端按端口/FIFO 兜底路由。
     Error {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         port: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     /// 命令成功回复(close/write/set_alias)。port 可选,作用同 Error。
+    /// `req` = 请求关联 id(回带);缺省 = 旧版服务端(其写回执无 port,
+    /// 客户端按 FIFO 兜底配对最老在途回执)。
     Ok {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         port: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     MacroResult {
         run_id: String,
@@ -105,6 +116,9 @@ pub struct DeviceStateView {
 
 /// 客户端 → 服务器 消息。
 /// Deserialize 给 ws.rs 入口;Serialize 给 DeviceClient 发远端。
+/// Open/Close/Write/SetAlias 的 `req` = 请求关联 id(DeviceClient 赋值,服务端
+/// 原样回带到 Acquired/Ok/Error)——新↔新精确配对回执,防同端口回执误配;
+/// 旧版服务端忽略未知字段不回带,客户端自动落回端口路由兜底。浏览器前端不带 req。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -113,15 +127,21 @@ pub enum ClientMsg {
         port: String,
         #[serde(default)]
         config: SerialConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     Close {
         port: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     Write {
         port: String,
         data: String,
         #[serde(default = "default_encoding")]
         encoding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     RunMacro {
         name: String,
@@ -153,6 +173,8 @@ pub enum ClientMsg {
         port: String,
         #[serde(default)]
         alias: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        req: Option<u64>,
     },
     /// 查询服务版本。
     Version,
@@ -277,5 +299,43 @@ mod tests {
             parse_data_frame(&[2, 0xff, 0xfe, b'x']).is_none(),
             "非 UTF-8 端口名"
         );
+    }
+
+    /// req 线格式契约:None 时字段整体省略(旧版对端/浏览器流量零变化);
+    /// Some 时序列化进 JSON 且能原样往返(DeviceClient 请求级回执配对依赖)。
+    #[test]
+    fn req_field_wire_contract() {
+        let ok_none = to_json(ServerMsg::Ok {
+            message: "m".into(),
+            port: Some("COM7".into()),
+            req: None,
+        });
+        match ok_none {
+            OutFrame::Text(s) => {
+                assert!(!s.contains("req"), "req=None 不得出现在线格式: {s}");
+                let back: ServerMsg = serde_json::from_str(&s).unwrap();
+                assert!(matches!(back, ServerMsg::Ok { req: None, .. }));
+            }
+            _ => panic!("Ok 应是 Text"),
+        }
+        let ok_some = to_json(ServerMsg::Ok {
+            message: "m".into(),
+            port: Some("COM7".into()),
+            req: Some(42),
+        });
+        match ok_some {
+            OutFrame::Text(s) => {
+                assert!(s.contains(r#""req":42"#), "req=Some 应回带: {s}");
+                let back: ServerMsg = serde_json::from_str(&s).unwrap();
+                assert!(matches!(back, ServerMsg::Ok { req: Some(42), .. }));
+            }
+            _ => panic!("Ok 应是 Text"),
+        }
+        // 客户端→服务端方向同规则;未知字段(旧版服务端)反序列化不报错(向后兼容)
+        let open: ClientMsg =
+            serde_json::from_str(r#"{"action":"open","port":"COM7","req":7}"#).unwrap();
+        assert!(matches!(open, ClientMsg::Open { req: Some(7), .. }));
+        let legacy: ClientMsg = serde_json::from_str(r#"{"action":"close","port":"COM7"}"#).unwrap();
+        assert!(matches!(legacy, ClientMsg::Close { req: None, .. }));
     }
 }

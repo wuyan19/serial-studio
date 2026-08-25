@@ -824,3 +824,347 @@ async fn alias_suffix_open_registers_resolved_name() {
 
     let _ = a.manager.release("dev-b::GPS", s).await;
 }
+
+/// 互注册不增殖回归: A 注册 B,且 B 的列表里带指向 A 的二级条目(`dev-a::COM7`,
+/// 即"B 也注册了 A"的形态)。透传深度限 1 必须保证: A 的合并视图只含一级
+/// dev-b 条目、多轮 open/close 触发的列表重拉后无自我复制(历史回声环 4→8→12
+/// 直至消息风暴的回归锚点)。桩按新协议回带 req,顺带覆盖请求级回执配对路径。
+#[tokio::test]
+async fn mutual_registration_list_no_proliferation() {
+    // B 桩: 列表 = 自己的本地口 COM9 + 二级条目 dev-a::COM7(注册了 A 的形态);
+    // open/write/close 回执带 req 回显,并附发 unsolicited opened/closed 事件
+    // 触发 A 侧重拉(真实 hub 的行为)。
+    async fn hub_stub(listener: TcpListener) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(t) = msg else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+            let req = v["req"].clone();
+            match v["action"].as_str().unwrap_or("") {
+                "list" => {
+                    let ports = serde_json::json!([
+                        {"name":"COM9","opened":false,"holders":0,"disconnected":false},
+                        {"name":"dev-a::COM7","opened":false,"holders":0,"disconnected":false}
+                    ]);
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                        ))
+                        .await;
+                }
+                "open" => {
+                    let port = v["port"].as_str().unwrap_or("").to_string();
+                    let cfg = serde_json::json!({
+                        "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
+                        "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
+                    });
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type":"acquired","port":port,"opened":true,
+                                "config":cfg,"holders":1,"req":req
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                    // unsolicited 事件 → A 侧 RefreshList 重拉
+                    let _ = sink
+                        .send(Message::Text(r#"{"type":"opened","port":"COM9"}"#.into()))
+                        .await;
+                }
+                "write" => {
+                    let port = v["port"].as_str().unwrap_or("").to_string();
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ok","message":"written","port":port,"req":req})
+                                .to_string(),
+                        ))
+                        .await;
+                }
+                "close" => {
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ok","message":"closed","port":"COM9","req":req})
+                                .to_string(),
+                        ))
+                        .await;
+                    let _ = sink
+                        .send(Message::Text(r#"{"type":"closed","port":"COM9"}"#.into()))
+                        .await;
+                }
+                "ping" => {
+                    let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(hub_stub(listener));
+
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: addr.port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    // 等设备上线 + 初始列表落缓存(合并视图出现 dev-b::COM9)
+    let mut ready = false;
+    for _ in 0..100 {
+        let views = list_views(&a).await;
+        if views.iter().any(|v| v.info.name == "dev-b::COM9") {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ready, "自连桩上线后合并视图应出现 dev-b::COM9");
+
+    // 多轮 open/close:每次触发 unsolicited opened/closed 事件 → RefreshList 重拉,
+    // 若深度限失效,二级条目会在缓存/列表中逐轮复制。
+    for _ in 0..3 {
+        let s = SessionId::next();
+        a.manager
+            .acquire("dev-b::COM9".into(), SerialConfig::default(), s)
+            .await
+            .unwrap();
+        let _ = a.manager.release("dev-b::COM9", s).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await; // 静置让最后一轮传播收敛
+
+    // 断言一:dev-b 前缀条目恒等于恰好一条 dev-b::COM9
+    let v1 = list_views(&a).await;
+    let devb: Vec<_> = v1
+        .iter()
+        .filter(|v| v.info.name.contains("dev-b"))
+        .map(|v| v.info.name.clone())
+        .collect();
+    assert_eq!(
+        devb,
+        vec!["dev-b::COM9".to_string()],
+        "互注册形态下 dev-b 桶应只贡献自己的一级端口: {:?}",
+        devb
+    );
+    // 断言二:任何条目不得出现二级设备前缀(回声复制特征)
+    assert!(
+        v1.iter()
+            .all(|v| !v.info.name.starts_with("dev-b::dev-")),
+        "不得出现二级前缀条目(列表自我复制): {:?}",
+        v1.iter().map(|v| &v.info.name).collect::<Vec<_>>()
+    );
+    // 断言三:连续多次拉取数量稳定(diff 收敛,无每轮增殖)
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let v = list_views(&a).await;
+        assert_eq!(v.len(), v1.len(), "列表数量应稳定(无逐轮自我复制)");
+    }
+}
+
+/// 三级级联端到端路由回归: A→B→C(B 注册 C,A 注册 B)。A 以 `dev-b::dev-c::COM7`
+/// 操作——split 只剥首段、后缀整体透传:B 剥出 `dev-c::COM7` 转发(本桩再剥成
+/// `COM7` 发 C),C 的回执/帧被 B 重打线名 `dev-c::COM7` 后转给 A。验证级联根基
+/// "逐层剥段无特判"与跨两级的数据回路(open/write/RX 全链路)。
+#[tokio::test]
+async fn three_level_cascade_routes_end_to_end() {
+    use ss_server::protocol::{data_frame, parse_data_frame};
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    // C 桩(最底层设备): 裸名 COM7 回显。回执带 req 回显。
+    async fn device_c(listener: TcpListener) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(t) = msg else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+            let req = v["req"].clone();
+            match v["action"].as_str().unwrap_or("") {
+                "open" => {
+                    assert_eq!(v["port"].as_str(), Some("COM7"), "C 只接受裸名");
+                    let cfg = serde_json::json!({
+                        "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
+                        "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
+                    });
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type":"acquired","port":"COM7","opened":true,
+                                "config":cfg,"holders":1,"req":req
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                }
+                "write" => {
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ok","message":"written","port":"COM7","req":req})
+                                .to_string(),
+                        ))
+                        .await;
+                    let data = hex_to_bytes(v["data"].as_str().unwrap_or(""));
+                    let _ = sink
+                        .send(Message::Binary(data_frame("COM7", &data)))
+                        .await;
+                }
+                "ping" => {
+                    let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // B 桩(hub 形态): 对 A 展示合并视图(dev-c::COM7);A 的命令剥段转发 C,
+    // C 的回执/帧重打线名转回 A。两个独立泵任务(A→C / C→A),无双端交错。
+    async fn hub_b(listener: TcpListener, c_port: u16, saw: Arc<std::sync::Mutex<Vec<String>>>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws_a = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (a_sink_tx, mut a_source) = ws_a.split();
+        let a_sink = Arc::new(tokio::sync::Mutex::new(a_sink_tx));
+        let c_ws = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws", c_port))
+            .await
+            .unwrap()
+            .0;
+        let (mut c_sink, mut c_source) = c_ws.split();
+
+        // 泵一: A → C。list/pong 本地作答;open/write/close 记录剥段结果后转发。
+        let saw1 = Arc::clone(&saw);
+        let down = Arc::clone(&a_sink);
+        let pump_down = async move {
+            while let Some(Ok(Message::Text(t))) = a_source.next().await {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                    continue;
+                };
+                match v["action"].as_str().unwrap_or("") {
+                    "list" => {
+                        let ports = serde_json::json!([{
+                            "name":"dev-c::COM7","opened":false,"holders":0,"disconnected":false
+                        }]);
+                        let _ = down.lock().await
+                            .send(Message::Text(
+                                serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                            ))
+                            .await;
+                    }
+                    "ping" => {
+                        let _ = down
+                            .lock()
+                            .await
+                            .send(Message::Text(r#"{"type":"pong"}"#.into()))
+                            .await;
+                    }
+                    "open" | "write" | "close" => {
+                        let action = v["action"].as_str().unwrap_or("").to_string();
+                        let port = v["port"].as_str().unwrap_or("").to_string();
+                        saw1.lock().unwrap().push(format!("{action}:{port}"));
+                        let mut fwd = v.clone();
+                        fwd["port"] = serde_json::json!("COM7"); // 剥掉 dev-c:: 段
+                        let _ = c_sink
+                            .send(Message::Text(fwd.to_string()))
+                            .await;
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        // 泵二: C → A。文本回执把裸名线名重写为 B 侧键;二进制帧重打线名。
+        let up = Arc::clone(&a_sink);
+        let pump_up = async move {
+            while let Some(Ok(msg)) = c_source.next().await {
+                match msg {
+                    Message::Text(t) => {
+                        let t = t.replace("\"port\":\"COM7\"", "\"port\":\"dev-c::COM7\"");
+                        let _ = up.lock().await.send(Message::Text(t)).await;
+                    }
+                    Message::Binary(bin) => {
+                        if let Some((_, data)) = parse_data_frame(&bin) {
+                            let frame = data_frame("dev-c::COM7", data);
+                            let _ = up.lock().await.send(Message::Binary(frame)).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::join!(pump_down, pump_up);
+    }
+
+    // 起 C、B 两级桩
+    let c_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c_addr = c_listener.local_addr().unwrap();
+    tokio::spawn(device_c(c_listener));
+    let b_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let b_addr = b_listener.local_addr().unwrap();
+    let saw = Arc::new(std::sync::Mutex::new(Vec::new()));
+    tokio::spawn(hub_b(b_listener, c_addr.port(), Arc::clone(&saw)));
+
+    // A 注册 B 并等在线
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: b_addr.port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    let full_key = "dev-b::dev-c::COM7";
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager.acquire(full_key.into(), SerialConfig::default(), s).await.is_ok() {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "三级级联键应可打开(A→B→C 全链路)");
+    assert_eq!(
+        a.manager.holder_count(full_key).await,
+        Some(1),
+        "占有权应落在完整级联键条目"
+    );
+
+    // 剥段正确性:B 看到的应是剥掉自身段的 `dev-c::COM7`
+    let saw_open = saw.lock().unwrap().iter().any(|e| e == "open:dev-c::COM7");
+    assert!(saw_open, "B 应收到剥首段后的 dev-c::COM7,得到 {:?}", saw.lock().unwrap());
+
+    // 数据回路:写 → C 回显 → B 重打线名 → A 侧以完整级联键口径发布
+    let mut rx = a.manager.event_bus().subscribe();
+    a.manager
+        .write(full_key.into(), bytes::Bytes::from_static(b"ping"))
+        .await
+        .unwrap();
+    let mut echoed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(ss_core::SerialEvent::DataReceived { port, data }) => {
+                assert_eq!(port, full_key, "事件端口应为 A 侧完整级联键");
+                assert_eq!(data, b"ping", "跨两级回显数据应原样到达");
+                echoed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(echoed, "三级级联的数据回显应可达");
+
+    let _ = a.manager.release(full_key, s).await;
+}

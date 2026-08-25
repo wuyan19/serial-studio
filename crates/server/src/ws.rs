@@ -183,7 +183,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Some(Ok(Message::Binary(_))) => {
                         let _ = out_tx
-                            .send(to_json(ServerMsg::Error { message: "仅支持文本消息".into(), port: None }))
+                            .send(to_json(ServerMsg::Error { message: "仅支持文本消息".into(), port: None, req: None }))
                             .await;
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -256,6 +256,7 @@ fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
         SerialEvent::Error { port, message } => to_json(ServerMsg::Error {
             message: format!("{}: {}", port, message),
             port: None,
+            req: None,
         }),
         SerialEvent::ScriptLog {
             run_id, message, ..
@@ -279,6 +280,7 @@ async fn handle_client_msg(
                 .send(to_json(ServerMsg::Error {
                     message: format!("指令解析失败: {}", e),
                     port: None,
+                    req: None,
                 }))
                 .await;
             return;
@@ -290,10 +292,15 @@ async fn handle_client_msg(
             let ports = crate::list_ports_with_meta(&state).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
-        ClientMsg::Open { port, config } => {
+        ClientMsg::Open {
+            port,
+            config,
+            req,
+        } => {
             // resolved 从 acquire 结果取(单一真相):acquire 内部 canon 一次,
             // 回执口径与实际 map 键恒一致。设备客户端以真名登记 IO,
             // 数据帧(map 键口径)才与登记键一致——别名后缀寻址(如 test::GPS)的 RX 通路。
+            // req 原样回带:设备客户端按请求精确配对回执(旧客户端不带,回 None)。
             match state.manager.acquire(port.clone(), config, session).await {
                 Ok(AcquireResult::Opened {
                     config,
@@ -307,6 +314,7 @@ async fn handle_client_msg(
                             config,
                             holders,
                             resolved: Some(resolved),
+                            req,
                         }))
                         .await;
                 }
@@ -322,6 +330,7 @@ async fn handle_client_msg(
                             config,
                             holders,
                             resolved: Some(resolved),
+                            req,
                         }))
                         .await;
                 }
@@ -330,17 +339,19 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Error {
                             message: e.to_string(),
                             port: Some(port),
+                            req,
                         }))
                         .await;
                 }
             }
         }
-        ClientMsg::Close { port } => match state.manager.release(&port, session).await {
+        ClientMsg::Close { port, req } => match state.manager.release(&port, session).await {
             Ok(ReleaseOutcome::Closed) => {
                 let _ = out_tx
                     .send(to_json(ServerMsg::Ok {
                         message: "closed".into(),
                         port: Some(port),
+                        req,
                     }))
                     .await;
             }
@@ -349,6 +360,7 @@ async fn handle_client_msg(
                     .send(to_json(ServerMsg::Ok {
                         message: format!("released ({} holder(s) remaining)", remaining),
                         port: Some(port),
+                        req,
                     }))
                     .await;
             }
@@ -357,6 +369,7 @@ async fn handle_client_msg(
                     .send(to_json(ServerMsg::Ok {
                         message: "not held".into(),
                         port: Some(port),
+                        req,
                     }))
                     .await;
             }
@@ -365,6 +378,7 @@ async fn handle_client_msg(
                     .send(to_json(ServerMsg::Error {
                         message: e.to_string(),
                         port: Some(port),
+                        req,
                     }))
                     .await;
             }
@@ -373,6 +387,7 @@ async fn handle_client_msg(
             port,
             data,
             encoding,
+            req,
         } => {
             let bytes = match encoding.as_str() {
                 "hex" => match hex::decode(data.trim()) {
@@ -382,6 +397,7 @@ async fn handle_client_msg(
                             .send(to_json(ServerMsg::Error {
                                 message: format!("hex 解码失败: {}", e),
                                 port: Some(port),
+                                req,
                             }))
                             .await;
                         return;
@@ -393,6 +409,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Error {
                             message: format!("不支持的编码: {}", other),
                             port: Some(port),
+                            req,
                         }))
                         .await;
                     return;
@@ -400,12 +417,13 @@ async fn handle_client_msg(
             };
             // 回执语义 = "已受理"(入队即回):设备客户端的写回执不再等远端 OS 写完
             // (WAN RTT 会把宏/脚本的循环写从 µs 级拖到每条一个 RTT)。真实写结果
-            // 异步到达,失败经 Error 事件回报(此时写者的 pending 已结,仅留痕——
-            // 失败罕见且断连有统一断开路径兜底)。
+            // 异步到达,失败经 Error 事件回报(req 回带,精确配对;此时写者的 pending
+            // 已结,仅留痕——失败罕见且断连有统一断开路径兜底)。
             let _ = out_tx
                 .send(to_json(ServerMsg::Ok {
                     message: format!("accepted {} bytes", bytes.len()),
                     port: Some(port.clone()),
+                    req,
                 }))
                 .await;
             let manager = state.manager.clone();
@@ -421,6 +439,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Error {
                             message: e.to_string(),
                             port: Some(port_for_err),
+                            req,
                         }))
                         .await;
                 }
@@ -450,6 +469,7 @@ async fn handle_client_msg(
                 .send(to_json(ServerMsg::Ok {
                     message: format!("运行宏 {}", name),
                     port: None,
+                    req: None,
                 }))
                 .await;
             tokio::spawn(async move {
@@ -489,6 +509,7 @@ async fn handle_client_msg(
                         message: "远程脚本执行未启用(settings.json 的 enable_scripting=false)"
                             .into(),
                         port: None,
+                        req: None,
                     }))
                     .await;
                 return;
@@ -502,6 +523,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Error {
                             message: "脚本执行并发已满,稍后再试".into(),
                             port: None,
+                            req: None,
                         }))
                         .await;
                     return;
@@ -526,6 +548,7 @@ async fn handle_client_msg(
                 .send(to_json(ServerMsg::Ok {
                     message: format!("运行脚本 {}", name),
                     port: None,
+                    req: None,
                 }))
                 .await;
             tokio::spawn(async move {
@@ -576,6 +599,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Ok {
                             message: "停止信号已发送".into(),
                             port: None,
+                            req: None,
                         }))
                         .await;
                 }
@@ -584,6 +608,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Ok {
                             message: "脚本已结束或不存在".into(),
                             port: None,
+                            req: None,
                         }))
                         .await;
                 }
@@ -606,6 +631,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Ok {
                             message: "停止信号已发送".into(),
                             port: None,
+                            req: None,
                         }))
                         .await;
                 }
@@ -614,14 +640,19 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Ok {
                             message: "宏已结束或不存在".into(),
                             port: None,
+                            req: None,
                         }))
                         .await;
                 }
             }
         }
-        ClientMsg::SetAlias { port, alias } => {
+        ClientMsg::SetAlias {
+            port,
+            alias,
+            req,
+        } => {
             // 远端设备的别名转发是同步阻塞 RPC(最长 10s)——包 spawn_blocking,
-            // 勿占 runtime worker 线程。回执带 port:设备客户端按端口路由在途回执
+            // 勿占 runtime worker 线程。回执带 port+req:设备客户端精确配对在途回执
             // (漏带会等满 10s 超时假报错)。
             let st = state.clone();
             let p = port.clone();
@@ -636,6 +667,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Ok {
                             message: "alias set".into(),
                             port: Some(port),
+                            req,
                         }))
                         .await;
                 }
@@ -644,6 +676,7 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::Error {
                             message: e,
                             port: Some(port),
+                            req,
                         }))
                         .await;
                 }

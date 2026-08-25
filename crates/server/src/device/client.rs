@@ -11,7 +11,7 @@
 //! 消费(单写者保序:open/write/close 同通道,close 不走旁路)。
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,16 +41,22 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 type WsSink =
     SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>;
 
-/// 在途回执(open/set_alias 的 Result、write 的 io 结果),按远端线名路由。
+/// 在途回执(open/set_alias 的 Result、write 的 io 结果)。路由两级:
+/// - 新↔新(回执带 req):按 `req` 精确配对——同端口 close/write 的 Ok 不会
+///   误配在途 open(close 的 Ok 只匹配 close 自己的 req,无 pending 即丢弃);
+/// - 旧版远端(回执无 req):回退端口匹配;写回执连 port 都没有时按 FIFO
+///   配对最老在途回执(命令单通道保序,旧版同步写完才回,顺序即配对)。
 /// Result 的 Ok 载荷 = 服务端实际打开的远端线名(Acquired.resolved;别名解析后
 /// 可能不同于请求串——open_blocking 据此以真名登记 IO,帧分发才不 miss)。
 pub(crate) enum PendingReply {
     Result {
         port: String,
+        req: u64,
         reply: std::sync::mpsc::Sender<Result<String, String>>,
     },
     Write {
         port: String,
+        req: u64,
         reply: std::sync::mpsc::Sender<io::Result<()>>,
     },
 }
@@ -74,6 +80,8 @@ pub(crate) struct DeviceInner {
     /// 会话取消信号(stop 触发,活跃 session 的 select 监听——仅靠 stopped 标志
     /// 会话感知不到,而自己的心跳 Ping/Pong 会持续刷新"无入站判死",连接永不退出)。
     pub(crate) session_stop: tokio::sync::Notify,
+    /// 请求关联 id 发放器(writer 每条 Open/Write/SetAlias 取一个,回执按此配对)。
+    next_req: AtomicU64,
 }
 
 pub struct DeviceClient {
@@ -101,6 +109,7 @@ impl DeviceClient {
                 pending: Mutex::new(Vec::new()),
                 stopped: AtomicBool::new(false),
                 session_stop: tokio::sync::Notify::new(),
+                next_req: AtomicU64::new(1),
             }),
             cmd_rx: tokio::sync::Mutex::new(Some(cmd_rx)),
             device_bus,
@@ -178,7 +187,7 @@ impl DeviceClient {
             }),
             Err(_) => {
                 // 超时:挂起的回执可能晚到,清掉防泄漏(晚到的 acquired 找不到就丢弃)
-                drop_pending(&self.inner, port.as_str());
+                drop_pending_result(&self.inner, port.as_str());
                 Err(SerialError::OpenFailed {
                     port,
                     message: "远端打开超时".into(),
@@ -207,7 +216,7 @@ impl DeviceClient {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => Err(e),
             Err(_) => {
-                drop_pending(&self.inner, port.as_str());
+                drop_pending_result(&self.inner, port.as_str());
                 Err("远端设置别名超时".into())
             }
         }
@@ -456,13 +465,16 @@ impl DeviceClient {
                 // 所有连接(含自连的这条),若无条件扇出,自连时
                 // MetaChanged→重拉→Ports→再扇出→…消息风暴。diff 后:未变化的重复 Ports
                 // 静默,变更传播一轮即收敛。
-                let ports: Vec<PortView> = ports
+                // 排序后入缓存:枚举顺序在系统侧重枚举时可能排列变化,内容未变不应
+                // 触发假变更(Vec 全等对顺序敏感)。
+                let mut ports: Vec<PortView> = ports
                     .into_iter()
                     .map(|mut pv| {
                         pv.info.name = ss_core::normalize_port_key(&pv.info.name);
                         pv
                     })
                     .collect();
+                ports.sort_by(|a, b| a.info.name.cmp(&b.info.name));
                 let mut cached = self.inner.cached_ports.lock().unwrap();
                 if *cached != ports {
                     *cached = ports;
@@ -471,33 +483,51 @@ impl DeviceClient {
                 }
             }
             ServerMsg::Acquired {
-                port, resolved, ..
+                port,
+                resolved,
+                req,
+                ..
             } => {
-                // 回执按请求串路由(pending 以请求串登记);载荷携带解析后真名
-                // (旧版服务端无 resolved 字段 → 回退归一后的回显串,即真名)
+                // 回执配对:带 req 按请求精确配对;无 req(旧版服务端)按端口兜底。
+                // 载荷携带解析后真名(旧版服务端无 resolved 字段 → 回退归一后的回显串,
+                // 即真名)
                 let wire = normalize_wire(&port);
                 let payload = resolved.unwrap_or_else(|| wire.clone());
-                self.route_result(&wire, Ok(payload))
+                self.route_result(req, &wire, Ok(payload))
             }
-            ServerMsg::Ok {
-                port: Some(port), ..
-            } => {
-                let wire = normalize_wire(&port);
-                self.route_write(&wire, Ok(()));
-                let payload = wire.clone();
-                self.route_result(&wire, Ok(payload));
-            }
-            ServerMsg::Error { message, port } => {
-                // open/write/set_alias 失败都走 Error;有 port 路由,无 port 只留痕
-                if let Some(port) = port {
-                    let port = normalize_wire(&port);
-                    self.route_write(
-                        &port,
-                        Err(io::Error::new(io::ErrorKind::Other, message.clone())),
-                    );
-                    self.route_result(&port, Err(message));
-                } else {
-                    tracing::warn!("设备 {} 错误: {}", self.inner.dev.id, message);
+            ServerMsg::Ok { message: _, port, req } => match port {
+                Some(port) => {
+                    let wire = normalize_wire(&port);
+                    self.route_write(req, &wire, Ok(()));
+                    let payload = wire.clone();
+                    self.route_result(req, &wire, Ok(payload));
+                }
+                None => {
+                    // 旧版服务端:写/别名/close 的成功回执都无 port。close 无在途
+                    // pending;命令单通道保序且旧版同步执行完才回,故按 FIFO 配对
+                    // 最老在途回执(先写后别名)。残余误配窗口:close ack 与写回执
+                    // 乱序到达时可能提前放行一个写——旧版下写必然已按序执行,后果
+                    // 仅是"失败被误报为成功"且以 close 收尾,可接受。
+                    self.route_legacy_ok();
+                }
+            },
+            ServerMsg::Error { message, port, req } => {
+                // open/write/set_alias 失败都走 Error;有 port 按 req/端口路由,
+                // 无 port(旧版服务端)按 FIFO 兜底,都没有只留痕
+                match port {
+                    Some(port) => {
+                        let port = normalize_wire(&port);
+                        self.route_write(
+                            req,
+                            &port,
+                            Err(io::Error::new(io::ErrorKind::Other, message.clone())),
+                        );
+                        self.route_result(req, &port, Err(message));
+                    }
+                    None => self.route_legacy_err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("远端错误(无端口路由): {message}"),
+                    )),
                 }
             }
             // 远端事件(端口状态/元数据变更)→ 重拉列表:**不直接扇出本地 meta_bus**
@@ -531,34 +561,98 @@ impl DeviceClient {
         }
     }
 
-    fn route_result(&self, port: &str, result: Result<String, String>) {
+    /// Result 回执路由:带 req 按请求精确配对;None(旧版服务端)按端口兜底。
+    fn route_result(&self, req: Option<u64>, port: &str, result: Result<String, String>) {
         let mut pending = self.inner.pending.lock().unwrap();
-        if let Some(idx) = pending
-            .iter()
-            .position(|p| matches!(p, PendingReply::Result { port: q, .. } if q == port))
-        {
+        let idx = match req {
+            Some(r) => pending
+                .iter()
+                .position(|p| matches!(p, PendingReply::Result { req: q, .. } if *q == r)),
+            None => pending
+                .iter()
+                .position(|p| matches!(p, PendingReply::Result { port: q, .. } if q == port)),
+        };
+        if let Some(idx) = idx {
             if let PendingReply::Result { reply, .. } = pending.remove(idx) {
                 let _ = reply.send(result);
             }
         }
     }
 
-    fn route_write(&self, port: &str, result: io::Result<()>) {
+    /// Write 回执路由:配对规则同 [`Self::route_result`]。
+    fn route_write(&self, req: Option<u64>, port: &str, result: io::Result<()>) {
         let mut pending = self.inner.pending.lock().unwrap();
-        if let Some(idx) = pending
-            .iter()
-            .position(|p| matches!(p, PendingReply::Write { port: q, .. } if q == port))
-        {
+        let idx = match req {
+            Some(r) => pending
+                .iter()
+                .position(|p| matches!(p, PendingReply::Write { req: q, .. } if *q == r)),
+            None => pending
+                .iter()
+                .position(|p| matches!(p, PendingReply::Write { port: q, .. } if q == port)),
+        };
+        if let Some(idx) = idx {
             if let PendingReply::Write { reply, .. } = pending.remove(idx) {
                 let _ = reply.send(result);
             }
         }
     }
+
+    /// 旧版远端的无 port 成功回执:FIFO 配对最老在途回执(先写后别名/open 结果)。
+    /// 命令经单通道保序发出、旧版同步执行完才回——到达顺序即发出顺序,FIFO 即精确。
+    fn route_legacy_ok(&self) {
+        let mut pending = self.inner.pending.lock().unwrap();
+        let idx = pending
+            .iter()
+            .position(|p| matches!(p, PendingReply::Write { .. }))
+            .or_else(|| {
+                pending
+                    .iter()
+                    .position(|p| matches!(p, PendingReply::Result { .. }))
+            });
+        if let Some(idx) = idx {
+            match pending.remove(idx) {
+                PendingReply::Write { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PendingReply::Result { reply, .. } => {
+                    // 载荷(解析后线名)对旧版 set_alias 无意义;open 不走此路径
+                    // (Acquired.port 恒有),空串不会被当作登记名使用
+                    let _ = reply.send(Ok(String::new()));
+                }
+            }
+        }
+    }
+
+    /// 旧版远端的无 port 失败回执:FIFO 配对同 [`Self::route_legacy_ok`]。
+    fn route_legacy_err(&self, err: io::Error) {
+        let mut pending = self.inner.pending.lock().unwrap();
+        let idx = pending
+            .iter()
+            .position(|p| matches!(p, PendingReply::Write { .. }))
+            .or_else(|| {
+                pending
+                    .iter()
+                    .position(|p| matches!(p, PendingReply::Result { .. }))
+            });
+        if let Some(idx) = idx {
+            match pending.remove(idx) {
+                PendingReply::Write { reply, .. } => {
+                    let _ = reply.send(Err(err));
+                }
+                PendingReply::Result { reply, .. } => {
+                    let _ = reply.send(Err(err.to_string()));
+                }
+            }
+        }
+    }
 }
 
-fn drop_pending(inner: &DeviceInner, port: &str) {
+/// 超时清理:**只清 Result 类**(open/set_alias 超时路径用)——同端口在途的 Write
+/// 回执与之无关,不得殃及(其真实结果仍会到达并被正常消费/丢弃)。
+fn drop_pending_result(inner: &DeviceInner, port: &str) {
     inner.pending.lock().unwrap().retain(|p| match p {
-        PendingReply::Result { port: q, .. } | PendingReply::Write { port: q, .. } => q != port,
+        PendingReply::Result { port: q, .. } => q != port,
+        PendingReply::Write { .. } => true,
     });
 }
 
@@ -570,6 +664,7 @@ fn normalize_wire(wire: &str) -> String {
 }
 
 /// writer 里处理一条命令:挂回执(回执由 reader 收到 Acquired/Ok/Error 时路由)+ 发 JSON。
+/// Open/Write/SetAlias 各取一个 req id 同时写进 pending 与出站消息——回执按 req 精确配对。
 async fn handle_command(
     sink: &Arc<tokio::sync::Mutex<WsSink>>,
     inner: &Arc<DeviceInner>,
@@ -581,15 +676,27 @@ async fn handle_command(
             config,
             reply,
         } => {
+            let req = inner.next_req.fetch_add(1, Ordering::Relaxed);
             inner.pending.lock().unwrap().push(PendingReply::Result {
                 port: port.clone(),
+                req,
                 reply,
             });
-            sink_send_json(sink, &ClientMsg::Open { port, config }).await
+            sink_send_json(
+                sink,
+                &ClientMsg::Open {
+                    port,
+                    config,
+                    req: Some(req),
+                },
+            )
+            .await
         }
         DeviceCommand::Write { port, data, reply } => {
+            let req = inner.next_req.fetch_add(1, Ordering::Relaxed);
             inner.pending.lock().unwrap().push(PendingReply::Write {
                 port: port.clone(),
+                req,
                 reply,
             });
             // JSON 文本不能携带任意字节,二进制走 hex(线上约定,两端同步)
@@ -597,19 +704,32 @@ async fn handle_command(
                 port,
                 data: hex::encode(&data),
                 encoding: "hex".into(),
+                req: Some(req),
             };
             sink_send_json(sink, &msg).await
         }
         DeviceCommand::ClosePort { port } => {
-            // fire-and-forget:远端 close 幂等;句柄 Drop 触发(读写双句柄会双发,无害)
-            sink_send_json(sink, &ClientMsg::Close { port }).await
+            // fire-and-forget:远端 close 幂等;句柄 Drop 触发(close_sent 标志保证
+            // 读写双句柄只发一次)。close 无在途回执——其 Ok(req)配不到任何 pending,
+            // 天然不会误配同端口在途的 open/write(请求级关联的意义所在)。
+            sink_send_json(sink, &ClientMsg::Close { port, req: None }).await
         }
         DeviceCommand::SetAlias { port, alias, reply } => {
+            let req = inner.next_req.fetch_add(1, Ordering::Relaxed);
             inner.pending.lock().unwrap().push(PendingReply::Result {
                 port: port.clone(),
+                req,
                 reply,
             });
-            sink_send_json(sink, &ClientMsg::SetAlias { port, alias }).await
+            sink_send_json(
+                sink,
+                &ClientMsg::SetAlias {
+                    port,
+                    alias,
+                    req: Some(req),
+                },
+            )
+            .await
         }
         DeviceCommand::RefreshList => sink_send_json(sink, &ClientMsg::List).await,
     }

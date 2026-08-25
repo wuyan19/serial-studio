@@ -9,6 +9,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -24,6 +25,9 @@ pub(crate) struct RemoteSharedIo {
     /// 读超时(取 SerialConfig.timeout_ms):无数据时 read 按此返回 TimedOut,
     /// 与本地串口的阻塞读语义一致(port_task 读循环依赖)。
     read_timeout: Duration,
+    /// ClosePort 已发送标记:读写双句柄(try_clone 共享本 Arc)各 drop 一次,
+    /// 本标志保证关闭通知只发一次(compare_exchange 裁决)。
+    close_sent: AtomicBool,
 }
 
 struct Inbound {
@@ -43,6 +47,7 @@ impl RemoteSharedIo {
             }),
             cv: Condvar::new(),
             read_timeout,
+            close_sent: AtomicBool::new(false),
         }
     }
 
@@ -131,13 +136,16 @@ impl RemotePortIo {
 }
 
 /// 句柄释放(port_task teardown:manager 末位 release → Close 命令 → run() 返回 →
-/// 读写句柄 drop)即通知远端关闭端口。**例外**:同端口还有其它活句柄(并发 acquire
-/// 的 TOCTOU 输家——远端占有权以 ws 连接为粒度坍缩成一份,输家按"我独占"发 Close
-/// 会把赢家的端口拆掉)时不发,由最后一个句柄负责关闭。读写双句柄各 drop 一次的
-/// 双发由此也消除了第二次(第二个句柄 drop 时第一个的条目已失效)。
+/// 读写句柄 drop)即通知远端关闭端口。两道防误拆闸门:
+/// - **同端口还有其它活句柄**(并发 acquire 的 TOCTOU 输家——远端占有权以 ws 连接为
+///   粒度坍缩成一份,输家按"我独占"发 Close 会把赢家的端口拆掉):不发,让渡给最后
+///   存活的句柄;
+/// - **close_sent 标志**(compare_exchange 裁决,读写双句柄共享同一 Arc):保证同一条
+///   逻辑关闭只发一次 ClosePort——此前第二个句柄 drop 会再发一次(幂等无害但与注释
+///   相悖),现在从机制上消除。
 impl Drop for RemotePortIo {
     fn drop(&mut self) {
-        // 还有别的活句柄(非同一 Arc 实例)挂着同端口 → 关闭责任让给它
+        // 还有别的活句柄(非同一 Arc 实例)挂着同端口 → 关闭责任让给它(不动标志)
         let others_alive = {
             let ports = self.inner.ports.lock().unwrap();
             ports.iter().any(|(p, weak)| {
@@ -151,9 +159,12 @@ impl Drop for RemotePortIo {
         if others_alive {
             return;
         }
-        let _ = self.cmd_tx.send(DeviceCommand::ClosePort {
-            port: self.port.clone(),
-        });
+        // 双句柄只发一次:第一个 drop 的胜出发送,第二个见到标志直接跳过
+        if !self.shared.close_sent.swap(true, Ordering::AcqRel) {
+            let _ = self.cmd_tx.send(DeviceCommand::ClosePort {
+                port: self.port.clone(),
+            });
+        }
     }
 }
 
