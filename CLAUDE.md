@@ -39,7 +39,7 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 
 ### 发版
 
-版本号同步**四处**,用仓库根 `bump-version.mjs` 一键完成:`node bump-version.mjs 0.7.1` 改 `Cargo.toml`(workspace.package)、`crates/tauri-app/tauri.conf.json`、`ui/package.json`(+`ui/package-lock.json`),并跑 `cargo check` 更新 `Cargo.lock`(workspace 成员 version 跟着变,需一起提交)。脚本无敏感信息、入库共享。本地签名构建用 `build-signed.mjs`(含密码、gitignore 不入库)。
+版本号同步**四处**,用仓库根 `bump-version.mjs` 一键完成:`node bump-version.mjs 0.7.1` 改 `Cargo.toml`(workspace.package)、`crates/tauri-app/tauri.conf.json`、`ui/package.json`(+`ui/package-lock.json`),并跑 `cargo check` 更新 `Cargo.lock`(workspace 成员 version 跟着变,需一起提交)。脚本无敏感信息、入库共享。本地签名构建用 `build-signed.mjs`(已入库,无秘密;凭据在 gitignore 的 `.tauri/`——`app.key` 私钥 + `app.pwd` 口令)。
 
 推 `v*` tag 触发 `.github/workflows/release.yml`(4 矩阵:mac aarch64/x64、ubuntu、windows),tauri-action 建 **DRAFT** release(正文仅占位)。绿后**先写 release note**:`gh release edit <tag> --notes-file <file>`,按主题(✨新功能 / 🔧改进 / 🐛修复)组织 `v<上版本>..v<本版本>` 的改动写给用户看,而非罗列 commit;再 `gh release edit <tag> --draft=false` 发布。**坑**:`git push --follow-tags` 只推 annotated tag,lightweight tag(`git tag v0.x.y` 不带 `-a`/`-m`)会被静默跳过、CI 不触发。必须 `git tag -a v0.x.y -m "v0.x.y"` 且显式 `git push origin v0.x.y`。发布是 outward 动作,需用户明确授权后再执行。
 
