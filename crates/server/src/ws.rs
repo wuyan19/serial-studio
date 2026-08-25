@@ -291,15 +291,15 @@ async fn handle_client_msg(
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
         ClientMsg::Open { port, config } => {
-            // canon 先行:Acquired 带上解析后的真名(resolved)。设备客户端以真名登记 IO,
+            // resolved 从 acquire 结果取(单一真相):acquire 内部 canon 一次,
+            // 回执口径与实际 map 键恒一致。设备客户端以真名登记 IO,
             // 数据帧(map 键口径)才与登记键一致——别名后缀寻址(如 test::GPS)的 RX 通路。
-            let resolved = state.manager.canon_key(&port);
-            match state
-                .manager
-                .acquire(resolved.clone(), config, session)
-                .await
-            {
-                Ok(AcquireResult::Opened { config, holders }) => {
+            match state.manager.acquire(port.clone(), config, session).await {
+                Ok(AcquireResult::Opened {
+                    config,
+                    holders,
+                    resolved,
+                }) => {
                     let _ = out_tx
                         .send(to_json(ServerMsg::Acquired {
                             port,
@@ -310,7 +310,11 @@ async fn handle_client_msg(
                         }))
                         .await;
                 }
-                Ok(AcquireResult::Attached { config, holders }) => {
+                Ok(AcquireResult::Attached {
+                    config,
+                    holders,
+                    resolved,
+                }) => {
                     let _ = out_tx
                         .send(to_json(ServerMsg::Acquired {
                             port,

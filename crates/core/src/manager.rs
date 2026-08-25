@@ -178,7 +178,8 @@ impl SerialManager {
 
     /// 占有端口份额：首个持有者真正打开，后续持有者附加（忽略其 config）。
     /// 并发安全：慢路径打开后做 TOCTOU 重检，避免泄漏句柄与相互覆盖。
-    /// 端口键入口规范化(裸名补 `local::`),map 键恒为复合键单一形态。
+    /// 端口键入口经 canon_key 规范化+解析,结果带 `resolved`(实际 map 键)——
+    /// 调用方从结果取,勿在入口外再自行 canon(两次解析间索引可能重建而分叉)。
     pub async fn acquire(
         &self,
         port: String,
@@ -227,7 +228,11 @@ impl SerialManager {
         };
         let is_open = matches!(action, Action::Open);
         if let Action::Attach { config, holders } = action {
-            return Ok(AcquireResult::Attached { config, holders });
+            return Ok(AcquireResult::Attached {
+                config,
+                holders,
+                resolved: port.clone(),
+            });
         }
 
         // Open / Reopen 共用:锁外 spawn_blocking 打开(不持锁做 I/O)
@@ -288,7 +293,11 @@ impl SerialManager {
                             holders,
                         });
                     }
-                    AcquireResult::Opened { config, holders }
+                    AcquireResult::Opened {
+                        config,
+                        holders,
+                        resolved: port.clone(),
+                    }
                 } else {
                     // 并发赢家已 open/reopen:丢弃刚开的句柄,转 attach(insert 本 session)
                     drop(opened);
@@ -303,6 +312,7 @@ impl SerialManager {
                     AcquireResult::Attached {
                         config: handle.config.clone(),
                         holders,
+                        resolved: port.clone(),
                     }
                 }
             } else if is_open {
@@ -346,7 +356,11 @@ impl SerialManager {
                         }),
                     },
                 );
-                AcquireResult::Opened { config, holders: 1 }
+                AcquireResult::Opened {
+                    config,
+                    holders: 1,
+                    resolved: port.clone(),
+                }
             } else {
                 // Reopen 但端口已被末位 release 删除:丢弃句柄
                 drop(opened);
@@ -855,7 +869,7 @@ mod tests {
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap();
         let res = m.acquire("COM7".into(), cfg(9600), s2).await.unwrap();
         match res {
-            AcquireResult::Attached { config, holders } => {
+            AcquireResult::Attached { config, holders, .. } => {
                 assert_eq!(holders, 2);
                 assert_eq!(config.baud_rate, 115200, "请求的 9600 应被忽略");
             }
@@ -1278,7 +1292,14 @@ mod tests {
         let mut rx = m.event_bus().subscribe();
         let s = SessionId::next();
         assert_eq!(m.canon_key("GPS"), "COM7", "别名应被解析");
-        m.acquire("GPS".into(), cfg(115200), s).await.unwrap();
+        // resolved = 解析后的 map 键(单一真相:回执方以此登记,勿在入口外再 canon)
+        let res = m.acquire("GPS".into(), cfg(115200), s).await.unwrap();
+        match res {
+            AcquireResult::Opened { resolved, .. } => {
+                assert_eq!(resolved, "COM7", "结果应携带解析后的真名");
+            }
+            other => panic!("期望 Opened,得到 {:?}", other),
+        }
         // 解析后的真实键命中;别名写法同样命中同一条目
         assert!(m.is_open("COM7").await);
         assert!(m.is_open("GPS").await, "再次用别名访问应指向同一条目");

@@ -98,8 +98,8 @@ impl AddressResolver {
     /// 同样触发惰性 watcher——纯 MCP 场景(无任何端口操作)也要有新鲜索引。
     pub fn lookup_port(&self, alias_or_name: &str) -> AliasMatch {
         self.inner.ensure_watcher();
-        let aliases = self.inner.port_aliases.read().unwrap().clone();
-        let real = self.inner.real_names.read().unwrap().clone();
+        let aliases = self.inner.port_aliases.read().unwrap();
+        let real = self.inner.real_names.read().unwrap();
         resolve_bare(alias_or_name, &real, &aliases)
     }
 
@@ -121,8 +121,10 @@ impl Inner {
         if key.contains(PORT_KEY_SEP) {
             self.resolve_device_scope(key)
         } else {
-            let aliases = self.port_aliases.read().unwrap().clone();
-            let real = self.real_names.read().unwrap().clone();
+            // 热路径(send 每次都过):持读锁查表即返,不做整表克隆;
+            // resolve_bare 纯同步短临界区,锁内无 IO 无重入
+            let aliases = self.port_aliases.read().unwrap();
+            let real = self.real_names.read().unwrap();
             match resolve_bare(key, &real, &aliases) {
                 AliasMatch::Unique(k) => k,
                 AliasMatch::Ambiguous(cands) => {

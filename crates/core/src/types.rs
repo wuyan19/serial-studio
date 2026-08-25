@@ -151,6 +151,8 @@ impl SessionId {
 }
 
 /// acquire 的结果：区分"真正打开"与"附加到已开端口"。
+/// `resolved` = 服务端实际使用的 map 键(canon_key 解析后,别名/设备昵称已重写为真名):
+/// 回执方(WS 设备客户端、UI)以它登记路由,数据帧(map 键口径)才与登记键一致。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AcquireResult {
@@ -158,12 +160,14 @@ pub enum AcquireResult {
     Opened {
         config: SerialConfig,
         holders: usize,
+        resolved: String,
     },
     /// 端口已开，本次为附加（持有者 +1）。config 为端口当前实际配置
     /// （请求的配置被忽略），调用方应据此告知用户。
     Attached {
         config: SerialConfig,
         holders: usize,
+        resolved: String,
     },
 }
 

@@ -557,7 +557,8 @@ export class LocalTransport extends TransportEventBase implements Transport {
       this.handlers.data.forEach((cb) => cb(port, bytes));
     };
     this.streamChannels.set(port, chan);
-    // 后端返回 AcquireResult 枚举：{kind:"opened",config} | {kind:"attached",config,holders}
+    // 后端返回 AcquireResult 枚举：{kind:"opened"|"attached",config,holders,resolved}
+    // (resolved=服务端解析后的 map 键;本地 UI 恒传真键,resolved≈port,此处不用)
     const r = await tauriInvoke<{ kind: string; config: SerialConfig; holders?: number }>(
       "open_port_stream",
       { port, config, onEvent: chan }
