@@ -3,6 +3,7 @@
 //! 抽成 lib 是为了让 Tauri app（GUI 模式）和独立 ss-server bin（headless 模式）
 //! 共用同一套路由——方案 B 的核心：一份后端，两种宿主。
 
+pub mod address;
 pub mod config;
 pub mod device;
 pub mod macros_store;
@@ -75,6 +76,9 @@ pub struct AppState {
     /// 远程设备连接池:每注册设备一条 WS 到远端 ss。挂在 AppState(跨 ServiceSupervisor
     /// 热重启保留,连接不重建);start() 惰性幂等,由 supervisor.start 触发。
     pub devices: Arc<device::DeviceClientManager>,
+    /// 端口寻址解析:别名(本机/远端)与设备昵称 → 规范键。manager 的 KeyResolver
+    /// 与 MCP 直查共用同一实例;meta_bus 驱动别名索引重建。
+    pub addresses: Arc<address::AddressResolver>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -83,14 +87,21 @@ const SCRIPT_MAX_CONCURRENCY: usize = 4;
 /// 构造默认状态(生产组装点)。宏定义存前端本地，服务端无状态（只执行 run_macro）。
 /// opener 注入 CompositeOpener:本地串口走 serial,远端设备键路由到 DeviceClientManager
 /// (core 的 RealPortOpener 仅在测试直接使用)。
+/// manager 注入 AddressResolver 的 KeyResolver:别名/设备昵称解析单点在 manager 边界,
+/// WS/MCP/Telnet/脚本各出口自动获得别名能力。
 pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let (meta_tx, _) = broadcast::channel(16);
     let (script_tx, _) = broadcast::channel(16);
     let devices = Arc::new(device::DeviceClientManager::from_registry(meta_tx.clone()));
-    let manager = Arc::new(SerialManager::new(
+    let addresses = Arc::new(address::AddressResolver::new(
+        Arc::clone(&devices),
+        meta_tx.clone(),
+    ));
+    let manager = Arc::new(SerialManager::with_key_resolver(
         event_bus.clone(),
         Arc::new(device::CompositeOpener::new(Arc::clone(&devices))),
+        addresses.key_resolver_fn(),
     ));
     let enable_scripting = Arc::new(std::sync::atomic::AtomicBool::new(
         settings::load().enable_scripting,
@@ -105,6 +116,7 @@ pub fn create_state() -> AppState {
         closers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         devices,
+        addresses,
     }
 }
 
@@ -121,8 +133,8 @@ pub struct PortView {
 }
 
 /// 端口键的裸名部分(剥设备前缀)。ports.json 按裸名存本机端口的别名——
-/// 复合键时代的存储键不变,读写点一律经此剥前缀(别名属端口所在机器,远端端口
-/// 的别名随远端 PortView 透传,不在本地 ports.json)。
+/// 本机端口键本就是裸名(遗留 `local::` 输入经 normalize 剥除),此函数对本机口
+/// 恒等;远端口别名随远端 PortView 透传,不走本地 ports.json。
 pub fn bare_name_of(port: &str) -> &str {
     ss_core::split_port_key(port).1
 }
@@ -151,11 +163,13 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             PortView { info, alias }
         })
         .collect();
-    // 远端桶(键加本设备段;后缀保持远端线名)。只收远端自己的口——见上文"透传深度限 1"
+    // 远端桶(键加本设备段;后缀保持远端线名)。只收远端自己的口——线名含 `::`
+    // 即远端的远端桶(含指向本机的回声),不透传(深度限 1);线名已在 DeviceClient
+    // 入站归一(剥遗留 local::),此处直接判定。
     for (dev_id, ports) in state.devices.remote_buckets() {
         for pv in ports {
-            if ss_core::split_port_key(&pv.info.name).0 != ss_core::LOCAL_DEVICE_ID {
-                continue; // 远端的远端桶(含指向本机的回声),不透传
+            if pv.info.name.contains(ss_core::PORT_KEY_SEP) {
+                continue; // 远端的远端桶,不透传;多级级联的口在所在设备自己的 UI 看(路由仍透传)
             }
             let name = ss_core::compose_port_key(&dev_id, &pv.info.name);
             views.push(PortView {
@@ -191,6 +205,7 @@ pub fn set_alias_and_notify(
     port: &str,
     alias: Option<String>,
 ) -> Result<(), String> {
+    validate_alias(&alias)?;
     match ss_core::split_port_key(port) {
         (ss_core::LOCAL_DEVICE_ID, name) => {
             port_meta_store::set_alias(name, alias)?;
@@ -203,6 +218,27 @@ pub fn set_alias_and_notify(
             state.devices.set_alias_blocking(dev, rest, alias)
         }
     }
+}
+
+/// 别名合法性校验(set_alias 唯一写入口的闸门):
+/// - 含 `::` 会污染复合键首段切分(别名只按裸名整串匹配,含分隔符即成不可达死名字);
+/// - 与真实枚举串口名冲突会让寻址产生歧义(Windows 串口名大小写不敏感,一并比对)。
+/// 注:此校验只管本机写入的别名;远端设备的别名归远端校验——跨机同名冲突由
+/// AddressResolver 的"真实名恒优先于别名"在解析侧兜底。
+pub fn validate_alias(alias: &Option<String>) -> Result<(), String> {
+    let Some(a) = alias else {
+        return Ok(()); // None = 清除,合法
+    };
+    if a.contains(ss_core::PORT_KEY_SEP) {
+        return Err(format!("别名不能包含「{0}」(复合键分隔符): {a}", ss_core::PORT_KEY_SEP));
+    }
+    if ss_core::serial::list_port_names()
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(a))
+    {
+        return Err(format!("别名「{a}」与真实串口名冲突,请换一个"));
+    }
+    Ok(())
 }
 
 /// 脚本编写 SKILL 全文(嵌入二进制;前端「脚本指南」对话框展示 / 复制给外部 Agent 用)。
@@ -260,6 +296,20 @@ mod tests {
     //! 前端 PortInfo 接口（{name,opened,holders,alias?}）才能无感匹配。
 
     use super::*;
+
+    #[test]
+    fn alias_validation_rejects_separator_and_real_port_names() {
+        // 含复合键分隔符 → 污染首段切分
+        assert!(validate_alias(&Some("te::st".into())).is_err());
+        // None(清除)与普通名合法;真实串口名的冲突检测依赖系统枚举,
+        // CI/容器上枚举常为空——此处只断言不含分隔符的普通值不被 :: 规则误杀。
+        // (真实端口名冲突分支由 validate_alias 内 list_port_names 比对,环境相关,不做硬断言)
+        assert!(validate_alias(&None).is_ok());
+        assert!(validate_alias(&Some("GPS".into())).is_ok() || {
+            // 若本机恰好存在名为 GPS 的串口则合法被拒——两种结果都视为规则生效
+            ss_core::serial::list_port_names().iter().any(|p| p == "GPS")
+        });
+    }
 
     #[test]
     fn port_view_flattens_to_flat_wire() {

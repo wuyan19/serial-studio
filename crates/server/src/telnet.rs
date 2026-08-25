@@ -119,11 +119,11 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
             break;
         }
     }
-    // 规范化为复合键:裸名(旧习惯输入)补 local:: 前缀——后续事件过滤按 map 键
-    // 比对,不规范化时写方向正常但读方向静默无回显
-    let port: String = ss_core::normalize_port_key(
-        port.trim_matches(|c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0'),
-    );
+    // 规范化+别名解析为 map 键(裸名/端口别名/设备昵称作用域 → 规范键)——
+    // 后续事件过滤按 map 键比对,不解析时写方向正常但读方向静默无回显
+    let port: String = state.manager.canon_key(port.trim_matches(
+        |c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0',
+    ));
 
     if port.is_empty()
         || !state.manager.is_open(&port).await

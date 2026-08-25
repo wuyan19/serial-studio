@@ -227,6 +227,10 @@ async fn run_script_inner(
 ) -> Result<(), ScriptError> {
     let deadline = timeout.as_ref().map(|t| Instant::now() + *t);
 
+    // 绑定端口经 canon_key 规范化+别名解析(裸名/端口别名/设备昵称作用域 → map 键)。
+    // 原语的显式 port 参数无需在此处理——它们直连 manager 方法,方法入口自带 canon。
+    let port = manager.canon_key(&port);
+
     // exec 在 tokio timeout 包裹下跑:到点未完成即 drop(中止 JS),返回 Timeout。
     let exec = async move {
         let rt = AsyncRuntime::new().map_err(|e| ScriptError::Engine(e.to_string()))?;

@@ -144,24 +144,25 @@ export function dissolveGroup<T extends { group?: string }>(
   return { next, count };
 }
 
-// ===== 端口复合键（devId::name，多 Transport 共存时区分本地/远程同名端口） =====
+// ===== 端口复合键(devId::name,区分远程设备;本地端口键=裸名) =====
 
 /** 组装端口复合键：`${devId}::${name}`。串口名不含 `::`，分隔安全。 */
 export function portIdOf(devId: string, name: string): PortId {
   return `${devId}::${name}`;
 }
 
-/** 解析端口复合键。仅按首个 `::` 切分：devId（UUID 或 "local"）不含 `::`，
- *  name（如 /dev/ttyUSB0）含 `/` 但不含 `::`。无分隔符时按本地裸端口名兼容旧值。 */
+/** 解析端口复合键。仅按首个 `::` 切分：devId（UUID）不含 `::`，
+ *  name（如 /dev/ttyUSB0）含 `/` 但不含 `::`。无分隔符 = 本机裸端口名（规范形态）。 */
 export function parsePortId(id: PortId): { devId: string; name: string } {
   const idx = id.indexOf("::");
   if (idx < 0) return { devId: "local", name: id };
   return { devId: id.slice(0, idx), name: id.slice(idx + 2) };
 }
 
-/** 线上端口名 → 完整 pid（事件 ingest 用）。本地 transport 的线名已是复合键
- *  （pid ≡ 线名，直通）；远程 transport 的线名是远端侧键（远端旧版为裸名），
- *  需加本设备前缀——两级 "uuid::local::COM3" 即在此自然产生（级联）。 */
+/** 线上端口名 → 完整 pid（事件 ingest 用）。本地 transport 的线名已是本机视角键
+ *  （本地口=裸名、远端桶=devId::name,pid ≡ 线名,直通）；远程 transport 的线名是
+ *  远端侧键(远端视角的裸名或其级联键),需加本设备前缀——
+ *  两级 "uuid::uuid2::COM3" 即在此自然产生（级联）。 */
 export function wireToPid(devId: string, wirePort: string): PortId {
   return devId === "local" ? (wirePort as PortId) : portIdOf(devId, wirePort);
 }

@@ -63,7 +63,8 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 ### PortIo 与端口复合键(远程串口的根基)
 
 - **`PortIo`**(`core/src/port_io.rs`):全双工字节通道窄 trait(`Read + Write + Send + try_clone`)。read 的 TimedOut=空闲续轮、非 TimedOut=断开(触发 drainer)——语义与 serialport 阻塞读对齐,manager/port_task 不感知传输介质。本地实现 `SerialPortIo`(core);远程实现 `RemotePortIo`(server 层 `device/port_io.rs`,推→拉缓冲 + 命令通道写)。未来 TCP raw / RFC 2217 / BLE 实现同一 trait 即可接入。
-- **复合键**:`${devId}::${portName}`(`local::COM3` / `uuidB::local::COM3`)。compose/split/normalize 三函数在 `core/src/types.rs` 单一定义;**split 只剥首段、后缀整体透传**——多级级联(A 注册 B、B 注册 C)逐层路由无特判。manager 所有端口入口 normalize(map 键恒规范单一形态,裸名与复合键指向同一条目)。**事件 `port` 字段恒为 manager map 键**(与 IO 层远端线名解耦)。
+- **端口键**:本机=**裸名**(`COM5`),远端=`${devId}::${portName}`(`uuidB::COM5`),级联逐段叠加。`local::` 仅是遗留输入标记——normalize 剥一层(兼容旧客户端/旧版远端互操作),任何出口(map 键/事件/列表)不得再产生。compose/split/normalize 三函数在 `core/src/types.rs` 单一定义;**split 只剥首段、后缀整体透传**——多级级联(A 注册 B、B 注册 C)逐层路由无特判。manager 所有端口入口经 `canon_key`(normalize + 别名解析,见下)。**事件 `port` 字段恒为 manager map 键**(与 IO 层远端线名解耦)。混版本组网:**新版客户端 ↔ 旧版远端**全兼容(出站裸名靠旧版 normalize 兜底;入站 DeviceClient 单点归一剥 local::);**旧版 hub ↔ 新版设备**的 open/write 可通但 RX 断流(旧 hub 无入站归一,匹配不上新设备的裸名帧)——升级时设备端须先于或同时与 hub 升级,release note 必须写明。open 回执带 `resolved` 字段(Acquired,服务端解析后的真名):设备客户端以真名登记 IO,别名后缀寻址(`test::GPS`)的 RX 依赖此字段。
+- **别名寻址**(server/src/address.rs,`AddressResolver`):别名解析单点在 manager 边界(canon_key 注入 KeyResolver),WS/MCP/Telnet/脚本各出口自动获得。规则:完整键首段甄别(id 权威,唯一设备昵称重写为 id);裸名查别名索引(本机优先→唯一远端;多命中 warn+透传,MCP 报候选)。索引由 meta_bus 驱动内存重建(热路径零磁盘 IO)。校验:端口别名禁含 `::`、禁与真实串口名同名(set_alias_and_notify 闸门);设备昵称另加禁重复/禁 "local"(remotes_store::save 闸门)。
 - **组装点** `create_state()`(server/src/lib.rs):注入 `CompositeOpener`(local → serial::open;非 local → DeviceClientManager,**阻塞同步,在 acquire 的 spawn_blocking 里调**)。
 - **DeviceClientManager**(server/src/device/):每注册设备一条 WS(读 remotes.json,eager 连接,退避重连,协议层 Ping 心跳 10s/20s,断连积压命令在新会话开始时丢弃),挂 AppState 跨热重启保留,`start()` 惰性幂等(supervisor.start 触发)。断连=USB 拔插:RemotePortIo read 返 Err → drainer 标 disconnected 保占有权 → reopen 走新连接。**防环=list 合并的透传深度限 1**:远端桶只收远端自己的口(线名首段 local),丢弃远端的远端桶——否则自连/互注册时列表每轮上报自我复制(回声环,4→8→12…直至消息风暴拖死进程)。自连(把本机地址注册为远程设备)因此成为合法形态:本地口的远程镜像,open 路由回本机(附加到同一端口的占有权)。多级级联的口在所在设备自己的 UI 看(路由仍逐层透传,仅列表不展示)。
 - **list 合并**(server/src/lib.rs::list_ports_with_meta):本地桶(manager 枚举 + 本地别名)⊕ 远端桶(DeviceClient 缓存的远端 PortView 透传,**远端别名归端口所在机器**)⊕ 本地占有权快照覆盖(opened/holders/disconnected 以本地为唯一真相)。
@@ -99,7 +100,7 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 
 `Transport` 接口屏蔽 IPC/WS 协议差异,组件只懂领域(port/bytes/macro)。`LocalTransport`(Tauri invoke + event)与 `RemoteTransport`(WS)两实现,继承 `TransportEventBase` 共用 on* 事件目录(新增事件只改 `TransportEventsMap` + 基类,勿在两实现各抄一份)。运行形态判定唯一入口 `lib.ts::getMode()`("local" | "remote-window" | "web"),勿在别处重组 `isTauri`/`getRemoteFromUrl`。
 
-**端口键模型(P1 后)**:**线名即 pid**——本地 transport 的事件/列表线名是后端复合键(直通);远程 transport 的线名是远端侧键(加设备前缀,两级级联 `uuidA::local::COM3` 自然产生)。事件 ingest 用 `lib.ts::wireToPid(devId, 线名)`;列表桶内条目用 `bucketPidOf(grpDevId, name)`(幂等);展示名 `displayPortName`(rsplit `::` 末段)。**Transport 命令面收完整 pid**:LocalTransport 直传(Rust 规范化),RemoteTransport 内部 `wireName()` 剥首段。
+**端口键模型(裸名时代)**:**线名即 pid**——本地 transport 的事件/列表线名是后端键(本机=裸名、远端桶=`devId::name`,直通);远程 transport 的线名是远端侧键(加设备前缀,两级级联 `uuidA::uuidB::COM3` 自然产生)。事件 ingest 用 `lib.ts::wireToPid(devId, 线名)`;列表桶内条目用 `bucketPidOf(grpDevId, name)`(幂等);展示名 `displayPortName`(rsplit `::` 末段)。**Transport 命令面收完整 pid**:LocalTransport 直传(Rust 规范化),RemoteTransport 内部 `wireName()` 剥首段。
 
 **桌面 local 形态只有 "local" 一个 transport**——远程设备连接在后端(DeviceClientManager),前端经 `onDevices`(devices-changed 事件)观察在线状态、断连中止、上线重放;设备增删走 save_remotes(后端钩子 update_registry),断开/重连走 `device_disconnect`/`device_connect` 命令。RemoteTransport 仅存在于 web/remote-window 形态(前端直连远端 ss)。`store.ts` 的 `ports_listed` 对本地合并列表按键首段自动分桶。
 
@@ -131,7 +132,7 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 - **`AppState` 跨 `ServiceSupervisor` 重启保留**,只换 listener(热重启不丢串口连接/宏/设备连接)。
 - **WS 出站必须经 `RemoteTransport.send()`(await open)**,禁止裸 `ws.send`——CONNECTING 态会抛 `InvalidStateError`。
 - **数据帧 layout** 和 **换行逻辑** 各自只有一处定义,改一处要找另一处。
-- **复合键解析只按首个 `::` 切分、后缀整体透传**(级联根基);**manager 端口入口恒 normalize**(裸名与复合键同一条目,占有权单一事实);**事件 `port` 字段恒为 map 键**。
+- **复合键解析只按首个 `::` 切分、后缀整体透传**(级联根基);**manager 端口入口恒 canon**(normalize 剥遗留 local:: + 别名解析,`COM5`/`local::COM5` 同一条目,占有权单一事实);**事件 `port` 字段恒为 map 键**;**本地端口键恒为裸名,任何出口不得再产生 `local::` 前缀**。
 - **设备连接的写/开/关走同一 unbounded 命令通道**(单写者保序,close 不走旁路);RemotePortIo 的 write 回执用 std mpsc 限时等待(spawn_blocking 线程必返回)。
 - **DeviceClient 收到的通知类消息(MetaChanged/事件)不得直接扇出本地 meta_bus**——本地 meta_bus 会把 MetaChanged 推给所有连接(含自连这条),自连时形成回授环(消息风暴,CPU 100%)。变更一律走 RefreshList 重拉 → Ports 缓存 **diff** → 真变了才通知本地,传播一轮即收敛。
 - 服务器默认绑 `0.0.0.0` 且**无认证**——任何人可达即可开/发/读串口。安全相关改动需顾及此默认;远程设备下沉后,本机脚本可主动连出任意注册设备(SSRF 面=remotes.json 白名单)。

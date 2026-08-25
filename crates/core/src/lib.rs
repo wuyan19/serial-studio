@@ -25,7 +25,7 @@ pub mod types;
 pub use error::SerialError;
 pub use event_bus::{EventBus, SerialEvent};
 pub use macros::{run_macro, Macro, MacroError, MacroStep};
-pub use manager::SerialManager;
+pub use manager::{KeyResolver, SerialManager};
 pub use opener::{PortOpener, RealPortOpener};
 pub use port_io::{PortIo, SerialPortIo};
 pub use port_task::{PortCommand, PortHandle};

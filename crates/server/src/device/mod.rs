@@ -27,7 +27,8 @@ pub(crate) enum DeviceCommand {
     Open {
         port: String,
         config: SerialConfig,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
+        /// Ok 载荷 = 服务端实际打开的远端线名(Acquired.resolved;登记 IO 用真名)
+        reply: std::sync::mpsc::Sender<Result<String, String>>,
     },
     Write {
         port: String,
@@ -40,7 +41,8 @@ pub(crate) enum DeviceCommand {
     SetAlias {
         port: String,
         alias: Option<String>,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
+        /// Ok 载荷(解析后线名)对别名设置无意义,调用方只看成败
+        reply: std::sync::mpsc::Sender<Result<String, String>>,
     },
     /// 重拉远端端口列表(远端 MetaChanged/事件到达时触发;结果经 Ports 消息
     /// 更新缓存并 diff 决定是否通知本地——**不直接扇出**,防自连回授环)。
@@ -191,6 +193,30 @@ impl DeviceClientManager {
             .values()
             .map(|c| c.state_view())
             .collect()
+    }
+
+    /// 设备 id 是否已注册(完整键首段甄别:id 恒权威,昵称只在非 id 时尝试)。
+    pub fn is_registered(&self, dev_id: &str) -> bool {
+        self.devices.lock().unwrap().contains_key(dev_id)
+    }
+
+    /// 昵称 → 设备 id 列表(AddressResolver 的设备别名查询)。
+    /// 注册表个位数条目,现查免缓存恒新鲜;多个同名昵称返回多条(歧义由调用方处理)。
+    pub fn ids_by_nickname(&self, nick: &str) -> Vec<String> {
+        let devices = self.devices.lock().unwrap();
+        devices
+            .values()
+            .filter(|c| c.device().nickname.as_deref() == Some(nick))
+            .map(|c| c.device().id.clone())
+            .collect()
+    }
+
+    /// 设备 id → 昵称(serial_list / MCP 展示用)。
+    pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
+        let devices = self.devices.lock().unwrap();
+        devices
+            .get(dev_id)
+            .and_then(|c| c.device().nickname.clone())
     }
 
     /// 设置远端端口别名(转发;port 为剥前缀后的远端线名)。

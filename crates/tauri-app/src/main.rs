@@ -345,7 +345,9 @@ async fn open_port_stream(
 ) -> Result<ss_core::AcquireResult, String> {
     let session = sessions.get_or_create(window.label());
     let label = window.label().to_string();
-    // 端口键规范化(裸名补 local::):channel 注册键与事件转发的 map 键(复合键)恒一致
+    // 端口键规范化(剥遗留 local::;UI 传真实键,恒等兜底):channel 注册键与事件转发的 map 键恒一致。
+    // 注意:UI 只传真键——若未来支持别名输入,这里须改走 state.manager.canon_key,
+    // 否则 channel 注册键与 manager 解析后的 map 键分叉,事件路由丢失。
     let port = ss_core::normalize_port_key(&port);
     channels.register(&label, &port, on_event);
     match state.manager.acquire(port.clone(), config, session).await {

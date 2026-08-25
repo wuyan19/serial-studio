@@ -12,8 +12,7 @@ use crate::port_task::{self, Disconnect, PhysicalLayer, PortCommand, PortHandle}
 use crate::rx_buffer::RxBuffer;
 use crate::serial;
 use crate::types::{
-    compose_port_key, normalize_port_key, AcquireResult, PortInfo, ReleaseOutcome, SerialConfig,
-    SessionId, LOCAL_DEVICE_ID,
+    normalize_port_key, AcquireResult, PortInfo, ReleaseOutcome, SerialConfig, SessionId,
 };
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
+
+/// 端口键解析器:把用户输入的键(裸端口名 / 端口别名 / 设备昵称作用域键)
+/// 解析为 manager map 键(本机=裸名,远端=`devId::name`)。
+/// 别名是 server 层关注点(core 不碰持久化与网络),经此闭包注入——依赖倒置,
+/// 同 PortOpener 模式。实现必须纯同步、内存级(热路径 send 每次都过这里)。
+pub type KeyResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// 端口实例计数器:每次 Open 单调递增,作为 PortHandle.instance,供 drainer 区分
 /// "断开通知是否仍属当前 map 中的实例"(防断开后重开同名端口被误杀)。
@@ -34,6 +39,9 @@ pub struct SerialManager {
     /// drainer 接收端:new() 只建不 spawn(此时未必在 tokio runtime),首次 acquire
     /// (必在 runtime 内)时 take 出来 spawn。std::Mutex 短锁取出即可。
     disconnect_rx: std::sync::Mutex<Option<mpsc::Receiver<Disconnect>>>,
+    /// 可选键解析器(None = 恒等)。所有端口入口经 canon_key 统一规范化+解析,
+    /// 保证 map 键单一形态、占有权单一事实。生产由 server 层注入(见 create_state)。
+    key_resolver: Option<KeyResolver>,
 }
 
 impl SerialManager {
@@ -46,6 +54,38 @@ impl SerialManager {
             opener,
             disconnect_tx,
             disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
+            key_resolver: None,
+        }
+    }
+
+    /// 带键解析器构造(生产组装点)。resolver 在 normalize 之后调用:
+    /// 输入已完成遗留 `local::` 剥除,含 `::` 的完整键与裸名都交给它甄别
+    /// (设备昵称重写 / 端口别名反查),解析失败时实现应原样透传(下游 NotOpen 兜底)。
+    pub fn with_key_resolver(
+        event_bus: Arc<EventBus>,
+        opener: Arc<dyn PortOpener>,
+        key_resolver: KeyResolver,
+    ) -> Self {
+        let ports = Arc::new(Mutex::new(HashMap::<String, PortHandle>::new()));
+        let (disconnect_tx, disconnect_rx) = mpsc::channel::<Disconnect>(32);
+        Self {
+            ports,
+            event_bus,
+            opener,
+            disconnect_tx,
+            disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
+            key_resolver: Some(key_resolver),
+        }
+    }
+
+    /// 键规范化唯一入口:normalize(剥遗留 local::)+ 可选别名解析。
+    /// manager 所有端口入口一律经此,map 键恒为规范形态
+    /// (本机=裸名,远端=`devId::name`,级联整体透传)。
+    pub fn canon_key(&self, raw: &str) -> String {
+        let key = normalize_port_key(raw);
+        match &self.key_resolver {
+            Some(r) => r(&key),
+            None => key,
         }
     }
 
@@ -87,7 +127,7 @@ impl SerialManager {
     }
 
     /// 列出系统串口，附加本管理器的 opened 状态与持有者数。
-    /// 端口名为复合键(`local::COM3`),与 map 键同一形态——远端设备的端口由
+    /// 端口名为裸名(本机端口键即裸名),与 map 键同一形态——远端设备的端口由
     /// server 层的设备客户端另行合并(见 snapshot_open_states)。
     pub async fn list_ports(&self) -> Vec<PortInfo> {
         let names = serial::list_port_names();
@@ -95,13 +135,12 @@ impl SerialManager {
         names
             .into_iter()
             .map(|name| {
-                let key = compose_port_key(LOCAL_DEVICE_ID, &name);
-                let handle = ports.get(&key);
+                let handle = ports.get(&name);
                 PortInfo {
                     opened: handle.is_some(),
                     holders: handle.map(|h| h.holders.len()).unwrap_or(0),
                     disconnected: handle.map(|h| h.disconnected).unwrap_or(false),
-                    name: key,
+                    name,
                 }
             })
             .collect()
@@ -146,7 +185,7 @@ impl SerialManager {
         config: SerialConfig,
         session: SessionId,
     ) -> Result<AcquireResult, SerialError> {
-        let port = normalize_port_key(&port);
+        let port = self.canon_key(&port);
         self.maybe_spawn_drainer(); // 首次 acquire 启动 drainer(new() 不能 spawn:无 reactor 会 panic)
 
         // 锁内判定三分支 + 附加(HashSet 幂等,同 session 重复 acquire 不重复计数):
@@ -328,7 +367,7 @@ impl SerialManager {
         port: &str,
         session: SessionId,
     ) -> Result<ReleaseOutcome, SerialError> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         let port = key.as_str();
         // 锁内：判定效果；末位则取出 handle 以便锁外拆毁
         let (outcome, mut teardown_handle) = {
@@ -404,7 +443,7 @@ impl SerialManager {
         port: &str,
         keep: &HashSet<SessionId>,
     ) -> Result<Vec<SessionId>, SerialError> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         let port = key.as_str();
         let (before, remaining, kicked, teardown) = {
             let mut ports = self.ports.lock().await;
@@ -444,7 +483,7 @@ impl SerialManager {
 
     /// 端口的当前持有者数量（给 UI/status 用）。
     pub async fn holder_count(&self, port: &str) -> Option<usize> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         self.ports
             .lock()
             .await
@@ -470,7 +509,7 @@ impl SerialManager {
 
     /// 写入数据。
     pub async fn write(&self, port: String, data: Bytes) -> Result<usize, SerialError> {
-        let port = normalize_port_key(&port);
+        let port = self.canon_key(&port);
         let command_tx = {
             let ports = self.ports.lock().await;
             let handle = ports
@@ -502,13 +541,13 @@ impl SerialManager {
 
     /// 端口是否已打开。
     pub async fn is_open(&self, port: &str) -> bool {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         self.ports.lock().await.contains_key(key.as_str())
     }
 
     /// 端口是否处于设备断开态(占有权在、物理层已释放,等 reopen)。
     pub async fn is_disconnected(&self, port: &str) -> bool {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         self.ports
             .lock()
             .await
@@ -520,7 +559,7 @@ impl SerialManager {
     // ===== 接收缓冲区方法（MCP / 宏用）=====
 
     async fn get_rx_buffer(&self, port: &str) -> Result<Arc<RxBuffer>, SerialError> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         let ports = self.ports.lock().await;
         ports
             .get(key.as_str())
@@ -530,7 +569,7 @@ impl SerialManager {
 
     /// 返回端口配置（status 用）。
     pub async fn status(&self, port: &str) -> Option<SerialConfig> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         self.ports
             .lock()
             .await
@@ -540,7 +579,7 @@ impl SerialManager {
 
     /// 端口的换行设置（send 用）。
     pub async fn port_line_ending(&self, port: &str) -> Option<crate::types::LineEnding> {
-        let key = normalize_port_key(port);
+        let key = self.canon_key(port);
         self.ports
             .lock()
             .await
@@ -763,15 +802,18 @@ mod tests {
         let _ = m.release_all(s).await;
     }
 
-    /// 裸名与复合键指向同一端口条目:入口规范化保证 map 单一形态,
-    /// 裸名 acquire 不会与复合键引用分裂成两个条目(占有权单一事实)。
+    /// 裸名与遗留 `local::` 前缀指向同一端口条目:入口规范化剥前缀保证 map 单一形态,
+    /// 老客户端写法不会与裸名引用分裂成两个条目(占有权单一事实)。
     #[tokio::test]
     async fn bare_name_and_composite_key_are_same_entry() {
         let m = mgr();
         let s = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), s).await.unwrap(); // 裸名进
         assert!(m.is_open("COM7").await, "裸名查询应命中");
-        assert!(m.is_open("local::COM7").await, "复合键查询应命中同一条目");
+        assert!(
+            m.is_open("local::COM7").await,
+            "遗留 local:: 前缀查询应命中同一条目"
+        );
         assert_eq!(m.holder_count("local::COM7").await, Some(1));
         let res = m.release("COM7", s).await.unwrap(); // 裸名释放
         assert!(matches!(res, ReleaseOutcome::Closed));
@@ -839,8 +881,8 @@ mod tests {
             match rx.try_recv() {
                 Ok(SerialEvent::HoldersChanged { port, holders }) => {
                     assert_eq!(
-                        port, "local::COM7",
-                        "事件端口应为复合键(裸名 acquire 已规范化)"
+                        port, "COM7",
+                        "事件端口应为 map 键(本机=裸名)"
                     );
                     assert_eq!(holders, 2);
                     found = true;
@@ -1069,7 +1111,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(SerialEvent::PortDisconnected { port }) => {
-                    assert_eq!(port, "local::COM7", "事件端口应为复合键");
+                    assert_eq!(port, "COM7", "事件端口应为 map 键(本机=裸名)");
                     got = true;
                     break;
                 }
@@ -1214,5 +1256,56 @@ mod tests {
             "断开态 write 返 Disconnected"
         );
         let _ = m.release_all(s).await;
+    }
+
+    /// 注入 KeyResolver 后,裸别名经 canon_key 解析到真实键:acquire 落到解析后
+    /// 条目、事件携带 map 键(本机=裸名),别名写法不产生第二个条目。
+    #[tokio::test]
+    async fn resolver_resolves_alias_to_map_key() {
+        // 桩 resolver:"GPS" → "COM7";其余原样透传
+        let resolver: KeyResolver = Arc::new(|k: &str| {
+            if k == "GPS" {
+                "COM7".to_string()
+            } else {
+                k.to_string()
+            }
+        });
+        let m = SerialManager::with_key_resolver(
+            Arc::new(EventBus::new(16)),
+            Arc::new(FakeOpener),
+            resolver,
+        );
+        let mut rx = m.event_bus().subscribe();
+        let s = SessionId::next();
+        assert_eq!(m.canon_key("GPS"), "COM7", "别名应被解析");
+        m.acquire("GPS".into(), cfg(115200), s).await.unwrap();
+        // 解析后的真实键命中;别名写法同样命中同一条目
+        assert!(m.is_open("COM7").await);
+        assert!(m.is_open("GPS").await, "再次用别名访问应指向同一条目");
+        // 事件端口 = map 键(裸名),而非用户输入的别名
+        let mut saw_opened = false;
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(SerialEvent::PortOpened { port }) => {
+                    assert_eq!(port, "COM7", "事件端口应为解析后的 map 键");
+                    saw_opened = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        assert!(saw_opened, "应收到 PortOpened 事件");
+        let _ = m.release_all(s).await;
+    }
+
+    /// 无 resolver(new)时 canon_key = normalize:遗留前缀剥除、其余透传。
+    #[test]
+    fn canon_without_resolver_is_identity_after_normalize() {
+        let m = mgr();
+        assert_eq!(m.canon_key("COM7"), "COM7");
+        assert_eq!(m.canon_key("local::COM7"), "COM7");
+        assert_eq!(m.canon_key("uuid1::uuid2::COM3"), "uuid1::uuid2::COM3");
     }
 }

@@ -15,8 +15,8 @@ pub trait PortOpener: Send + Sync {
     fn open(&self, port: &str, config: &SerialConfig) -> Result<Box<dyn PortIo>, SerialError>;
 }
 
-/// 生产实现：本机串口 opener。复合键首段为 `local` 时剥前缀打开本机串口;
-/// 指向远端设备的键(非 local 首段)报错——远端通道由 server 层的组合 opener
+/// 生产实现：本机串口 opener。裸名(本机端口键)直接打开本机串口;
+/// 指向远端设备的复合键报错——远端通道由 server 层的组合 opener
 /// (CompositeOpener)提供,core 不识网络。
 pub struct RealPortOpener;
 

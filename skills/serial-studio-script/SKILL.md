@@ -21,7 +21,16 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 | `await sleep(ms)` | 睡眠 ms 毫秒 | 无 |
 | `log(message)` | 输出日志(**不中断脚本**,可循环调用) | 无 |
 
-`[port]` 缺省 = 当前活动端口;传端口名(如 `"COM5"`)则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
+`[port]` 缺省 = 当前活动端口;传端口寻址则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
+
+**端口寻址形式**(send/expect/clear 的 `[port]` 与脚本绑定端口通用):
+
+| 形式 | 示例 | 含义 |
+|---|---|---|
+| 裸端口名 | `COM5` / `/dev/ttyUSB0` | 本机串口 |
+| 端口别名 | `GPS` | UI 里设置的别名(本机优先;跨设备同名歧义时报候选) |
+| 完整键 | `uuid::COM5` | 远端设备端口(设备 id 见列表);级联逐段透传 |
+| 设备昵称作用域 | `test::COM5`、`test::GPS` | 昵称 + 目标机上的端口名/别名 |
 
 ## 参数(args)
 
@@ -75,14 +84,14 @@ if (!ok) throw new Error("重试 3 次均无响应");
 
 **按返回内容分支**:`expect` 拿到行后用 `includes`/`match` 判断,走不同路径(标准 JS 的 if/else)。
 
-**跨多口**:给函数传可选 `port`。下例 COM3 查 MAC、解析后 COM5 下发(两端口都要先打开):
+**跨多口**:给函数传可选 `port`(支持别名与设备昵称作用域)。下例 COM3 查 MAC、解析后 COM5 下发(两端口都要先打开):
 ```js
 await clear("COM3");
 await send("AT+MAC?", "COM3");
 const line = await expect("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", 2000, "COM3");
 if (line === "") throw new Error("COM3 未返回 MAC");
 const mac = line.match(/[\dA-Fa-f]{2}([:\-][\dA-Fa-f]{2}){5}/)[0];
-await send("AT+SETMAC=" + mac, "COM5");
+await send("AT+SETMAC=" + mac, "COM5");        // 也可写别名或 test::COM5
 if (await expect("OK", 1000, "COM5") === "") throw new Error("COM5 配置失败");
 log("已把 " + mac + " 从 COM3 同步到 COM5");
 ```

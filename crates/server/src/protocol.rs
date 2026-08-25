@@ -28,11 +28,16 @@ pub enum ServerMsg {
         port: String,
     },
     /// open 的直接回复:opened=true 首开,false 附加(config 为实际配置,holders 为当前持有数)。
+    /// `resolved` = 服务端实际打开的 map 键(别名解析后)。缺省 = 旧版服务端
+    /// (无别名解析,port 即真名)——设备客户端据此以真名登记 IO,
+    /// 否则数据帧(map 键口径)与登记键(请求串)分裂,RX 静默断流。
     Acquired {
         port: String,
         opened: bool,
         config: SerialConfig,
         holders: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved: Option<String>,
     },
     /// 持有者数量变化(有人加入/退出,端口未关)。
     Holders {
@@ -241,12 +246,17 @@ mod tests {
     }
 
     /// parse 与 data_frame 对偶:正常帧往返一致(DeviceClient 解析远端帧的契约)。
+    /// 端口名样例覆盖 新形态复合键 与 遗留 local:: 前缀(旧版线名,入站归一剥除)。
     #[test]
     fn parse_roundtrip() {
-        let f = data_frame("dev-b::local::COM3", b"ping");
+        let f = data_frame("dev-b::COM3", b"ping");
         let (port, data) = parse_data_frame(&f).expect("正常帧应解析");
-        assert_eq!(port, "dev-b::local::COM3");
+        assert_eq!(port, "dev-b::COM3");
         assert_eq!(data, b"ping");
+        // 遗留形态:旧版远端的线名带 local:: 中缀,帧层原样承载(归一在 DeviceClient 入站)
+        let legacy = data_frame("dev-b::local::COM3", b"ping");
+        let (port, _) = parse_data_frame(&legacy).unwrap();
+        assert_eq!(port, "dev-b::local::COM3");
         // 空数据帧:仍可解析(port 头独立于 data)
         let f = data_frame("COM7", b"");
         let (port, data) = parse_data_frame(&f).unwrap();

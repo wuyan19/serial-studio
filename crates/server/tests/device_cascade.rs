@@ -95,12 +95,16 @@ async fn boot(echo: bool) -> Instance {
     let state = AppState {
         manager: manager.clone(),
         event_bus,
-        meta_bus: Arc::new(meta_tx),
+        meta_bus: Arc::new(meta_tx.clone()),
         script_bus: Arc::new(script_tx),
         enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        addresses: Arc::new(ss_server::address::AddressResolver::new(
+            Arc::clone(&devices),
+            meta_tx,
+        )),
         devices: Arc::clone(&devices),
     };
     let app = create_router(state);
@@ -159,7 +163,7 @@ async fn cascade_open_write_echo() {
     for _ in 0..100 {
         if a.manager
             .acquire(
-                "dev-b::local::COM7".into(),
+                "dev-b::COM7".into(),
                 SerialConfig::default(),
                 probe_session,
             )
@@ -172,13 +176,13 @@ async fn cascade_open_write_echo() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(online, "设备应上线可开远端端口");
-    let _ = a.manager.release("dev-b::local::COM7", probe_session).await;
-    let _ = a.manager.holder_count("local::COM7").await;
+    let _ = a.manager.release("dev-b::COM7", probe_session).await;
+    let _ = a.manager.holder_count("COM7").await;
 
-    // open 复合键(列表键形态:dev-b + 远端线名 local::COM7,与生产前端一致)
+    // open 复合键(列表键形态:dev-b + 远端线名 COM7,与生产前端一致)
     send_text(
         &mut a_ws,
-        r#"{"action":"open","port":"dev-b::local::COM7","config":{"baud_rate":115200}}"#,
+        r#"{"action":"open","port":"dev-b::COM7","config":{"baud_rate":115200}}"#,
     )
     .await;
     let acquired = recv_until(&mut a_ws, "\"type\":\"acquired\"").await;
@@ -187,12 +191,12 @@ async fn cascade_open_write_echo() {
         "复合键首开: {}",
         acquired
     );
-    assert_eq!(a.manager.holder_count("dev-b::local::COM7").await, Some(1));
+    assert_eq!(a.manager.holder_count("dev-b::COM7").await, Some(1));
 
     // write → B 回显 → A 的事件流出数据帧(port = A 侧 map 键,即事件口径的复合键)
     send_text(
         &mut a_ws,
-        r#"{"action":"write","port":"dev-b::local::COM7","data":"ping","encoding":"text"}"#,
+        r#"{"action":"write","port":"dev-b::COM7","data":"ping","encoding":"text"}"#,
     )
     .await;
     let frame = async {
@@ -210,23 +214,23 @@ async fn cascade_open_write_echo() {
     let plen = bin[0] as usize;
     let port = std::str::from_utf8(&bin[1..1 + plen]).unwrap();
     let data = &bin[1 + plen..];
-    assert_eq!(port, "dev-b::local::COM7", "数据帧端口应为级联复合键");
+    assert_eq!(port, "dev-b::COM7", "数据帧端口应为级联复合键");
     assert_eq!(data, b"ping", "回显数据应原样返回");
 
-    // B 侧确实持有:B 的 manager 里 local::COM7 holders ≥1(DeviceClient 连接占 1)
-    assert_eq!(b.manager.holder_count("local::COM7").await, Some(1));
+    // B 侧确实持有:B 的 manager 里裸名 COM7 holders ≥1(DeviceClient 连接占 1)
+    assert_eq!(b.manager.holder_count("COM7").await, Some(1));
 
     // 清理:close 复合键 → 末位 → 拆毁(A 侧);Drop 转发 ClosePort → B 侧释放
     send_text(
         &mut a_ws,
-        r#"{"action":"close","port":"dev-b::local::COM7"}"#,
+        r#"{"action":"close","port":"dev-b::COM7"}"#,
     )
     .await;
     let _ = recv_until(&mut a_ws, "\"type\":\"ok\"").await;
     // 等 B 侧释放(异步):close 转发 → release_all/末位释放
     let mut released = false;
     for _ in 0..100 {
-        if b.manager.holder_count("local::COM7").await.is_none() {
+        if b.manager.holder_count("COM7").await.is_none() {
             released = true;
             break;
         }
@@ -255,7 +259,7 @@ async fn cascade_device_offline_keeps_holders() {
     for _ in 0..100 {
         if a.manager
             .acquire(
-                "dev-b::local::COM7".into(),
+                "dev-b::COM7".into(),
                 SerialConfig::default(),
                 SessionId::next(),
             )
@@ -277,7 +281,7 @@ async fn cascade_device_offline_keeps_holders() {
     // A 侧:占有权保留 + disconnected 置位(USB 拔插模型)
     let mut marked = false;
     for _ in 0..100 {
-        if a.manager.is_disconnected("dev-b::local::COM7").await {
+        if a.manager.is_disconnected("dev-b::COM7").await {
             marked = true;
             break;
         }
@@ -285,7 +289,7 @@ async fn cascade_device_offline_keeps_holders() {
     }
     assert!(marked, "设备断开后端口应标 disconnected");
     assert_eq!(
-        a.manager.holder_count("dev-b::local::COM7").await,
+        a.manager.holder_count("dev-b::COM7").await,
         Some(1),
         "占有权应保留"
     );
@@ -367,7 +371,7 @@ async fn self_connection_mirror_no_echo() {
     let res = a
         .manager
         .acquire(
-            "dev-me::local::COM_NOT_EXIST".into(),
+            "dev-me::COM_NOT_EXIST".into(),
             SerialConfig::default(),
             s,
         )
@@ -444,7 +448,7 @@ async fn disconnect_releases_remote_ownership() {
     let s = SessionId::next();
     for _ in 0..100 {
         if a.manager
-            .acquire("dev-b::local::COM7".into(), SerialConfig::default(), s)
+            .acquire("dev-b::COM7".into(), SerialConfig::default(), s)
             .await
             .is_ok()
         {
@@ -454,13 +458,13 @@ async fn disconnect_releases_remote_ownership() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(opened, "设备应上线可开远端端口");
-    assert_eq!(b.manager.holder_count("local::COM7").await, Some(1));
+    assert_eq!(b.manager.holder_count("COM7").await, Some(1));
 
     // 主动断开设备(断开按钮)→ 会话取消 → WS 关 → B 侧 release_all
     a.devices.disconnect("dev-b").unwrap();
     let mut released = false;
     for _ in 0..100 {
-        if b.manager.holder_count("local::COM7").await.is_none() {
+        if b.manager.holder_count("COM7").await.is_none() {
             released = true;
             break;
         }
@@ -489,7 +493,7 @@ async fn cascade_set_alias_routes_reply() {
     let s = SessionId::next();
     for _ in 0..100 {
         if a.manager
-            .acquire("dev-b::local::COM7".into(), SerialConfig::default(), s)
+            .acquire("dev-b::COM7".into(), SerialConfig::default(), s)
             .await
             .is_ok()
         {
@@ -499,7 +503,7 @@ async fn cascade_set_alias_routes_reply() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(online);
-    let _ = a.manager.release("dev-b::local::COM7", s).await;
+    let _ = a.manager.release("dev-b::COM7", s).await;
 
     // A 侧发起远端口别名 → 回执应秒级到达(带 port 的 ok)。
     // 用 B 实际枚举到的口(列表只显示枚举口,别名断言要能看到条目)
@@ -507,7 +511,7 @@ async fn cascade_set_alias_routes_reply() {
     let target = b_views
         .first()
         .map(|v| v.info.name.clone())
-        .unwrap_or_else(|| "local::COM0".into());
+        .unwrap_or_else(|| "COM0".into());
     let a_key = format!("dev-b::{}", target);
     let mut a_ws = tokio_tungstenite::connect_async(a.url()).await.unwrap().0;
     send_text(
@@ -544,4 +548,279 @@ async fn cascade_set_alias_routes_reply() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(got_alias, "别名应写入 B(端口所在机器)并出现在其列表");
+}
+
+/// 混版本互操作:模拟**旧版**远端(线名恒带 `local::` 前缀)。A(新版)以新键形态
+/// `dev-b::COM7` 操作——剥段后发裸名后缀(旧版自行补前缀命中其 map),旧版回的
+/// Acquired / 列表 / 数据帧都带 `local::COM7`;入站归一剥前缀后与本侧登记键一致,
+/// 链路应全通。这是"新版本机 ↔ 旧版远端"双向兼容的回归锚点。
+#[tokio::test]
+async fn legacy_peer_local_prefixed_wire_names() {
+    // 手工旧版协议桩:List→Ports(local::COM7);Open→Acquired(local::COM7);
+    // Write→Ok 回执 + Binary 回显帧(port=local::COM7);Ping→Pong。
+    async fn legacy_server(listener: TcpListener) {
+        use futures_util::{SinkExt, StreamExt};
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(t) = msg else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+            match v["action"].as_str().unwrap_or("") {
+                "list" => {
+                    let ports = serde_json::json!([{
+                        "name": "local::COM7",
+                        "opened": false,
+                        "holders": 0,
+                        "disconnected": false
+                    }]);
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                        ))
+                        .await;
+                }
+                "open" => {
+                    let cfg = serde_json::json!({
+                        "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
+                        "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
+                    });
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type":"acquired","port":"local::COM7",
+                                "opened":true,"config":cfg,"holders":1
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                }
+                "write" => {
+                    let _ = sink
+                        .send(Message::Text(
+                            r#"{"type":"ok","message":"written","port":"local::COM7"}"#.into(),
+                        ))
+                        .await;
+                    // 回显数据帧,线名带旧版 local:: 前缀
+                    let data = hex_to_bytes(v["data"].as_str().unwrap_or(""));
+                    let frame = ss_server::protocol::data_frame("local::COM7", &data);
+                    let _ = sink.send(Message::Binary(frame)).await;
+                }
+                "ping" => {
+                    let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(legacy_server(listener));
+
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: addr.port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    // open 新形态键:链路全通(Acquired 带遗留前缀,归一后路由到在途回执)
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager
+            .acquire("dev-b::COM7".into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "对旧版远端的 open 链路应全通(回执线名归一路由)");
+
+    // 列表合并:远端桶条目应为归一键 dev-b::COM7(而非 dev-b::local::COM7)
+    let mut views_ok = false;
+    for _ in 0..50 {
+        let views = list_views(&a).await;
+        let remote: Vec<_> = views
+            .iter()
+            .filter(|v| v.info.name.starts_with("dev-b::"))
+            .map(|v| v.info.name.clone())
+            .collect();
+        if !remote.is_empty() {
+            assert!(
+                remote.iter().all(|n| n == "dev-b::COM7"),
+                "远端桶条目应为归一键 dev-b::COM7: {:?}",
+                remote
+            );
+            views_ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(views_ok, "列表应出现 dev-b::COM7 条目(旧版线名归一)");
+
+    // 数据回显:旧版回帧带 local::COM7,归一后送达 A 侧端口缓冲(EventBus 出口)
+    let mut rx = a.manager.event_bus().subscribe();
+    a.manager
+        .write("dev-b::COM7".into(), bytes::Bytes::from_static(b"ping"))
+        .await
+        .unwrap();
+    let mut echoed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(ss_core::SerialEvent::DataReceived { port, data }) => {
+                assert_eq!(port, "dev-b::COM7", "事件端口应为 A 侧 map 键");
+                assert_eq!(data, b"ping", "旧版回显数据应原样到达");
+                echoed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(echoed, "旧版远端的数据帧应经入站归一送达");
+
+    let _ = a.manager.release("dev-b::COM7", s).await;
+}
+
+/// 别名后缀寻址的 RX 通路(Acquired.resolved 契约):A 以 `dev-b::GPS` open——
+/// 后缀是**远端别名**,远端解析后真名为 COM7。回执带 resolved 字段时,设备客户端
+/// 必须以真名登记 IO(而非请求串),否则数据帧(远端 map 键口径)与登记键分裂,
+/// RX 静默断流(回归锚点:评审阻塞项 #2)。事件仍以 A 侧请求键 `dev-b::GPS` 口径发布。
+#[tokio::test]
+async fn alias_suffix_open_registers_resolved_name() {
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    // 手工协议桩:Open(GPS)→Acquired(port=GPS, resolved=COM7);帧按真名 COM7 出站。
+    async fn alias_server(listener: TcpListener) {
+        use futures_util::{SinkExt, StreamExt};
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(t) = msg else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+            match v["action"].as_str().unwrap_or("") {
+                "list" => {
+                    let ports = serde_json::json!([{
+                        "name": "COM7",
+                        "opened": false,
+                        "holders": 0,
+                        "disconnected": false,
+                        "alias": "GPS"
+                    }]);
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                        ))
+                        .await;
+                }
+                "open" => {
+                    assert_eq!(v["port"].as_str(), Some("GPS"), "桩只接受别名后缀");
+                    let cfg = serde_json::json!({
+                        "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
+                        "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
+                    });
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type":"acquired","port":"GPS","resolved":"COM7",
+                                "opened":true,"config":cfg,"holders":1
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                }
+                "write" => {
+                    let port = v["port"].as_str().unwrap_or("").to_string();
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::json!({"type":"ok","message":"written","port":port})
+                                .to_string(),
+                        ))
+                        .await;
+                    // 关键:数据帧按远端 map 键(COM7)出站,而非请求串 GPS
+                    let data = hex_to_bytes(v["data"].as_str().unwrap_or(""));
+                    let frame = ss_server::protocol::data_frame("COM7", &data);
+                    let _ = sink.send(Message::Binary(frame)).await;
+                }
+                "ping" => {
+                    let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(alias_server(listener));
+
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: addr.port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    // 以别名后缀寻址 open:回执 resolved=COM7 → 登记键应为 COM7
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager
+            .acquire("dev-b::GPS".into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "别名后缀寻址应打开成功");
+
+    // 写入并等回显:帧按真名 COM7 出站,若登记键仍是请求串 GPS 则此处收不到(RX 断流)
+    let mut rx = a.manager.event_bus().subscribe();
+    a.manager
+        .write("dev-b::GPS".into(), bytes::Bytes::from_static(b"pong"))
+        .await
+        .unwrap();
+    let mut echoed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(ss_core::SerialEvent::DataReceived { port, data }) => {
+                assert_eq!(port, "dev-b::GPS", "事件端口恒为 A 侧 map 键(请求形态)");
+                assert_eq!(data, b"pong", "真名登记后帧应命中分发");
+                echoed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(echoed, "resolved 真名登记后数据帧应可达(否则 RX 断流回归)");
+
+    let _ = a.manager.release("dev-b::GPS", s).await;
 }

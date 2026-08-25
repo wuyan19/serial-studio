@@ -103,20 +103,21 @@ pub enum LineEnding {
     CRLF,
 }
 
-/// 本机设备 id:复合键的第一段,裸端口名(无前缀)一律视为本机。
+/// 遗留本机标记:`local::` 前缀只作为**旧版输入**被剥除(兼容老客户端/混版本组网),
+/// 不再由任何出口产生——本地端口的规范键就是裸名。split 对裸名返回此标记作路由语义。
 pub const LOCAL_DEVICE_ID: &str = "local";
 
-/// 端口复合键分隔符:`${devId}::${portName}`。
+/// 端口复合键分隔符:`${devId}::${portName}`。串口名不含 `::`,分隔安全。
 pub const PORT_KEY_SEP: &str = "::";
 
-/// 组装端口复合键:`${devId}::${portName}`。
+/// 组装端口复合键:`${devId}::${portName}`。仅用于远端键;本机口直接用裸名。
 pub fn compose_port_key(dev_id: &str, port_name: &str) -> String {
     format!("{}{}{}", dev_id, PORT_KEY_SEP, port_name)
 }
 
 /// 解析端口复合键:按首个 `::` 切分,只剥第一段,**后缀整体透传**——
 /// 多级级联(A 注册 B、B 注册 C)时 `uuidB::uuidC::COM3` 剥出 (uuidB, "uuidC::COM3"),
-/// 逐层路由无特判。无分隔符视为本机端口(与前端 parsePortId 的旧值兼容语义一致)。
+/// 逐层路由无特判。无分隔符视为本机端口(裸名即本机,返回 LOCAL_DEVICE_ID 作语义标记)。
 pub fn split_port_key(key: &str) -> (&str, &str) {
     match key.split_once(PORT_KEY_SEP) {
         Some((dev, rest)) => (dev, rest),
@@ -124,12 +125,15 @@ pub fn split_port_key(key: &str) -> (&str, &str) {
     }
 }
 
-/// 规范化端口键:裸名补 `local::` 前缀,复合键原样返回。
-/// manager 所有端口入口都经此规范化,保证 map 键单一形态
-/// (裸名与复合键不会指向同一物理口却成两个条目)。
+/// 规范化端口键:**剥一层遗留 `local::` 前缀**(老客户端输入/混版本互操作),
+/// 裸名保持裸名(= 本机端口),远端复合键原样返回。
+/// manager 所有端口入口都经此规范化,保证 map 键单一形态:
+/// `COM5`、`local::COM5` 与裸名指向同一条目,占有权不因写法分裂。
 pub fn normalize_port_key(key: &str) -> String {
-    let (dev, name) = split_port_key(key);
-    compose_port_key(dev, name)
+    match key.strip_prefix(LOCAL_DEVICE_ID).and_then(|r| r.strip_prefix(PORT_KEY_SEP)) {
+        Some(rest) => rest.to_string(),
+        None => key.to_string(),
+    }
 }
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -217,11 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn port_key_bare_name_falls_back_to_local() {
-        // 裸名(旧客户端/手工输入)→ 本机;normalize 补前缀
+    fn port_key_bare_name_is_canonical_local() {
+        // 新形态:本地端口键 = 裸名;遗留 `local::` 前缀输入剥除后与裸名同一条目
         assert_eq!(split_port_key("COM7"), ("local", "COM7"));
-        assert_eq!(normalize_port_key("COM7"), "local::COM7");
-        assert_eq!(normalize_port_key("local::COM7"), "local::COM7");
+        assert_eq!(normalize_port_key("COM7"), "COM7");
+        assert_eq!(normalize_port_key("local::COM7"), "COM7");
+        assert_eq!(
+            normalize_port_key(&compose_port_key("uuid1", "COM3")),
+            "uuid1::COM3"
+        );
     }
 
     #[test]
@@ -229,6 +237,9 @@ mod tests {
         // 级联:A 注册 B(uuid1)、B 注册 C(uuid2)——首段路由,后缀整体透传
         let key = compose_port_key("uuid1", "uuid2::COM3");
         assert_eq!(split_port_key(&key), ("uuid1", "uuid2::COM3"));
+        // 遗留级联线名(旧版远端上报 uuid2::local::COM3)只剥本机这层的 local::
+        assert_eq!(normalize_port_key("local::uuid2::COM3"), "uuid2::COM3");
+        assert_eq!(normalize_port_key("uuid1::uuid2::COM3"), "uuid1::uuid2::COM3");
     }
 
     #[test]

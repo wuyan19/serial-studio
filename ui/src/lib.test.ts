@@ -23,7 +23,7 @@ describe("portIdOf / parsePortId", () => {
     });
   });
 
-  it("无分隔符按本地裸端口名兼容旧值", () => {
+  it("无分隔符 = 本机裸端口名(规范形态)", () => {
     expect(parsePortId("COM3")).toEqual({ devId: "local", name: "COM3" });
   });
 
@@ -33,18 +33,20 @@ describe("portIdOf / parsePortId", () => {
 });
 
 describe("wireToPid(线名→pid)/ displayPortName(pid→展示名)", () => {
-  it("本地线名即复合键,直通(新版后端事件)", () => {
+  it("本地 transport 线名即本机视角键,直通(本地口=裸名)", () => {
+    expect(wireToPid("local", "COM3")).toBe("COM3");
+    // 遗留 local:: 线名(理论上不再出现)也原样直通——归一责任在后端
     expect(wireToPid("local", "local::COM3")).toBe("local::COM3");
   });
 
-  it("远程线名加设备前缀:新版远端复合键 → 两级级联;旧版裸名 → 单级", () => {
+  it("远程线名加设备前缀:远端侧键为裸名或其级联键 → 单级/两级", () => {
     expect(wireToPid("uuidA", "COM3")).toBe("uuidA::COM3");
-    expect(wireToPid("uuidA", "local::COM3")).toBe("uuidA::local::COM3");
+    expect(wireToPid("uuidA", "uuidB::COM9")).toBe("uuidA::uuidB::COM9");
   });
 
   it("展示名取最后一个 :: 之后(级联也只显示串口名)", () => {
-    expect(displayPortName("local::COM3")).toBe("COM3");
-    expect(displayPortName("uuidA::local::COM3")).toBe("COM3");
+    expect(displayPortName("uuidA::COM3")).toBe("COM3");
+    expect(displayPortName("uuidA::uuidB::COM3")).toBe("COM3");
     expect(displayPortName("COM3")).toBe("COM3");
   });
 });

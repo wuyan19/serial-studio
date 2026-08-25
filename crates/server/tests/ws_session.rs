@@ -58,6 +58,8 @@ async fn boot() -> (String, Arc<SerialManager>) {
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpener)));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
+    // 测试无远程设备(集成测试用 DeviceClientManager::empty + update_registry 注入)
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone()));
     let state = AppState {
         manager: manager.clone(),
         event_bus,
@@ -67,8 +69,12 @@ async fn boot() -> (String, Arc<SerialManager>) {
         script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        // 测试无远程设备(集成测试用 DeviceClientManager::empty + update_registry 注入)
-        devices: Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx)),
+        devices,
+        // 寻址解析(manager 未注入 resolver,此实例仅占位;MCP 直查路径才用)
+        addresses: Arc::new(ss_server::address::AddressResolver::new(
+            Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone())),
+            meta_tx,
+        )),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -219,31 +225,31 @@ async fn version_action_returns_server_version() {
     assert!(resp.contains(&want), "期望包含 {}，实际: {}", want, resp);
 }
 
-/// 复合键线格式(P1 契约):端口列表 name 带设备前缀;open 接受复合键与裸名
-/// (裸名规范化为 local:: 前缀,与复合键指向同一条目);acquired 回显复合键。
+/// 端口键线格式契约:本机端口键 = 裸名;open 接受裸名与遗留 `local::` 前缀
+/// (老客户端写法,规范化剥除后指向同一条目);acquired 回显 map 键(裸名)。
 #[tokio::test]
 async fn composite_port_key_wire_format() {
     let (url, manager) = boot().await;
     let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
 
-    // ① 复合键首开
+    // ① 裸名首开
     send_text(
         &mut a,
-        r#"{"action":"open","port":"local::COM7","config":{"baud_rate":115200}}"#,
+        r#"{"action":"open","port":"COM7","config":{"baud_rate":115200}}"#,
     )
     .await;
     let acquired = recv_until(&mut a, "\"type\":\"acquired\"").await;
 
-    // ② 列表 name 应为复合键
+    // ② 列表 name 应为裸名形态
     send_text(&mut a, r#"{"action":"list"}"#).await;
     let listed = recv_until(&mut a, "\"type\":\"ports\"").await;
 
-    // ③ 裸名(旧客户端)从**另一条连接**(不同 session)附加——若裸名与复合键分裂成
-    // 两个条目,这次会是 Opened 而非 Attached;同条目则 holders=2
+    // ③ 遗留 `local::` 写法(旧客户端)从**另一条连接**(不同 session)附加——若剥前缀后
+    // 不与裸名同条目,这次会是 Opened 而非 Attached;同条目则 holders=2
     let mut b = tokio_tungstenite::connect_async(&url).await.unwrap().0;
     send_text(
         &mut b,
-        r#"{"action":"open","port":"COM7","config":{"baud_rate":9600}}"#,
+        r#"{"action":"open","port":"local::COM7","config":{"baud_rate":9600}}"#,
     )
     .await;
     let attached = recv_until(&mut b, "\"type\":\"acquired\"").await;
@@ -251,14 +257,14 @@ async fn composite_port_key_wire_format() {
 
     // ④ 清理先行(读线程退出,runtime 才能干净关闭——panic 早退会留 FakePort 读线程,
     // spawn_blocking 读循环只有 Close 才退出,runtime drop 会挂死),断言全部押后
-    send_text(&mut b, r#"{"action":"close","port":"COM7"}"#).await;
+    send_text(&mut b, r#"{"action":"close","port":"local::COM7"}"#).await;
     let _ = recv_until(&mut b, "\"type\":\"ok\"").await;
-    send_text(&mut a, r#"{"action":"close","port":"local::COM7"}"#).await;
+    send_text(&mut a, r#"{"action":"close","port":"COM7"}"#).await;
     let _ = recv_until(&mut a, "\"type\":\"ok\"").await;
 
     assert!(
-        acquired.contains("\"port\":\"local::COM7\""),
-        "acquired 应回显复合键: {}",
+        acquired.contains("\"port\":\"COM7\""),
+        "acquired 应回显 map 键(裸名): {}",
         acquired
     );
     assert!(
@@ -266,27 +272,100 @@ async fn composite_port_key_wire_format() {
         "首开应为 opened=true: {}",
         acquired
     );
-    // 列表条目恒为复合键格式(list = 系统枚举 + map 状态,COM7 是 FakeOpener 假口
-    // 不在系统枚举里,故断言"存在的条目全部带前缀"而非特定端口)
+    // 列表条目恒为裸名形态(list 合并真实系统枚举,条目集随环境不定;
+    // 断言不变量:任何条目名都不含复合键分隔符——本机口=裸名,不再产生 local::。
+    // 无串口环境列表为空,不变量平凡成立)
+    let listed_json: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let names: Vec<&str> = listed_json["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
     assert!(
-        listed.contains("\"name\":\"local::"),
-        "端口列表 name 应带 local:: 前缀: {}",
-        listed
-    );
-    assert!(
-        !listed.contains("\"name\":\"COM"),
-        "端口列表不得再出现无前缀裸名: {}",
-        listed
+        names.iter().all(|n| !n.contains("::")),
+        "端口列表 name 应为裸名形态(不含 ::): {:?}",
+        names
     );
     assert!(
         attached.contains("\"opened\":false"),
-        "裸名应附加到复合键条目(非新开): {}",
+        "遗留写法应附加到裸名条目(非新开): {}",
         attached
     );
     assert!(
         attached.contains("\"holders\":2"),
-        "裸名与复合键同条目,两 session 应 holders=2: {}",
+        "裸名与遗留前缀同条目,两 session 应 holders=2: {}",
         attached
     );
     assert_eq!(holders, Some(2));
+}
+
+/// 别名寻址端到端:manager 注入 AddressResolver 的 resolver 后,WS open 直接用
+/// 端口别名——canon 在 manager 边界解析,acquired 回显解析后真名。
+/// 锚点:评审指出的"各出口自动获得别名能力无集成回归"盲区。
+#[tokio::test]
+async fn open_by_alias_resolves_via_injected_resolver() {
+    use ss_server::address::AddressResolver;
+
+    // 独立配置目录 + 种入本地别名(进程级 env,本测试二进制独享此目录)
+    let dir = std::env::temp_dir().join(format!("ss-ws-alias-test-{}", std::process::id()));
+    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let alias = format!("WS-GPS-{}", std::process::id());
+    ss_server::port_meta_store::set_alias("COM7", Some(alias.clone())).unwrap();
+
+    // 组装:resolver + 注入 resolver 的 manager(与生产 create_state 同构)
+    let event_bus = Arc::new(EventBus::new(64));
+    let (meta_tx, _) = tokio::sync::broadcast::channel(16);
+    let (script_tx, _) = tokio::sync::broadcast::channel(16);
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone()));
+    let addresses = Arc::new(AddressResolver::new(devices.clone(), meta_tx.clone()));
+    let manager = Arc::new(SerialManager::with_key_resolver(
+        event_bus.clone(),
+        Arc::new(FakeOpener),
+        addresses.key_resolver_fn(),
+    ));
+    let state = AppState {
+        manager: manager.clone(),
+        event_bus,
+        meta_bus: Arc::new(meta_tx.clone()),
+        script_bus: Arc::new(script_tx),
+        enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        addresses,
+        devices,
+    };
+    let app = create_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("ws://{}/ws", addr);
+
+    // WS open 用别名 → acquired 应回显解析后真名 COM7(resolved 字段)
+    let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut a,
+        &format!(
+            r#"{{"action":"open","port":"{alias}","config":{{"baud_rate":115200}}}}"#
+        ),
+    )
+    .await;
+    let acquired = recv_until(&mut a, "\"type\":\"acquired\"").await;
+    assert!(
+        acquired.contains("\"resolved\":\"COM7\""),
+        "acquired 应带解析后真名: {}",
+        acquired
+    );
+    // manager 侧落在真实键条目上
+    let holders = manager.holder_count("COM7").await;
+    send_text(&mut a, r#"{"action":"close","port":"COM7"}"#).await;
+    let _ = recv_until(&mut a, "\"type\":\"ok\"").await;
+    assert_eq!(holders, Some(1), "别名打开应落到真实键 COM7 条目");
+
+    // 清理种子,不污染同进程后续行为
+    ss_server::port_meta_store::set_alias("COM7", None).unwrap();
 }

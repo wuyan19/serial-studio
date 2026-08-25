@@ -42,10 +42,12 @@ type WsSink =
     SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>;
 
 /// 在途回执(open/set_alias 的 Result、write 的 io 结果),按远端线名路由。
+/// Result 的 Ok 载荷 = 服务端实际打开的远端线名(Acquired.resolved;别名解析后
+/// 可能不同于请求串——open_blocking 据此以真名登记 IO,帧分发才不 miss)。
 pub(crate) enum PendingReply {
     Result {
         port: String,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
+        reply: std::sync::mpsc::Sender<Result<String, String>>,
     },
     Write {
         port: String,
@@ -129,8 +131,8 @@ impl DeviceClient {
 
     /// 打开远端端口(同步,manager 的 spawn_blocking 里调)。
     /// 成功时登记 RemoteSharedIo(Weak)并返回 PortIo 句柄;设备离线直接报错。
-    /// 线名先规范化(裸名补 local::)——远端回的数据帧/Acquired 都用远端侧完整键,
-    /// 登记键与之一致,分发/路由才不 miss。
+    /// 线名先规范化(剥遗留 local::,裸名保持裸名)——远端回的数据帧/Acquired 都用
+    /// 远端侧键(入站同规则归一),登记键与之一致,分发/路由才不 miss。
     pub fn open_blocking(
         &self,
         port: &str,
@@ -143,7 +145,7 @@ impl DeviceClient {
                 message: format!("设备 {}({}) 未连接", self.inner.dev.id, self.inner.dev.host),
             });
         }
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<String, String>>();
         self.inner
             .cmd_tx
             .send(DeviceCommand::Open {
@@ -156,16 +158,18 @@ impl DeviceClient {
                 message: "设备连接已断开".into(),
             })?;
         match reply_rx.recv_timeout(RPC_TIMEOUT) {
-            Ok(Ok(())) => {
+            Ok(Ok(wire)) => {
+                // 以服务端实际打开的线名登记(Acquired.resolved):别名后缀寻址时
+                // 远端 map 键 ≠ 请求串,数据帧按远端 map 键出站——登记键必须一致。
                 let shared = Arc::new(RemoteSharedIo::new(read_timeout_of(config)));
                 let mut ports = self.inner.ports.lock().unwrap();
                 ports.retain(|(_, w)| w.upgrade().is_some()); // 顺带清已失效条目
-                ports.push((port.clone(), Arc::downgrade(&shared)));
+                ports.push((wire.clone(), Arc::downgrade(&shared)));
                 Ok(Box::new(RemotePortIo::new(
                     shared,
                     self.inner.cmd_tx.clone(),
                     Arc::clone(&self.inner),
-                    port,
+                    wire,
                 )))
             }
             Ok(Err(msg)) => Err(SerialError::OpenFailed {
@@ -189,7 +193,7 @@ impl DeviceClient {
         if !self.online() {
             return Err(format!("设备 {} 未连接", self.inner.dev.id));
         }
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<String, String>>();
         self.inner
             .cmd_tx
             .send(DeviceCommand::SetAlias {
@@ -199,7 +203,9 @@ impl DeviceClient {
             })
             .map_err(|_| "设备连接已断开".to_string())?;
         match reply_rx.recv_timeout(RPC_TIMEOUT) {
-            Ok(r) => r,
+            // 载荷(解析后线名)对 set_alias 无意义,只看成败
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e),
             Err(_) => {
                 drop_pending(&self.inner, port.as_str());
                 Err("远端设置别名超时".into())
@@ -444,10 +450,19 @@ impl DeviceClient {
         };
         match msg {
             ServerMsg::Ports { ports } => {
-                // 缓存 diff:**变了才**通知本地。这是防自连回授环的关键——
-                // 本地 meta_bus 会把 MetaChanged 推给所有连接(含自连的这条),
-                // 若无条件扇出,自连时 MetaChanged→重拉→Ports→再扇出→…消息风暴。
-                // diff 后:未变化的重复 Ports 静默,变更传播一轮即收敛。
+                // 线名入站归一(剥遗留 local::,幂等):混版本互操作的枢纽——旧版远端
+                // 上报 `local::COM5`,归一后与本新版登记的裸名键一致。缓存 diff:**变了才**
+                // 通知本地。这是防自连回授环的关键——本地 meta_bus 会把 MetaChanged 推给
+                // 所有连接(含自连的这条),若无条件扇出,自连时
+                // MetaChanged→重拉→Ports→再扇出→…消息风暴。diff 后:未变化的重复 Ports
+                // 静默,变更传播一轮即收敛。
+                let ports: Vec<PortView> = ports
+                    .into_iter()
+                    .map(|mut pv| {
+                        pv.info.name = ss_core::normalize_port_key(&pv.info.name);
+                        pv
+                    })
+                    .collect();
                 let mut cached = self.inner.cached_ports.lock().unwrap();
                 if *cached != ports {
                     *cached = ports;
@@ -455,16 +470,27 @@ impl DeviceClient {
                     let _ = self.meta_bus.send(());
                 }
             }
-            ServerMsg::Acquired { port, .. } => self.route_result(&port, Ok(())),
+            ServerMsg::Acquired {
+                port, resolved, ..
+            } => {
+                // 回执按请求串路由(pending 以请求串登记);载荷携带解析后真名
+                // (旧版服务端无 resolved 字段 → 回退归一后的回显串,即真名)
+                let wire = normalize_wire(&port);
+                let payload = resolved.unwrap_or_else(|| wire.clone());
+                self.route_result(&wire, Ok(payload))
+            }
             ServerMsg::Ok {
                 port: Some(port), ..
             } => {
-                self.route_write(&port, Ok(()));
-                self.route_result(&port, Ok(()));
+                let wire = normalize_wire(&port);
+                self.route_write(&wire, Ok(()));
+                let payload = wire.clone();
+                self.route_result(&wire, Ok(payload));
             }
             ServerMsg::Error { message, port } => {
                 // open/write/set_alias 失败都走 Error;有 port 路由,无 port 只留痕
                 if let Some(port) = port {
+                    let port = normalize_wire(&port);
                     self.route_write(
                         &port,
                         Err(io::Error::new(io::ErrorKind::Other, message.clone())),
@@ -493,8 +519,10 @@ impl DeviceClient {
         let Some((port, data)) = parse_data_frame(bin) else {
             return;
         };
+        // 线名入站归一:旧版远端回帧带 local:: 前缀,归一后与本侧登记键一致
+        let port = normalize_wire(&port);
         let mut ports = self.inner.ports.lock().unwrap();
-        if let Some(idx) = ports.iter().position(|(p, _)| p == port) {
+        if let Some(idx) = ports.iter().position(|(p, _)| p == &port) {
             if let Some(io) = ports[idx].1.upgrade() {
                 io.push(data);
             } else {
@@ -503,7 +531,7 @@ impl DeviceClient {
         }
     }
 
-    fn route_result(&self, port: &str, result: Result<(), String>) {
+    fn route_result(&self, port: &str, result: Result<String, String>) {
         let mut pending = self.inner.pending.lock().unwrap();
         if let Some(idx) = pending
             .iter()
@@ -532,6 +560,13 @@ fn drop_pending(inner: &DeviceInner, port: &str) {
     inner.pending.lock().unwrap().retain(|p| match p {
         PendingReply::Result { port: q, .. } | PendingReply::Write { port: q, .. } => q != port,
     });
+}
+
+/// 远端线名入站归一(剥一层遗留 `local::`,幂等):混版本互操作的单点规则。
+/// 旧版远端上报/回帧带 `local::` 前缀,归一后与本侧登记的裸名键一致;
+/// 新版远端本就发裸名,原样通过。
+fn normalize_wire(wire: &str) -> String {
+    ss_core::normalize_port_key(wire)
 }
 
 /// writer 里处理一条命令:挂回执(回执由 reader 收到 Acquired/Ok/Error 时路由)+ 发 JSON。

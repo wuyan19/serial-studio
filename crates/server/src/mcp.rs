@@ -5,12 +5,11 @@
 //! - handle_request 与各 tool 函数均为 async（调 manager 的 async 方法）
 //! - 暴露 6 工具：serial_list / serial_send / serial_read / serial_status / serial_grep / serial_clear
 
+use crate::address::AliasMatch;
 use crate::AppState;
 use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
-use ss_core::SerialManager;
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -91,7 +90,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名（如 COM7 / /dev/ttyUSB0 / GPS）。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址:完整键(COM5 / /dev/ttyUSB0 / 设备id::COM5)、端口别名(GPS)或设备昵称作用域(test::COM5)。缺省时使用唯一打开的串口" },
                         "data": { "type": "string", "description": "要发送的数据" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
                         "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
@@ -148,11 +147,11 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_run_script",
-                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms);[port] 缺省=脚本运行端口,可指定其它已打开端口以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名（不支持别名）。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),同 serial_send 的 port。缺省时使用唯一打开的串口" },
                         "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" },
                         "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string。可选", "additionalProperties": { "type": "string" } }
                     },
@@ -212,7 +211,6 @@ fn handle_tools_list() -> Value {
 }
 
 async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
-    let manager = &state.manager;
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return error_text("Missing tool name".into()),
@@ -220,22 +218,16 @@ async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     match name {
         "serial_list" => tool_serial_list(arguments, state).await,
-        "serial_send" => tool_serial_send(arguments, &**manager).await,
-        "serial_read" => tool_serial_read(arguments, &**manager).await,
-        "serial_status" => tool_serial_status(arguments, &**manager).await,
-        "serial_grep" => tool_serial_grep(arguments, &**manager).await,
-        "serial_clear" => tool_serial_clear(arguments, &**manager).await,
+        "serial_send" => tool_serial_send(arguments, state).await,
+        "serial_read" => tool_serial_read(arguments, state).await,
+        "serial_status" => tool_serial_status(arguments, state).await,
+        "serial_grep" => tool_serial_grep(arguments, state).await,
+        "serial_clear" => tool_serial_clear(arguments, state).await,
         "serial_run_script" => {
             let enable_scripting = state
                 .enable_scripting
                 .load(std::sync::atomic::Ordering::Relaxed);
-            tool_serial_run_script(
-                arguments,
-                manager,
-                enable_scripting,
-                &state.script_semaphore,
-            )
-            .await
+            tool_serial_run_script(arguments, state, enable_scripting).await
         }
         "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
@@ -244,20 +236,26 @@ async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
     }
 }
 
-async fn resolve_port(args: &Value, manager: &SerialManager) -> Result<String, String> {
+/// 解析 port 参数为规范键。缺省时用唯一打开的串口。
+///
+/// 解析交给 manager 边界的 canon_key(别名单点定义):裸名/端口别名/设备昵称作用域
+/// (`test::COM5`)统一解析。canon 对"多命中歧义"只能 warn+透传(热路径无错误通道),
+/// 这里用同一 AddressResolver 索引把候选讲清楚——单一真相,呈现分化。
+async fn resolve_port(args: &Value, state: &AppState) -> Result<String, String> {
+    let manager = &state.manager;
     if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
-        // 精确端口名优先：是已开端口就直接用(已开列表即复合键,精确命中含远端设备端口)
-        let open = manager.list_open_ports().await;
-        if open.iter().any(|x| x == p) {
-            return Ok(p.to_string());
+        let key = manager.canon_key(p);
+        // 输入是裸名且未被解析改写 → 查索引区分"无此别名"与"歧义"
+        let norm = ss_core::normalize_port_key(p);
+        if norm == key && !norm.contains(ss_core::PORT_KEY_SEP) {
+            if let AliasMatch::Ambiguous(cands) = state.addresses.lookup_port(&norm) {
+                return Err(format!(
+                    "端口别名「{}」匹配多个端口 {:?},请使用完整键或设备昵称作用域(如 设备昵称::端口)",
+                    norm, cands
+                ));
+            }
         }
-        // 否则按别名反查 ports.json(本地本机端口的别名,裸名键 → 组复合键)
-        let meta = crate::port_meta_store::load();
-        if let Some((port, _)) = meta.iter().find(|(_, m)| m.alias.as_deref() == Some(p)) {
-            return Ok(ss_core::compose_port_key(ss_core::LOCAL_DEVICE_ID, port));
-        }
-        // 既非已开端口名也非别名：透传，下游 NotOpen 兜底（保留原行为;裸名经 manager 规范化）
-        return Ok(p.to_string());
+        return Ok(key);
     }
     let open = manager.list_open_ports().await;
     match open.len() {
@@ -276,9 +274,25 @@ async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
     }
     let mut out = Vec::with_capacity(views.len());
     for v in views {
-        let label = match &v.alias {
-            Some(a) => format!("{} ({})", v.info.name, a),
-            None => v.info.name.clone(),
+        // 别名词汇 + 设备昵称都展示出来——agent 由此发现可用寻址形式
+        // (裸名 / 端口别名 / `设备昵称::端口`),与 usage guide 的寻址表呼应
+        let mut notes = Vec::new();
+        if let Some(a) = &v.alias {
+            notes.push(format!("别名 {}", a));
+        }
+        let dev_id = ss_core::split_port_key(&v.info.name).0;
+        if dev_id != ss_core::LOCAL_DEVICE_ID {
+            // 提示用裸后缀(目标机上的端口名),拼出的 test::<后缀> 才是可解析寻址
+            let suffix = ss_core::split_port_key(&v.info.name).1;
+            match state.addresses.nickname_of(dev_id) {
+                Some(nick) => notes.push(format!("设备 {} (寻址 {}::{})", nick, nick, suffix)),
+                None => notes.push(format!("设备 {}", dev_id)),
+            }
+        }
+        let label = if notes.is_empty() {
+            v.info.name.clone()
+        } else {
+            format!("{} ({})", v.info.name, notes.join(", "))
         };
         let line = if v.info.opened {
             if v.info.holders > 0 {
@@ -294,8 +308,9 @@ async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
     ok_text(out.join("\n"))
 }
 
-async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
-    let port = match resolve_port(&args, manager).await {
+async fn tool_serial_send(args: Value, state: &AppState) -> Value {
+    let manager = &state.manager;
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -337,8 +352,9 @@ async fn tool_serial_send(args: Value, manager: &SerialManager) -> Value {
     }
 }
 
-async fn tool_serial_read(args: Value, manager: &SerialManager) -> Value {
-    let port = match resolve_port(&args, manager).await {
+async fn tool_serial_read(args: Value, state: &AppState) -> Value {
+    let manager = &state.manager;
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -366,18 +382,21 @@ async fn tool_serial_read(args: Value, manager: &SerialManager) -> Value {
     ok_text(output)
 }
 
-async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
-    let port = match resolve_port(&args, manager).await {
+async fn tool_serial_status(args: Value, state: &AppState) -> Value {
+    let manager = &state.manager;
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
     match manager.status(&port).await {
         Some(cfg) => {
             let holders = manager.holder_count(&port).await.unwrap_or(0);
-            // ports.json 按裸名存——复合键先剥前缀再查
-            let alias = crate::port_meta_store::load()
-                .get(crate::bare_name_of(&port))
-                .and_then(|m| m.alias.clone());
+            // 别名从合并视图取(本地 ports.json + 远端缓存透传),远端口的别名也能展示
+            let alias = crate::list_ports_with_meta(state)
+                .await
+                .into_iter()
+                .find(|v| v.info.name == port)
+                .and_then(|v| v.alias);
             let alias_line = match alias {
                 Some(a) => format!("Alias: {}\n", a),
                 None => String::new(),
@@ -391,8 +410,9 @@ async fn tool_serial_status(args: Value, manager: &SerialManager) -> Value {
     }
 }
 
-async fn tool_serial_grep(args: Value, manager: &SerialManager) -> Value {
-    let port = match resolve_port(&args, manager).await {
+async fn tool_serial_grep(args: Value, state: &AppState) -> Value {
+    let manager = &state.manager;
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -450,8 +470,9 @@ async fn tool_serial_grep(args: Value, manager: &SerialManager) -> Value {
     }
 }
 
-async fn tool_serial_clear(args: Value, manager: &SerialManager) -> Value {
-    let port = match resolve_port(&args, manager).await {
+async fn tool_serial_clear(args: Value, state: &AppState) -> Value {
+    let manager = &state.manager;
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -463,15 +484,15 @@ async fn tool_serial_clear(args: Value, manager: &SerialManager) -> Value {
 
 async fn tool_serial_run_script(
     args: Value,
-    manager: &Arc<SerialManager>,
+    state: &AppState,
     enable_scripting: bool,
-    semaphore: &tokio::sync::Semaphore,
 ) -> Value {
+    let manager = &state.manager;
     // 远程 MCP 路径强制闸门:服务器无认证,脚本执行须显式开启
     if !enable_scripting {
         return error_text("脚本执行未启用(settings.json 的 enable_scripting=false)".into());
     }
-    let port = match resolve_port(&args, &**manager).await {
+    let port = match resolve_port(&args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -480,7 +501,7 @@ async fn tool_serial_run_script(
         return error_text(format!("端口 {} 未打开或已断开", port));
     }
     // 并发上限(同 WS):防 DoS。permit 借用 semaphore,持到 run_script 完成(函数返回即释放)。
-    let _permit = match semaphore.try_acquire() {
+    let _permit = match state.script_semaphore.try_acquire() {
         Ok(p) => p,
         Err(_) => return error_text("脚本执行并发已满,稍后再试".into()),
     };
@@ -658,6 +679,16 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 
 所有工具接受可选 `port` 参数。不传时，若只打开了一个串口则自动选用；打开多个时必须显式指定。
 
+## 寻址形式
+
+- 裸端口名：本机串口（如 `COM5`、`/dev/ttyUSB0`）。
+- 完整键：远端设备端口 `设备id::COM5`,多级级联逐段透传。
+- 端口别名:UI 里设置的别名(如 `GPS`),本机优先,跨设备同名歧义时报候选。
+- 设备昵称作用域:设备注册时设置的昵称(如 `test::COM5`),后缀交给目标机解析——
+  `test::GPS` 即"test 设备上的 GPS 别名端口"。昵称在设备列表唯一。
+
+serial_list 输出会标注每个端口的别名与所属设备昵称。
+
 ## 推荐工作流
 
 - 简单命令-响应：`serial_send(data="AT", timeout_ms=1000)`（一步拿响应）。
@@ -689,19 +720,24 @@ mod tests {
     fn make_state_with_script_bus(script_tx: broadcast::Sender<()>) -> AppState {
         let event_bus = Arc::new(EventBus::new(16));
         let (meta_tx, _) = broadcast::channel(16);
+        let devices = Arc::new(crate::device::DeviceClientManager::empty(script_tx.clone()));
         AppState {
             manager: Arc::new(SerialManager::new(
                 event_bus.clone(),
                 Arc::new(RealPortOpener),
             )),
             event_bus,
-            meta_bus: Arc::new(meta_tx),
+            meta_bus: Arc::new(meta_tx.clone()),
             script_bus: Arc::new(script_tx.clone()),
             enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            devices: Arc::new(crate::device::DeviceClientManager::empty(script_tx)),
+            addresses: Arc::new(crate::address::AddressResolver::new(
+                Arc::clone(&devices),
+                meta_tx,
+            )),
+            devices,
         }
     }
 
