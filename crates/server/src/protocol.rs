@@ -91,9 +91,13 @@ pub enum ServerMsg {
         message: String,
     },
     /// version 的直接回复:服务端编译版本 + 是否启用远程脚本执行(前端据此显隐脚本 UI)。
+    /// instance_id = 服务端实例身份(段名=实例 id 的身份交换;旧版服务端无此字段,
+    /// 客户端 None = 对端不支持,保持占位段名)。
     Version {
         version: String,
         enable_scripting: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<String>,
     },
     /// get_script_skill 的直接回复:脚本编写 SKILL 全文(前端展示 / 复制给外部 Agent 用)。
     ScriptSkill {
@@ -107,11 +111,17 @@ pub enum ServerMsg {
     Pong,
 }
 
-/// 远程设备在线状态(Devices 快照的条目)。
+/// 远程设备在线状态(Devices 快照的条目)。host/port 供前端把"学习到的
+/// 实例 id"对齐回 remotes 条目(按地址匹配替换占位 id);旧版服务端无此二字段,
+/// 前端 undefined 时跳过对齐。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DeviceStateView {
     pub id: String,
     pub online: bool,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
 }
 
 /// 客户端 → 服务器 消息。
@@ -176,8 +186,13 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         req: Option<u64>,
     },
-    /// 查询服务版本。
-    Version,
+    /// 查询服务版本;instance_id = 客户端实例自报身份(设备客户端握手用,
+    /// 浏览器前端不带)。旧版客户端形态 `{"action":"version"}` 反序列化为 None;
+    /// 旧版服务端对本消息的额外字段宽容(internally-tagged 单元变体忽略未知键)。
+    Version {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<String>,
+    },
     /// 拉取脚本编写 SKILL 全文(展示 / 复制给外部 Agent 用)。
     GetScriptSkill,
     /// 应用层心跳(浏览器 WS 不暴露协议层 ping,由前端定时发,服务端即时回 Pong)。
@@ -337,5 +352,90 @@ mod tests {
         assert!(matches!(open, ClientMsg::Open { req: Some(7), .. }));
         let legacy: ClientMsg = serde_json::from_str(r#"{"action":"close","port":"COM7"}"#).unwrap();
         assert!(matches!(legacy, ClientMsg::Close { req: None, .. }));
+    }
+
+    /// instance_id 线格式契约(段名=实例 id 的身份交换):
+    /// - None 时字段整体省略(浏览器前端/旧版对端零变化),Some 时上线且可往返;
+    /// - **旧版服务端宽容性**:新客户端发出的 `{"action":"version","instance_id":…}`
+    ///   对旧版(Version 为单元变体)不报错——internally-tagged 单元变体忽略额外
+    ///   字段,旧 hub 照常回无 id 的 Version,客户端快速落回占位段名。
+    #[test]
+    fn version_instance_id_wire_contract() {
+        // None 省略 / Some 上线(ServerMsg 方向)
+        let none = to_json(ServerMsg::Version {
+            version: "0.10.4".into(),
+            enable_scripting: false,
+            instance_id: None,
+        });
+        match none {
+            OutFrame::Text(s) => {
+                assert!(!s.contains("instance_id"), "None 不得出现在线格式: {s}");
+                // 旧版服务端的应答形态(无此字段)→ 反序列化为 None
+                let back: ServerMsg = serde_json::from_str(&s).unwrap();
+                assert!(matches!(back, ServerMsg::Version { instance_id: None, .. }));
+            }
+            _ => panic!("Version 应是 Text"),
+        }
+        let some = to_json(ServerMsg::Version {
+            version: "0.10.4".into(),
+            enable_scripting: false,
+            instance_id: Some("inst-x".into()),
+        });
+        match some {
+            OutFrame::Text(s) => {
+                assert!(s.contains(r#""instance_id":"inst-x""#), "Some 应回带: {s}");
+                let back: ServerMsg = serde_json::from_str(&s).unwrap();
+                assert!(matches!(
+                    back,
+                    ServerMsg::Version { instance_id: Some(ref id), .. } if id == "inst-x"
+                ));
+            }
+            _ => panic!("Version 应是 Text"),
+        }
+        // ClientMsg 方向:旧版客户端形态(无字段)→ None;新形态 → Some
+        let legacy: ClientMsg = serde_json::from_str(r#"{"action":"version"}"#).unwrap();
+        assert!(matches!(legacy, ClientMsg::Version { instance_id: None }));
+        let modern: ClientMsg =
+            serde_json::from_str(r#"{"action":"version","instance_id":"inst-y"}"#).unwrap();
+        assert!(matches!(
+            modern,
+            ClientMsg::Version { instance_id: Some(ref id) } if id == "inst-y"
+        ));
+
+        // 旧版服务端(Version 为单元变体)对新形态的宽容性:忽略额外字段不报错。
+        // 这决定了旧 hub 能否照常应答(而非解析失败丢弃)。
+        #[derive(Deserialize)]
+        #[serde(tag = "action", rename_all = "snake_case")]
+        enum LegacyClientMsg {
+            Version,
+            #[serde(other)]
+            Other,
+        }
+        let parsed: Result<LegacyClientMsg, _> =
+            serde_json::from_str(r#"{"action":"version","instance_id":"inst-y"}"#);
+        assert!(
+            matches!(parsed, Ok(LegacyClientMsg::Version)),
+            "旧版单元变体应对 instance_id 额外字段宽容(serde internally-tagged 行为)"
+        );
+    }
+
+    /// DeviceStateView 线格式:host/port 供前端 id 对齐(按地址匹配替换占位 id);
+    /// 旧版服务端无此二字段 → 反序列化走 default,新前端读空跳过对齐。
+    #[test]
+    fn device_state_view_wire_contract() {
+        let v = DeviceStateView {
+            id: "inst-b".into(),
+            online: true,
+            host: "192.168.1.20".into(),
+            port: 18700,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["host"], "192.168.1.20");
+        assert_eq!(json["port"], 18700);
+        // 旧版形态(仅 id/online)→ default 兜底
+        let legacy: DeviceStateView =
+            serde_json::from_str(r#"{"id":"x","online":false}"#).unwrap();
+        assert_eq!(legacy.host, "");
+        assert_eq!(legacy.port, 0);
     }
 }

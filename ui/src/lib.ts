@@ -383,6 +383,43 @@ export async function persistRemotes(remotes: RemoteDevice[]) {
   }
 }
 
+/** 设备在线快照条目(Devices 推送)。host/port 供 id 对齐;旧版后端缺省。 */
+export interface DeviceStateEntry {
+  id: string;
+  online: boolean;
+  host?: string;
+  port?: number;
+}
+
+/** remotes 的 id 对齐结果:list 无变化时为原引用(跳过 setState),renamed 为本次替换映射。 */
+export interface RemoteIdAlignment {
+  list: RemoteDevice[];
+  renamed: Map<string, string>;
+}
+
+/** 按地址把后端"学习到的实例 id"对齐回 remotes 条目(段名=实例 id):
+ * 后端握手学习会把设备段名从占位 uuid 替换为对端实例 id,Devices 推送随之携带新 id。
+ * 时序保证(后端先迁移后 online)使占位 id 从未有端口桶/打开的 tab——替换是纯增量,
+ * 无需迁移任何键。设备缺 host/port(旧版后端)或已对齐时不动作。 */
+export function alignRemotesId(
+  remotes: RemoteDevice[],
+  devices: DeviceStateEntry[],
+): RemoteIdAlignment {
+  const renamed = new Map<string, string>();
+  for (const d of devices) {
+    if (!d.host || d.port === undefined) continue; // 旧版后端无地址字段,跳过
+    if (remotes.some((r) => r.id === d.id)) continue; // 已对齐(或同 id 新条目)
+    const target = remotes.find((r) => r.host === d.host && r.port === d.port && r.id !== d.id);
+    if (target) renamed.set(target.id, d.id);
+  }
+  if (renamed.size === 0) return { list: remotes, renamed };
+  const list = remotes.map((r) => {
+    const to = renamed.get(r.id);
+    return to ? { ...r, id: to } : r;
+  });
+  return { list, renamed };
+}
+
 // ===== 共享常量 =====
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];

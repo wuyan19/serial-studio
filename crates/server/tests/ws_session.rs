@@ -59,7 +59,11 @@ async fn boot() -> (String, Arc<SerialManager>) {
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
     // 测试无远程设备(集成测试用 DeviceClientManager::empty + update_registry 注入)
-    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone()));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        meta_tx.clone(),
+        "inst-ws-session",
+    ));
+    devices.bind(Arc::downgrade(&devices));
     let state = AppState {
         manager: manager.clone(),
         event_bus,
@@ -72,9 +76,14 @@ async fn boot() -> (String, Arc<SerialManager>) {
         devices,
         // 寻址解析(manager 未注入 resolver,此实例仅占位;MCP 直查路径才用)
         addresses: Arc::new(ss_server::address::AddressResolver::new(
-            Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone())),
+            Arc::new(ss_server::device::DeviceClientManager::empty(
+                meta_tx.clone(),
+                "inst-ws-session",
+            )),
             meta_tx,
+            "inst-ws-session".into(),
         )),
+        instance_id: "inst-ws-session".into(),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -225,6 +234,36 @@ async fn version_action_returns_server_version() {
     assert!(resp.contains(&want), "期望包含 {}，实际: {}", want, resp);
 }
 
+/// 身份回带闸门(线格式契约):instance_id 是跨重启永久身份,不对未认证连接
+/// 无条件暴露——仅设备握手(请求自报了 id)才回带本机实例 id;浏览器/扫描器等
+/// 不带 id 的探针得到的应答与旧版零差异(无此字段)。设备客户端握手恒自报,
+/// 学习路径不受闸门影响(device_cascade::learned_id_adopts_placeholder 锁定)。
+#[tokio::test]
+async fn version_echoes_instance_id_only_when_requested() {
+    let (url, _mgr) = boot().await;
+    let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    // 浏览器形态(无 id):应答不得含 instance_id 字段
+    send_text(&mut a, r#"{"action":"version"}"#).await;
+    let resp = recv_until(&mut a, "\"type\":\"version\"").await;
+    assert!(
+        !resp.contains("instance_id"),
+        "无 id 探针的应答不得泄露实例身份: {resp}"
+    );
+
+    // 设备握手形态(自报 id):应答回带本机实例 id
+    send_text(
+        &mut a,
+        r#"{"action":"version","instance_id":"inst-peer"}"#,
+    )
+    .await;
+    let resp = recv_until(&mut a, "\"type\":\"version\"").await;
+    assert!(
+        resp.contains(r#""instance_id":"inst-ws-session""#),
+        "自报 id 的握手应答回带本机实例 id: {resp}"
+    );
+}
+
 /// 端口键线格式契约:本机端口键 = 裸名;open 接受裸名与遗留 `local::` 前缀
 /// (老客户端写法,规范化剥除后指向同一条目);acquired 回显 map 键(裸名)。
 #[tokio::test]
@@ -318,8 +357,16 @@ async fn open_by_alias_resolves_via_injected_resolver() {
     let event_bus = Arc::new(EventBus::new(64));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
-    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone()));
-    let addresses = Arc::new(AddressResolver::new(devices.clone(), meta_tx.clone()));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        meta_tx.clone(),
+        "inst-ws-alias",
+    ));
+    devices.bind(Arc::downgrade(&devices));
+    let addresses = Arc::new(AddressResolver::new(
+        devices.clone(),
+        meta_tx.clone(),
+        "inst-ws-alias".into(),
+    ));
     let manager = Arc::new(SerialManager::with_key_resolver(
         event_bus.clone(),
         Arc::new(FakeOpener),
@@ -336,6 +383,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         addresses,
         devices,
+        instance_id: "inst-ws-alias".into(),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

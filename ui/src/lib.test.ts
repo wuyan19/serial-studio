@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  alignRemotesId,
   dissolveGroup,
   displayPortName,
   groupBy,
@@ -12,7 +13,7 @@ import {
   upsertNamed,
   wireToPid,
 } from "./lib";
-import type { ScriptParam } from "./types";
+import type { RemoteDevice, ScriptParam } from "./types";
 
 describe("portIdOf / parsePortId", () => {
   it("往返一致", () => {
@@ -205,5 +206,44 @@ describe("paramDefault / prefillRunValues", () => {
       host: "h",
       mode: "slow",
     });
+  });
+});
+
+describe("alignRemotesId(段名=实例 id 的前端对齐)", () => {
+  const remote = (id: string, host = "192.168.1.20", port = 18700): RemoteDevice => ({
+    id,
+    host,
+    port,
+  });
+
+  it("占位 id 被同地址设备的学习 id 替换,其余条目不动", () => {
+    const remotes = [remote("ph-a", "10.0.0.1"), remote("ph-b"), remote("inst-c", "10.0.0.9")];
+    const { list, renamed } = alignRemotesId(remotes, [
+      { id: "inst-b", online: true, host: "192.168.1.20", port: 18700 },
+    ]);
+    expect(renamed).toEqual(new Map([["ph-b", "inst-b"]]));
+    expect(list.map((r) => r.id)).toEqual(["ph-a", "inst-b", "inst-c"]);
+    // 非 id 字段(地址/昵称)保持
+    expect(list[1].host).toBe("192.168.1.20");
+  });
+
+  it("已对齐(remotes 已有该 id)与地址不匹配时不动作,返回原引用", () => {
+    const remotes = [remote("inst-b")];
+    const r1 = alignRemotesId(remotes, [
+      { id: "inst-b", online: true, host: "192.168.1.20", port: 18700 },
+    ]);
+    expect(r1.list).toBe(remotes);
+    expect(r1.renamed.size).toBe(0);
+    const r2 = alignRemotesId(remotes, [
+      { id: "inst-x", online: true, host: "10.9.9.9", port: 1 },
+    ]);
+    expect(r2.list).toBe(remotes);
+  });
+
+  it("旧版后端(无 host/port)跳过对齐", () => {
+    const remotes = [remote("ph-b")];
+    const { list, renamed } = alignRemotesId(remotes, [{ id: "inst-b", online: true }]);
+    expect(renamed.size).toBe(0);
+    expect(list).toBe(remotes);
   });
 });

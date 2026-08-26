@@ -62,28 +62,84 @@ pub struct DeviceClientManager {
     device_bus: broadcast::Sender<DeviceEvent>,
     meta_bus: broadcast::Sender<()>,
     started: AtomicBool,
+    /// self-weak(装配后 `bind` 注入):client 握手学到对端实例 id 时反向调
+    /// [`Self::adopt_device_id`],避免 client 持强引用造成 Arc 循环。
+    self_weak: std::sync::Mutex<std::sync::Weak<DeviceClientManager>>,
+    /// 本机实例 id(spawn client 时注入,握手自报用)。
+    instance_id: String,
 }
 
 impl DeviceClientManager {
     /// 空管理器(测试/无设备;不 spawn,注册设备需手动 update + start)。
-    pub fn empty(meta_bus: broadcast::Sender<()>) -> Self {
+    /// instance_id:本机实例身份(握手自报);测试注入固定值,不落盘。
+    pub fn empty(meta_bus: broadcast::Sender<()>, instance_id: impl Into<String>) -> Self {
         let (device_bus, _) = broadcast::channel(16);
         Self {
             devices: std::sync::Mutex::new(HashMap::new()),
             device_bus,
             meta_bus,
             started: AtomicBool::new(false),
+            self_weak: std::sync::Mutex::new(std::sync::Weak::new()),
+            instance_id: instance_id.into(),
         }
     }
 
+    /// self-weak 注入:Arc 包装后由装配处调一次(create_state / 测试 boot)。
+    /// client 握手学习用它反向调 adopt_device_id。未 bind 时学习退化为占位
+    /// 段名(旧版对端等价行为),不致命。
+    pub fn bind(&self, weak: std::sync::Weak<DeviceClientManager>) {
+        *self.self_weak.lock().unwrap() = weak;
+    }
+
     /// 读 remotes.json 构造(生产组装点)。
-    pub fn from_registry(meta_bus: broadcast::Sender<()>) -> Self {
-        let m = Self::empty(meta_bus);
+    pub fn from_registry(
+        meta_bus: broadcast::Sender<()>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        let m = Self::empty(meta_bus, instance_id);
         let remotes = crate::remotes_store::load();
         if !remotes.is_empty() {
             m.update_registry(&remotes);
         }
         m
+    }
+
+    /// 握手学习:对端自报实例 id ≠ 当前段名时,把该设备重建为学习 id
+    /// (段名=实例 id 的身份统一)。与 reconnect 同构的"删旧建新"——设备此时尚
+    /// 未置 online(学习先于 online),无在途命令/端口,重建零损失;新 client
+    /// 再学到同 id 幂等不再迁。冲突(学习 id 已被其它设备占用,如重复注册同一
+    /// 台设备)→ 后学者不迁移 + warn,退化为占位段名,谓词结构判据兜底。
+    /// 返回是否已迁移(调用方据此终止旧会话)。
+    pub fn adopt_device_id(&self, old_id: &str, learned: &str) -> bool {
+        let mut devices = self.devices.lock().unwrap();
+        let Some(old) = devices.get(old_id).cloned() else {
+            return false; // 旧条目已消失(并发删除/替换),放弃
+        };
+        if learned == old_id {
+            return false; // 已是学习 id,无需迁移
+        }
+        if devices.contains_key(learned) {
+            tracing::warn!(
+                "设备 {} 学到实例 id {} 但已被其它注册条目占用(重复注册同一设备?),保持占位段名",
+                old_id,
+                learned
+            );
+            return false;
+        }
+        let mut dev = old.device().clone();
+        tracing::info!(
+            "设备 {} 身份学习:段名 {} → 实例 id {}(地址 {}:{})",
+            old_id,
+            old_id,
+            learned,
+            dev.host,
+            dev.port
+        );
+        dev.id = learned.to_string();
+        devices.remove(old_id);
+        old.stop(); // 未 online 的 stop:仅取消本会话 + Offline 广播(前端未见 Online,无害)
+        self.spawn_client_locked(&mut devices, dev);
+        true
     }
 
     /// 幂等惰性启动:eager 连接全部注册设备(拉端口列表需要连接)。
@@ -139,6 +195,8 @@ impl DeviceClientManager {
     ) {
         let client = Arc::new(DeviceClient::new(
             dev,
+            self.instance_id.clone(),
+            self.self_weak.lock().unwrap().clone(),
             self.device_bus.clone(),
             self.meta_bus.clone(),
         ));

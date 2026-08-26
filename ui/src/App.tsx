@@ -19,6 +19,7 @@ import type {
 import { leafGroupIds } from "./pane-tree";
 import {
   DEFAULT_CONFIG,
+  alignRemotesId,
   displayPortName,
   downloadJson,
   getMode,
@@ -579,6 +580,23 @@ export default function App() {
       // 设备在线快照(桌面:后端 DeviceClientManager;远程:透传远端 ss 的设备表)。
       // 设备级上下线与 transport 级连接共用同一套中止/重放语义。
       t.onDevices((devices) => {
+        // 桌面形态 id 对齐:后端握手学习把设备段名从占位 uuid 替换为对端实例 id
+        // (段名=实例 id),Devices 推送随之带新 id。按 host:port 对齐 remotes 并写回
+        // remotes.json(唯一写者仍是前端 save_remotes)。时序保证(后端先迁移后
+        // online)使占位 id 从未有端口桶/打开的 tab——替换是纯增量,无需迁移键。
+        if (isLocal) {
+          const { list, renamed } = alignRemotesId(remotesRef.current, devices);
+          if (renamed.size > 0) {
+            setRemotes(list);
+            persistRemotes(list);
+            // 折叠键跟随替换(旧占位 id 的展开态迁移到学习 id)
+            setExpandedRemotes((prev) => {
+              const next = new Set<string>();
+              for (const id of prev) next.add(renamed.get(id) ?? id);
+              return next;
+            });
+          }
+        }
         let anyOnline = false;
         for (const d of devices) {
           dispatch({ type: "dev_online", devId: d.id, online: d.online });

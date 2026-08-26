@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::stream::SplitSink;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use ss_core::{RemoteDevice, SerialConfig, SerialError};
 use tokio::sync::broadcast;
@@ -37,9 +37,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// writer 单次发送超时(背压/半开防护):超时视为断连。
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// 身份握手等 Version 应答的超时:正常对端(含旧版,应答无 id)毫秒级返回;
+/// 全无应答(手写桩/故障对端)超时后放弃学习,保持占位段名。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-type WsSink =
-    SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>;
+type WsStream = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsSink = SplitSink<WsStream, Message>;
 
 /// 在途回执(open/set_alias 的 Result、write 的 io 结果)。路由两级:
 /// - 新↔新(回执带 req):按 `req` 精确配对——同端口 close/write 的 Ok 不会
@@ -64,6 +67,11 @@ pub(crate) enum PendingReply {
 /// 设备共享态:连接重建后复用(cmd_tx 不换,外部 sender 恒有效)。
 pub(crate) struct DeviceInner {
     pub(crate) dev: RemoteDevice,
+    /// 本机实例 id(握手自报用;段名=实例 id 的身份交换)。
+    pub(crate) self_id: String,
+    /// 所属 manager 的 weak 引用(握手学到对端实例 id 时反向调 adopt;
+    /// Weak 防 Arc 循环——manager 持本 client 的 Arc)。
+    pub(crate) owner: std::sync::Weak<super::DeviceClientManager>,
     pub(crate) online: AtomicBool,
     /// 命令通道(writer 独占消费;断连期间的积压在新会话开始时被丢弃——陈旧
     /// Open/Write 重放会打开无人对账的端口/突发打到串口设备)。
@@ -100,6 +108,8 @@ pub struct DeviceClient {
 impl DeviceClient {
     pub(crate) fn new(
         dev: RemoteDevice,
+        self_id: String,
+        owner: std::sync::Weak<super::DeviceClientManager>,
         device_bus: broadcast::Sender<DeviceEvent>,
         meta_bus: broadcast::Sender<()>,
     ) -> Self {
@@ -107,6 +117,8 @@ impl DeviceClient {
         Self {
             inner: Arc::new(DeviceInner {
                 dev,
+                self_id,
+                owner,
                 online: AtomicBool::new(false),
                 cmd_tx,
                 ports: Mutex::new(Vec::new()),
@@ -136,11 +148,14 @@ impl DeviceClient {
         self.inner.online.load(Ordering::Relaxed)
     }
 
-    /// 设备状态快照(Devices 推送用)。
+    /// 设备状态快照(Devices 推送用)。host/port 随行——前端按地址把学习到的
+    /// 实例 id 对齐回 remotes 条目(占位 id 替换)。
     pub fn state_view(&self) -> DeviceStateView {
         DeviceStateView {
             id: self.inner.dev.id.clone(),
             online: self.online(),
+            host: self.inner.dev.host.clone(),
+            port: self.inner.dev.port,
         }
     }
 
@@ -355,10 +370,46 @@ impl DeviceClient {
             }
         }
 
+        // —— 握手:身份交换(段名=实例 id 的根基)。自报本机实例 id,等对端
+        // Version 应答;学到的对端实例 id ≠ 当前段名(占位 uuid)时上报 manager
+        // adopt(删旧建新,新 client 以学习 id 重连,幂等不再迁),本会话终止。
+        // **学习先于 online**:open/列表/别名永远只见过学习 id,无端口键迁移。
+        // 旧版对端应答无 instance_id(或全无应答)→ 放弃/超时,保持占位段名,
+        // 行为与旧版对端完全一致(谓词结构判据兜底)。等待期间的先导消息
+        // (hub 连接即推 Ports/Devices 快照)缓存重放,不丢。
+        let (peer_id, buffered) = match self.handshake_identity(&sink, &mut stream).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("设备 {} 握手失败: {}", self.inner.dev.id, e);
+                return; // 连接级失败,走 run 的重连路径
+            }
+        };
+        if let Some(peer) = peer_id {
+            if peer != self.inner.dev.id {
+                let adopted = self
+                    .inner
+                    .owner
+                    .upgrade()
+                    .map(|m| m.adopt_device_id(&self.inner.dev.id, &peer))
+                    .unwrap_or(false);
+                if adopted {
+                    return; // 已重建为学习 id,本会话(旧 client)功成身退
+                }
+                // 未迁移(冲突/旧条目消失):继续用当前段名上线
+            }
+        }
+        for msg in buffered {
+            match msg {
+                Message::Text(t) => self.handle_server_text(&t),
+                Message::Binary(b) => self.handle_data_frame(&b),
+                _ => {}
+            }
+        }
+
         // 上线:广播 + 拉初始端口列表。
-        // 自连(把本机地址注册为远程设备)是合法形态——透传深度限 1(list 合并只收
-        // 远端自己的口)保证列表恒为"本地 N + 镜像 N"不增殖;open 镜像口路由回本机
-        // manager,即本地口的远程视图,占有权语义照常(附加到同一端口)。
+        // 自连(把本机地址注册为远程设备)是合法形态——环检测(段重复 + 语义判据)
+        // 保证列表不增殖;open 镜像口路由回本机 manager,即本地口的远程视图,
+        // 占有权语义照常(附加到同一端口)。
         self.inner.online.store(true, Ordering::Relaxed);
         // 复位离线闩锁:本轮在线期间的断开要走"必发"沿;再次失败也重新广播
         self.inner.announced.store(false, Ordering::Relaxed);
@@ -458,6 +509,54 @@ impl DeviceClient {
         // 会话结束:停 writer(set_offline 由 run 统一做,此处只等 writer 退出)
         writer.abort();
         let _ = writer.await;
+    }
+
+    /// 握手身份交换(段名=实例 id 的根基):发 Version 自报本机实例 id,
+    /// 等对端 Version 应答。返回 (对端实例 id——应答缺失/超时为 None——,
+    /// 先导消息缓存)。hub 建连即推的 Ports/Devices 快照会先于 Version 应答
+    /// 到达,缓存后由调用方重放,不丢。连接在握手期间断开返回 Err(走重连)。
+    async fn handshake_identity(
+        &self,
+        sink: &Arc<tokio::sync::Mutex<WsSink>>,
+        stream: &mut SplitStream<WsStream>,
+    ) -> Result<(Option<String>, Vec<Message>), String> {
+        sink_send_json(
+            sink,
+            &ClientMsg::Version {
+                instance_id: Some(self.inner.self_id.clone()),
+            },
+        )
+        .await
+        .map_err(|e| format!("发送 version 失败: {e}"))?;
+        let mut buffered = Vec::new();
+        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        loop {
+            let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remain.is_zero() {
+                tracing::debug!(
+                    "设备 {} 握手等 version 应答超时,放弃身份学习(保持占位段名)",
+                    self.inner.dev.id
+                );
+                return Ok((None, buffered));
+            }
+            match tokio::time::timeout(remain, stream.next()).await {
+                Err(_) => return Ok((None, buffered)), // 超时:对端不支持,占位模式
+                Ok(Some(Ok(Message::Text(t)))) => {
+                    match serde_json::from_str::<ServerMsg>(&t) {
+                        Ok(ServerMsg::Version { instance_id, .. }) => {
+                            return Ok((instance_id, buffered))
+                        }
+                        _ => buffered.push(Message::Text(t)), // 先导消息,缓存重放
+                    }
+                }
+                Ok(Some(Ok(m @ Message::Binary(_)))) => buffered.push(m),
+                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {} // 协议层自动应答
+                Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) => {
+                    return Err("连接在握手期间关闭".into())
+                }
+                Ok(Some(Ok(Message::Frame(_)))) => {} // tungstenite 内部形态,不出现在流上
+            }
+        }
     }
 
     /// 远端文本消息:Ports 刷缓存;Acquired/Ok/Error 路由在途回执;事件触发 invalidate。

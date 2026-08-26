@@ -720,7 +720,10 @@ mod tests {
     fn make_state_with_script_bus(script_tx: broadcast::Sender<()>) -> AppState {
         let event_bus = Arc::new(EventBus::new(16));
         let (meta_tx, _) = broadcast::channel(16);
-        let devices = Arc::new(crate::device::DeviceClientManager::empty(script_tx.clone()));
+        let devices = Arc::new(crate::device::DeviceClientManager::empty(
+            script_tx.clone(),
+            "inst-mcp-test",
+        ));
         AppState {
             manager: Arc::new(SerialManager::new(
                 event_bus.clone(),
@@ -736,8 +739,10 @@ mod tests {
             addresses: Arc::new(crate::address::AddressResolver::new(
                 Arc::clone(&devices),
                 meta_tx,
+                "inst-mcp-test".into(),
             )),
             devices,
+            instance_id: "inst-mcp-test".into(),
         }
     }
 

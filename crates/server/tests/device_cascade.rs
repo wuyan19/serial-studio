@@ -71,6 +71,8 @@ struct Instance {
     addr: String,
     manager: Arc<SerialManager>,
     devices: Arc<DeviceClientManager>,
+    /// 本实例身份(握手自报;学习断言用)。
+    instance_id: &'static str,
 }
 
 impl Instance {
@@ -79,13 +81,20 @@ impl Instance {
     }
 }
 
-/// 起一个 server。echo=true 时端口回显且不连设备(B 侧桩);echo=false 时注入
-/// CompositeOpener + 设备表(A 侧,设备经 update_registry 注册)。
+/// 起一个 server(默认实例身份)。单实例/桩对端的既有测试用;
+/// 需要身份区分的测试(真实双实例互注册等)用 [`boot_as`] 显式不同 id。
 async fn boot(echo: bool) -> Instance {
+    boot_as(echo, "inst-anon").await
+}
+
+/// 起一个 server,显式指定实例身份。echo=true 时端口回显且不连设备(B 侧桩);
+/// echo=false 时注入 CompositeOpener + 设备表(A 侧,设备经 update_registry 注册)。
+async fn boot_as(echo: bool, inst: &'static str) -> Instance {
     let event_bus = Arc::new(EventBus::new(256));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
-    let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone()));
+    let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), inst));
+    devices.bind(Arc::downgrade(&devices)); // 握手学习上报需要 owner
     let opener: Arc<dyn PortOpener> = if echo {
         Arc::new(EchoOpener)
     } else {
@@ -104,8 +113,10 @@ async fn boot(echo: bool) -> Instance {
         addresses: Arc::new(ss_server::address::AddressResolver::new(
             Arc::clone(&devices),
             meta_tx,
+            inst.into(),
         )),
         devices: Arc::clone(&devices),
+        instance_id: inst.into(),
     };
     let app = create_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -117,6 +128,7 @@ async fn boot(echo: bool) -> Instance {
         addr: addr.to_string(),
         manager,
         devices,
+        instance_id: inst,
     }
 }
 
@@ -140,11 +152,13 @@ async fn send_text(ws: &mut Ws, json: &str) {
     ws.send(Message::Text(json.into())).await.unwrap();
 }
 
-/// 全链路:A 的客户端 open `dev-b::COM7` → 写 → 远端回显 → A 侧收到数据帧。
+/// 全链路:A 的客户端 open `<B实例id>::COM7` → 写 → 远端回显 → A 侧收到数据帧。
+/// 注册用占位 id "dev-b",握手学习后段名替换为 B 的实例 id(测试键随之)。
 #[tokio::test]
 async fn cascade_open_write_echo() {
     let b = boot(/*echo*/ true).await;
     let a = boot(false).await;
+    let key = format!("{}::COM7", b.instance_id);
 
     // A 注册 B 并启动设备连接池
     a.devices.update_registry(&[ss_core::RemoteDevice {
@@ -156,14 +170,15 @@ async fn cascade_open_write_echo() {
     a.devices.start();
 
     // 等设备上线:acquire 轮询(不依赖系统枚举——列表来自真实 COM 枚举,无串口机器为空,
-    // CI/Linux 上按列表等会假超时;acquire 只需设备连接就绪)
+    // CI/Linux 上按列表等会假超时;acquire 只需设备连接就绪)。acquire 用学习后的
+    // 键(占位 id 已被 adopt 替换)。
     let mut a_ws = tokio_tungstenite::connect_async(a.url()).await.unwrap().0;
     let probe_session = SessionId::next();
     let mut online = false;
     for _ in 0..100 {
         if a.manager
             .acquire(
-                "dev-b::COM7".into(),
+                key.clone(),
                 SerialConfig::default(),
                 probe_session,
             )
@@ -176,13 +191,15 @@ async fn cascade_open_write_echo() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(online, "设备应上线可开远端端口");
-    let _ = a.manager.release("dev-b::COM7", probe_session).await;
+    let _ = a.manager.release(&key, probe_session).await;
     let _ = a.manager.holder_count("COM7").await;
 
-    // open 复合键(列表键形态:dev-b + 远端线名 COM7,与生产前端一致)
+    // open 复合键(列表键形态:学习 id + 远端线名 COM7,与生产前端一致)
     send_text(
         &mut a_ws,
-        r#"{"action":"open","port":"dev-b::COM7","config":{"baud_rate":115200}}"#,
+        &format!(
+            r#"{{"action":"open","port":"{key}","config":{{"baud_rate":115200}}}}"#
+        ),
     )
     .await;
     let acquired = recv_until(&mut a_ws, "\"type\":\"acquired\"").await;
@@ -191,12 +208,14 @@ async fn cascade_open_write_echo() {
         "复合键首开: {}",
         acquired
     );
-    assert_eq!(a.manager.holder_count("dev-b::COM7").await, Some(1));
+    assert_eq!(a.manager.holder_count(&key).await, Some(1));
 
     // write → B 回显 → A 的事件流出数据帧(port = A 侧 map 键,即事件口径的复合键)
     send_text(
         &mut a_ws,
-        r#"{"action":"write","port":"dev-b::COM7","data":"ping","encoding":"text"}"#,
+        &format!(
+            r#"{{"action":"write","port":"{key}","data":"ping","encoding":"text"}}"#
+        ),
     )
     .await;
     let frame = async {
@@ -214,7 +233,7 @@ async fn cascade_open_write_echo() {
     let plen = bin[0] as usize;
     let port = std::str::from_utf8(&bin[1..1 + plen]).unwrap();
     let data = &bin[1 + plen..];
-    assert_eq!(port, "dev-b::COM7", "数据帧端口应为级联复合键");
+    assert_eq!(port, key, "数据帧端口应为级联复合键");
     assert_eq!(data, b"ping", "回显数据应原样返回");
 
     // B 侧确实持有:B 的 manager 里裸名 COM7 holders ≥1(DeviceClient 连接占 1)
@@ -223,7 +242,7 @@ async fn cascade_open_write_echo() {
     // 清理:close 复合键 → 末位 → 拆毁(A 侧);Drop 转发 ClosePort → B 侧释放
     send_text(
         &mut a_ws,
-        r#"{"action":"close","port":"dev-b::COM7"}"#,
+        &format!(r#"{{"action":"close","port":"{key}"}}"#),
     )
     .await;
     let _ = recv_until(&mut a_ws, "\"type\":\"ok\"").await;
@@ -245,6 +264,7 @@ async fn cascade_device_offline_keeps_holders() {
     let b = boot(true).await;
     let port_num = b.addr.parse::<std::net::SocketAddr>().unwrap().port();
     let a = boot(false).await;
+    let key = format!("{}::COM7", b.instance_id);
 
     a.devices.update_registry(&[ss_core::RemoteDevice {
         id: "dev-b".into(),
@@ -254,12 +274,12 @@ async fn cascade_device_offline_keeps_holders() {
     }]);
     a.devices.start();
 
-    // 等 open 通路就绪(设备在线)
+    // 等 open 通路就绪(设备在线;键为学习后的实例 id 段)
     let mut ready = false;
     for _ in 0..100 {
         if a.manager
             .acquire(
-                "dev-b::COM7".into(),
+                key.clone(),
                 SerialConfig::default(),
                 SessionId::next(),
             )
@@ -276,12 +296,12 @@ async fn cascade_device_offline_keeps_holders() {
     // B 下电:直接把 B 的 manager 侧连接断掉不可行(server task 在 spawn 里)——
     // 模拟方式:close B 的设备连接通道。此处通过 devices.disconnect(A→B)触发
     // 同样的断开路径(RemotePortIo read 返 Err → drainer)。
-    a.devices.disconnect("dev-b").unwrap();
+    a.devices.disconnect(b.instance_id).unwrap();
 
     // A 侧:占有权保留 + disconnected 置位(USB 拔插模型)
     let mut marked = false;
     for _ in 0..100 {
-        if a.manager.is_disconnected("dev-b::COM7").await {
+        if a.manager.is_disconnected(&key).await {
             marked = true;
             break;
         }
@@ -289,7 +309,7 @@ async fn cascade_device_offline_keeps_holders() {
     }
     assert!(marked, "设备断开后端口应标 disconnected");
     assert_eq!(
-        a.manager.holder_count("dev-b::COM7").await,
+        a.manager.holder_count(&key).await,
         Some(1),
         "占有权应保留"
     );
@@ -309,13 +329,15 @@ async fn list_views(inst: &Instance) -> Vec<ss_server::PortView> {
     serde_json::from_value(msg["ports"].clone()).unwrap()
 }
 
-/// 自连:A 注册指向**自己**的地址——透传深度限 1 使其成为本地口的远程镜像:
+/// 自连:A 注册指向**自己**的地址——环检测使其成为本地口的远程镜像:
 /// 设备在线可用,列表恒为 本地N + 镜像N 不增殖(回归点:此前回声环 4→8→12…直至
 /// 消息风暴拖死进程),open 镜像口路由回本机(附加到同一端口的占有权)。
+/// 自连学到对端 id = 自己的实例 id:段名=自身 id,镜像条目经谓词首段豁免保留。
 #[tokio::test]
 async fn self_connection_mirror_no_echo() {
     let a = boot(false).await;
     let port_num = a.addr.parse::<std::net::SocketAddr>().unwrap().port();
+    let self_seg = a.instance_id; // 自连学习后段名 = 自身实例 id
 
     a.devices.update_registry(&[ss_core::RemoteDevice {
         id: "dev-me".into(),
@@ -325,20 +347,20 @@ async fn self_connection_mirror_no_echo() {
     }]);
     a.devices.start();
 
-    // 设备应在线(自连 = 本地口的远程镜像,合法形态)
+    // 设备应在线(自连 = 本地口的远程镜像,合法形态),且段名已被学习替换为自身 id
     let mut online = false;
     for _ in 0..100 {
         if a.devices
             .device_states()
             .iter()
-            .any(|d| d.id == "dev-me" && d.online)
+            .any(|d| d.id == self_seg && d.online)
         {
             online = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(online, "自连设备应在线");
+    assert!(online, "自连设备应在线(段名=自身实例 id)");
 
     // 列表稳定不增殖:本地桶 + 自连设备桶各一份,总数恒为两倍本地口数。
     let local_count = a.manager.list_ports().await.len();
@@ -355,9 +377,9 @@ async fn self_connection_mirror_no_echo() {
         "应为 本地桶 + 自连桶 各一份(不增殖): {:?}",
         v1.iter().map(|v| &v.info.name).collect::<Vec<_>>()
     );
+    let double_prefix = format!("{self_seg}::{self_seg}");
     assert!(
-        v1.iter()
-            .all(|v| !v.info.name.starts_with("dev-me::dev-me")),
+        v1.iter().all(|v| !v.info.name.starts_with(&double_prefix)),
         "不得出现二级前缀条目(回声复制): {:?}",
         v1.iter().map(|v| &v.info.name).collect::<Vec<_>>()
     );
@@ -371,7 +393,7 @@ async fn self_connection_mirror_no_echo() {
     let res = a
         .manager
         .acquire(
-            "dev-me::COM_NOT_EXIST".into(),
+            format!("{self_seg}::COM_NOT_EXIST"),
             SerialConfig::default(),
             s,
         )
@@ -402,13 +424,13 @@ async fn self_connection_no_meta_storm() {
     }]);
     a.devices.start();
 
-    // 等设备在线并完成初始拉取
+    // 等设备在线并完成初始拉取(自连学习后段名=自身实例 id)
     let mut online = false;
     for _ in 0..100 {
         if a.devices
             .device_states()
             .iter()
-            .any(|d| d.id == "dev-me" && d.online)
+            .any(|d| d.id == a.instance_id && d.online)
         {
             online = true;
             break;
@@ -443,12 +465,16 @@ async fn disconnect_releases_remote_ownership() {
     }]);
     a.devices.start();
 
-    // 等设备在线后 open 远端口(B 侧被设备会话持有)
+    // 等设备在线后 open 远端口(B 侧被设备会话持有;键为学习后的实例 id 段)
     let mut opened = false;
     let s = SessionId::next();
     for _ in 0..100 {
         if a.manager
-            .acquire("dev-b::COM7".into(), SerialConfig::default(), s)
+            .acquire(
+                format!("{}::COM7", b.instance_id),
+                SerialConfig::default(),
+                s,
+            )
             .await
             .is_ok()
         {
@@ -461,7 +487,7 @@ async fn disconnect_releases_remote_ownership() {
     assert_eq!(b.manager.holder_count("COM7").await, Some(1));
 
     // 主动断开设备(断开按钮)→ 会话取消 → WS 关 → B 侧 release_all
-    a.devices.disconnect("dev-b").unwrap();
+    a.devices.disconnect(b.instance_id).unwrap();
     let mut released = false;
     for _ in 0..100 {
         if b.manager.holder_count("COM7").await.is_none() {
@@ -488,12 +514,16 @@ async fn cascade_set_alias_routes_reply() {
     }]);
     a.devices.start();
 
-    // 等设备上线
+    // 等设备上线(键为学习后的实例 id 段)
     let mut online = false;
     let s = SessionId::next();
     for _ in 0..100 {
         if a.manager
-            .acquire("dev-b::COM7".into(), SerialConfig::default(), s)
+            .acquire(
+                format!("{}::COM7", b.instance_id),
+                SerialConfig::default(),
+                s,
+            )
             .await
             .is_ok()
         {
@@ -503,7 +533,9 @@ async fn cascade_set_alias_routes_reply() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(online);
-    let _ = a.manager.release("dev-b::COM7", s).await;
+    let _ = a.manager
+        .release(&format!("{}::COM7", b.instance_id), s)
+        .await;
 
     // A 侧发起远端口别名 → 回执应秒级到达(带 port 的 ok)。
     // 用 B 实际枚举到的口(列表只显示枚举口,别名断言要能看到条目)
@@ -512,7 +544,7 @@ async fn cascade_set_alias_routes_reply() {
         .first()
         .map(|v| v.info.name.clone())
         .unwrap_or_else(|| "COM0".into());
-    let a_key = format!("dev-b::{}", target);
+    let a_key = format!("{}::{}", b.instance_id, target);
     let mut a_ws = tokio_tungstenite::connect_async(a.url()).await.unwrap().0;
     send_text(
         &mut a_ws,
@@ -608,6 +640,15 @@ async fn legacy_peer_local_prefixed_wire_names() {
                 }
                 "ping" => {
                     let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                "version" => {
+                    // 旧版语义应答(无 instance_id):学习放弃、保持占位段名
+                    let _ = sink
+                        .send(Message::Text(
+                            r#"{"type":"version","version":"stub","enable_scripting":false}"#
+                                .into(),
+                        ))
+                        .await;
                 }
                 _ => {}
             }
@@ -766,6 +807,15 @@ async fn alias_suffix_open_registers_resolved_name() {
                 "ping" => {
                     let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
                 }
+                "version" => {
+                    // 旧版语义应答(无 instance_id)
+                    let _ = sink
+                        .send(Message::Text(
+                            r#"{"type":"version","version":"stub","enable_scripting":false}"#
+                                .into(),
+                        ))
+                        .await;
+                }
                 _ => {}
             }
         }
@@ -897,6 +947,15 @@ async fn mutual_registration_list_no_proliferation() {
                 }
                 "ping" => {
                     let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                }
+                "version" => {
+                    // 旧版语义应答(无 instance_id)
+                    let _ = sink
+                        .send(Message::Text(
+                            r#"{"type":"version","version":"stub","enable_scripting":false}"#
+                                .into(),
+                        ))
+                        .await;
                 }
                 _ => {}
             }
@@ -1045,6 +1104,14 @@ async fn device_c_stub(listener: TcpListener) {
             "ping" => {
                 let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
             }
+            "version" => {
+                // 旧版语义应答(无 instance_id):真实 B 学不到 C 的 id,保持占位段名
+                let _ = sink
+                    .send(Message::Text(
+                        r#"{"type":"version","version":"stub","enable_scripting":false}"#.into(),
+                    ))
+                    .await;
+            }
             _ => {}
         }
     }
@@ -1080,8 +1147,9 @@ async fn cascade_three_level_real_hub_list_and_open() {
     }]);
     a.devices.start();
 
-    // A 的合并列表应出现二级条目(透传放宽;修复前远端线名含 :: 即整桶丢弃)
-    let full_key = "dev-b::dev-c::COM7";
+    // A 的合并列表应出现二级条目(透传放宽;修复前远端线名含 :: 即整桶丢弃)。
+    // A 对 B 的段名 = B 实例 id(握手学习);B 对桩 C 学不到 id 保持占位 dev-c。
+    let full_key = format!("{}::dev-c::COM7", b.instance_id);
     let mut listed = false;
     for _ in 0..100 {
         if list_views(&a).await.iter().any(|v| v.info.name == full_key) {
@@ -1097,7 +1165,7 @@ async fn cascade_three_level_real_hub_list_and_open() {
     let mut opened = false;
     for _ in 0..100 {
         if a.manager
-            .acquire(full_key.into(), SerialConfig::default(), s)
+            .acquire(full_key.clone(), SerialConfig::default(), s)
             .await
             .is_ok()
         {
@@ -1107,7 +1175,7 @@ async fn cascade_three_level_real_hub_list_and_open() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(opened, "三级级联键应可经真实 B 打开");
-    assert_eq!(a.manager.holder_count(full_key).await, Some(1));
+    assert_eq!(a.manager.holder_count(&full_key).await, Some(1));
     assert_eq!(
         b.manager.holder_count("dev-c::COM7").await,
         Some(1),
@@ -1117,7 +1185,7 @@ async fn cascade_three_level_real_hub_list_and_open() {
     // 数据回路:写 → C 回显 → B 重打线名 → A 以完整级联键口径发布
     let mut rx = a.manager.event_bus().subscribe();
     a.manager
-        .write(full_key.into(), bytes::Bytes::from_static(b"ping"))
+        .write(full_key.clone(), bytes::Bytes::from_static(b"ping"))
         .await
         .unwrap();
     let mut echoed = false;
@@ -1137,7 +1205,7 @@ async fn cascade_three_level_real_hub_list_and_open() {
     assert!(echoed, "真实 B 转发的数据回显应可达");
 
     // 释放逐级传播:A 末位拆毁 → ClosePort → B 末位释放
-    let _ = a.manager.release(full_key, s).await;
+    let _ = a.manager.release(&full_key, s).await;
     let mut released = false;
     for _ in 0..100 {
         if b.manager.holder_count("dev-c::COM7").await.is_none() {
@@ -1176,12 +1244,13 @@ async fn cascade_disconnected_propagates_per_port() {
     }]);
     a.devices.start();
 
-    let full_key = "dev-b::dev-c::COM7";
+    // A 对 B 的段名 = B 的实例 id(握手学习);B 对桩 C 学不到 id 保持占位 dev-c
+    let full_key = format!("{}::dev-c::COM7", b.instance_id);
     let s = SessionId::next();
     let mut opened = false;
     for _ in 0..100 {
         if a.manager
-            .acquire(full_key.into(), SerialConfig::default(), s)
+            .acquire(full_key.clone(), SerialConfig::default(), s)
             .await
             .is_ok()
         {
@@ -1198,7 +1267,7 @@ async fn cascade_disconnected_propagates_per_port() {
     // A 侧应感知:B 推 Disconnected{dev-c::COM7} → A 注入 IO 断开 → drainer 标记
     let mut marked = false;
     for _ in 0..100 {
-        if a.manager.is_disconnected(full_key).await {
+        if a.manager.is_disconnected(&full_key).await {
             marked = true;
             break;
         }
@@ -1206,16 +1275,16 @@ async fn cascade_disconnected_propagates_per_port() {
     }
     assert!(marked, "中间跳断开后 A 侧端口应标 disconnected(传播)");
     assert_eq!(
-        a.manager.holder_count(full_key).await,
+        a.manager.holder_count(&full_key).await,
         Some(1),
         "A 侧占有权应保留"
     );
-    // 设备连接本身不受影响(A→B 仍在线,仅 B→C 断)
+    // 设备连接本身不受影响(A→B 仍在线,仅 B→C 断;A 侧段名=学习 id)
     assert!(
         a.devices
             .device_states()
             .iter()
-            .any(|d| d.id == "dev-b" && d.online),
+            .any(|d| d.id == b.instance_id && d.online),
         "A→B 设备连接应保持在线"
     );
 }
@@ -1265,6 +1334,15 @@ async fn three_level_cascade_routes_end_to_end() {
                             .lock()
                             .await
                             .send(Message::Text(r#"{"type":"pong"}"#.into()))
+                            .await;
+                    }
+                    "version" => {
+                        // 旧版语义应答(无 instance_id)
+                        let _ = down.lock().await
+                            .send(Message::Text(
+                                r#"{"type":"version","version":"stub","enable_scripting":false}"#
+                                    .into(),
+                            ))
                             .await;
                     }
                     "open" | "write" | "close" => {
@@ -1369,6 +1447,193 @@ async fn three_level_cascade_routes_end_to_end() {
     let _ = a.manager.release(full_key, s).await;
 }
 
+/// 身份学习显式断言:注册占位 uuid,握手学习后段名替换为对端实例 id
+/// (device_states 恰为学习 id,占位消失;host/port 随行供前端对齐)。
+#[tokio::test]
+async fn learned_id_adopts_placeholder() {
+    let b = boot_as(/*echo*/ true, "inst-b").await;
+    let a = boot_as(false, "inst-a").await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "ph-b".into(),
+        host: "127.0.0.1".into(),
+        port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
+        nickname: Some("机器B".into()),
+    }]);
+    a.devices.start();
+
+    // 学习 + 上线:段名从占位替换为 B 的实例 id
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let states = a.devices.device_states();
+        if states.len() == 1 && states[0].id == "inst-b" && states[0].online {
+            // host/port 随行(前端按地址对齐 remotes 的依据)
+            assert_eq!(states[0].host, "127.0.0.1");
+            assert_eq!(
+                states[0].port,
+                b.addr.parse::<std::net::SocketAddr>().unwrap().port()
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "占位段名应被学习 id 替换并上线: {:?}",
+            states
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 昵称等注册信息保留在重建的条目上(id 换、其余不丢)
+    assert_eq!(a.devices.nickname_of("inst-b"), Some("机器B".into()));
+
+    // 端口键以学习 id 段可开(占位键已不存在)
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager
+            .acquire("inst-b::COM7".into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "学习 id 段的端口键应可开");
+    let _ = a.manager.release("inst-b::COM7", s).await;
+    // 测试收尾:断开设备(close_with_error 兜底本侧读线程)+ 等待窗口给 B 侧
+    // 级联释放(WS 断 → release_all → teardown 置 quit)完成——测试直接返回会
+    // 与这些异步清理竞争 runtime shutdown(shutdown 等滞留 blocking 任务而挂起)
+    let _ = a.devices.disconnect(b.instance_id);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// 真实双实例互注册 + 身份统一 → **零幽灵条目**(语义判据):B 学到 A 的实例
+/// id,B 上报的绕回条目线名首段即 inst-a,A 的透传谓词(非首段含本机 id)识别并
+/// 丢弃。与桩版 mutual_registration_list_no_proliferation(桩=旧版对端,幽灵有界)
+/// 互补,共同锁定双轨。列表断言依赖本地口,无串口环境退化为仅验学习。
+#[tokio::test]
+async fn mutual_registration_no_ghost_with_identity() {
+    let a = boot_as(false, "inst-a").await;
+    let b = boot_as(false, "inst-b").await;
+    let a_port = a.addr.parse::<std::net::SocketAddr>().unwrap().port();
+    let b_port = b.addr.parse::<std::net::SocketAddr>().unwrap().port();
+
+    // 互注册(占位 id,学习后各自替换为对方实例 id)
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "ph-b".into(),
+        host: "127.0.0.1".into(),
+        port: b_port,
+        nickname: None,
+    }]);
+    b.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "ph-a".into(),
+        host: "127.0.0.1".into(),
+        port: a_port,
+        nickname: None,
+    }]);
+    a.devices.start();
+    b.devices.start();
+
+    // 双向学习完成:两侧 device_states 恰为对方的实例 id
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let a_ok = a
+            .devices
+            .device_states()
+            .iter()
+            .any(|d| d.id == "inst-b" && d.online);
+        let b_ok = b
+            .devices
+            .device_states()
+            .iter()
+            .any(|d| d.id == "inst-a" && d.online);
+        if a_ok && b_ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "互注册双向学习未完成: A={:?} B={:?}",
+            a.devices.device_states(),
+            b.devices.device_states()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 列表零幽灵:任何条目的段链中 inst-a 不得出现在非首段(B 上报的绕回条目
+    // 线名首段=inst-a,语义判据应斩断)。无串口环境列表为空,断言空转但学习
+    // 断言已在上方生效。
+    tokio::time::sleep(Duration::from_millis(300)).await; // 静置让列表传播收敛
+    let views = list_views(&a).await;
+    let ghosts: Vec<_> = views
+        .iter()
+        .filter(|v| {
+            v.info.name
+                .split(ss_core::PORT_KEY_SEP)
+                .skip(1) // 首段豁免(自连镜像合法;此测试无自连,防御性跳过)
+                .any(|seg| seg == "inst-a")
+        })
+        .map(|v| v.info.name.clone())
+        .collect();
+    assert!(
+        ghosts.is_empty(),
+        "身份统一后不应有幽灵条目(绕回路径被语义判据斩断): {ghosts:?} in {:?}",
+        views.iter().map(|v| &v.info.name).collect::<Vec<_>>()
+    );
+    // 数量稳定(无增殖)
+    let v2 = list_views(&a).await;
+    assert_eq!(views.len(), v2.len(), "列表数量应稳定(无逐轮增殖)");
+}
+
+/// 重复注册同一设备:两条占位记录学到同一实例 id → 冲突,后学者保持占位段名
+/// (双轨兜底:该条目行为与旧版对端一致,谓词结构判据兜底)。
+#[tokio::test]
+async fn duplicate_device_conflict_keeps_placeholder() {
+    let b = boot_as(/*echo*/ true, "inst-b").await;
+    let b_port = b.addr.parse::<std::net::SocketAddr>().unwrap().port();
+    let a = boot_as(false, "inst-a").await;
+    // 同地址两条记录(不同占位 id)
+    a.devices.update_registry(&[
+        ss_core::RemoteDevice {
+            id: "ph1".into(),
+            host: "127.0.0.1".into(),
+            port: b_port,
+            nickname: None,
+        },
+        ss_core::RemoteDevice {
+            id: "ph2".into(),
+            host: "127.0.0.1".into(),
+            port: b_port,
+            nickname: None,
+        },
+    ]);
+    a.devices.start();
+
+    // 一条学习替换为 inst-b,另一条冲突保持占位(ph1/ph2 谁先学到是竞态,
+    // 断言不依赖胜者:恰好两条 = 学习条目 + 占位条目,均在线)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let states = a.devices.device_states();
+        let learned = states.iter().any(|d| d.id == "inst-b" && d.online);
+        let kept = states.iter().any(|d| (d.id == "ph1" || d.id == "ph2") && d.online);
+        if learned && kept {
+            assert_eq!(
+                states.len(),
+                2,
+                "应恰好两条设备条目(学习 + 占位): {:?}",
+                states
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "冲突策略未达预期: {:?}",
+            states
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// 运行时新增设备自动建连回归:start 已过后 update_registry(GUI 常态——服务运行中
 /// 用户添加远程设备),新增 client 必须立即 spawn 并连上,无需手动"重连设备"。
 #[tokio::test]
@@ -1385,13 +1650,13 @@ async fn runtime_add_connects_without_manual_reconnect() {
         nickname: None,
     }]);
 
-    // 轮询状态快照直到 dev-b 上线(本机回环 <1s;5s 兜底慢机)
+    // 轮询状态快照直到 B 上线(学习后段名=B 实例 id;本机回环 <1s;5s 兜底慢机)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if a.devices
             .device_states()
             .iter()
-            .any(|d| d.id == "dev-b" && d.online)
+            .any(|d| d.id == b.instance_id && d.online)
         {
             break;
         }
@@ -1438,11 +1703,28 @@ async fn first_connect_failure_announces_then_self_heals() {
     let spam = timeout(Duration::from_millis(500), dev_rx.recv()).await;
     assert!(spam.is_err(), "重试环内不应重复广播: {:?}", spam);
 
-    // 远端恢复(同端口起 WS 握手桩)→ 后台退避重连自动上线,无需手动干预
+    // 远端恢复(同端口起 WS 握手桩)→ 后台退避重连自动上线,无需手动干预。
+    // 桩须应答 version(旧版语义,无 instance_id)——否则握手等 2s 超时才上线,
+    // 叠加退避余量会吃满断言窗口。
     let listener = TcpListener::bind(addr).await.expect("重新绑定原端口");
     tokio::spawn(async move {
+        use futures_util::{SinkExt, StreamExt};
         while let Ok((stream, _)) = listener.accept().await {
-            let _ = tokio_tungstenite::accept_async(stream).await; // 完成握手即视为在线
+            let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                continue;
+            };
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(t) = msg {
+                    if t.contains("\"version\"") {
+                        let _ = ws
+                            .send(Message::Text(
+                                r#"{"type":"version","version":"stub","enable_scripting":false}"#
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                }
+            }
         }
     });
     let ev = timeout(Duration::from_secs(6), dev_rx.recv())

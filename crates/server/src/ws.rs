@@ -682,7 +682,13 @@ async fn handle_client_msg(
                 }
             }
         }
-        ClientMsg::Version => {
+        ClientMsg::Version { instance_id: req_id } => {
+            // 对端自报的 instance_id 不消费——学习是单向的(仅连接发起方为对端
+            // 起段名),hub 不为连入方命名。
+            // 身份回带按请求闸门:仅设备握手(请求自报了 id)才回带本机实例 id;
+            // 浏览器/扫描器等不带 id 的探针拿不到——instance_id 是跨重启永久
+            // 身份,不对未认证连接无条件暴露指纹。旧版客户端形态(无字段)→
+            // None → 应答同样无此字段(线格式与旧行为零差异)。
             let enable_scripting = state
                 .enable_scripting
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -690,6 +696,7 @@ async fn handle_client_msg(
                 .send(to_json(ServerMsg::Version {
                     version: env!("CARGO_PKG_VERSION").into(),
                     enable_scripting,
+                    instance_id: req_id.map(|_| state.instance_id.to_string()),
                 }))
                 .await;
         }

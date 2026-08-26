@@ -39,7 +39,7 @@ export interface Transport {
   /** 设备意外断开(USB 拔出):前端保留 tab 可重连(区别于 onPortClosed 的删 tab)。 */
   onPortDisconnected(cb: (port: string) => void): () => void;
   /** 远程设备在线状态快照变化(设备上下线/增删)。本地:后端 devices-changed 事件;远程:透传远端 ss 的 devices 消息。 */
-  onDevices(cb: (devices: { id: string; online: boolean }[]) => void): () => void;
+  onDevices(cb: TransportEventsMap["devices"]): () => void;
   /** 主动拉一次设备在线快照(订阅 onDevices 后调用)。事件是增量推送,窗口加载/
    *  刷新后早已在线的设备不会再发事件——不补拉初始态,设备卡会永悬"连接中…"。 */
   listDevices(): Promise<void>;
@@ -92,7 +92,7 @@ export interface TransportEventsMap {
   opened: (port: string) => void;
   closed: (port: string) => void;
   disconnected: (port: string) => void;
-  devices: (devices: { id: string; online: boolean }[]) => void;
+  devices: (devices: { id: string; online: boolean; host?: string; port?: number }[]) => void;
   holders: (port: string, holders: number) => void;
   metaChanged: () => void;
   scriptsChanged: () => void;

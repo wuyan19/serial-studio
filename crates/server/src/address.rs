@@ -43,6 +43,8 @@ pub struct AddressResolver {
 
 struct Inner {
     devices: Arc<DeviceClientManager>,
+    /// 本机实例 id(透传谓词语义判据用)。非 'static 硬编码,由装配点注入。
+    self_id: Arc<str>,
     /// 别名 → 候选完整键列表。含本机(裸名键)与远端(compose 键)。
     /// 由 watcher 任务在 meta_bus 通知时重建;空索引时查不到即透传。
     port_aliases: RwLock<HashMap<String, Vec<String>>>,
@@ -74,10 +76,15 @@ impl AddressResolver {
     /// 生产构造。不立即 spawn watcher(new() 可能不在 runtime 内);
     /// 首次经 [`Self::key_resolver_fn`] / [`Self::lookup_port`] 调用时同步重建一次
     /// 再惰性拉起订阅循环。
-    pub fn new(devices: Arc<DeviceClientManager>, meta_bus: broadcast::Sender<()>) -> Self {
+    pub fn new(
+        devices: Arc<DeviceClientManager>,
+        meta_bus: broadcast::Sender<()>,
+        self_id: Arc<str>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 devices,
+                self_id,
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),
                 watcher_started: AtomicBool::new(false),
@@ -173,7 +180,7 @@ impl Inner {
                 // 多级条目与列表合并共用透传谓词(环检测+深度上限)——否则列表可见
                 // 的级联口裸名别名解析不到,行为分裂
                 let wire = normalize_port_key(&pv.info.name);
-                if let Some(key) = crate::passthrough_port_key(&dev_id, &wire) {
+                if let Some(key) = crate::passthrough_port_key(&dev_id, &wire, &self.self_id) {
                     if let Some(a) = pv.alias {
                         map.entry(a).or_default().push(key);
                     }
@@ -244,14 +251,14 @@ mod tests {
     /// 不触盘的测试解析器(设备表注入昵称 "test" 的设备 id=uuid-b,不 start)。
     fn resolver_with_devices() -> AddressResolver {
         let (meta_tx, _) = broadcast::channel(16);
-        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone()));
+        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
         devices.update_registry(&[ss_core::RemoteDevice {
             id: "uuid-b".into(),
             host: "127.0.0.1".into(),
             port: 1,
             nickname: Some("test".into()),
         }]);
-        AddressResolver::new(Arc::clone(&devices), meta_tx)
+        AddressResolver::new(Arc::clone(&devices), meta_tx, "inst-self".into())
     }
 
     fn real_names_of(names: &[&str]) -> RealNames {
@@ -349,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn rebuild_picks_up_local_alias() {
         let (meta_tx, _) = broadcast::channel(16);
-        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone()));
+        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
         let mut seed = std::collections::BTreeMap::new();
         seed.insert(
             "R-COM7".to_string(),
@@ -361,6 +368,7 @@ mod tests {
         let r = AddressResolver {
             inner: Arc::new(Inner {
                 devices,
+                self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),
                 watcher_started: AtomicBool::new(false),

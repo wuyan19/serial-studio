@@ -79,6 +79,9 @@ pub struct AppState {
     /// 端口寻址解析:别名(本机/远端)与设备昵称 → 规范键。manager 的 KeyResolver
     /// 与 MCP 直查共用同一实例;meta_bus 驱动别名索引重建。
     pub addresses: Arc<address::AddressResolver>,
+    /// 本实例全局身份(段名=实例 id 的根基)。settings 首启生成落盘,跨重启稳定;
+    /// 测试注入固定值不落盘。列表合并与别名索引的环检测语义判据用它。
+    pub instance_id: Arc<str>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -93,10 +96,16 @@ pub fn create_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(1024));
     let (meta_tx, _) = broadcast::channel(16);
     let (script_tx, _) = broadcast::channel(16);
-    let devices = Arc::new(device::DeviceClientManager::from_registry(meta_tx.clone()));
+    let instance_id: Arc<str> = settings::instance_id().into();
+    let devices = Arc::new(device::DeviceClientManager::from_registry(
+        meta_tx.clone(),
+        instance_id.to_string(),
+    ));
+    devices.bind(std::sync::Arc::downgrade(&devices)); // self-weak:client 握手学习上报用
     let addresses = Arc::new(address::AddressResolver::new(
         Arc::clone(&devices),
         meta_tx.clone(),
+        instance_id.clone(),
     ));
     let manager = Arc::new(SerialManager::with_key_resolver(
         event_bus.clone(),
@@ -117,6 +126,7 @@ pub fn create_state() -> AppState {
         script_runs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         devices,
         addresses,
+        instance_id,
     }
 }
 
@@ -144,15 +154,20 @@ pub fn bare_name_of(port: &str) -> &str {
 pub(crate) const MAX_PASSTHROUGH_SEGMENTS: usize = 4;
 
 /// 远端桶条目透传判定(纯函数,列表合并与别名索引共用):组装候选键后按段链
-/// 查重——**段重复 = 环**即丢弃(自连第二轮 `me::me::COM7`、互注册绕回
-/// `ab::ba::ab::COM7`);段数超上限丢弃;否则返回透传键(多级级联口在直连
-/// 设备的 UI 可见,归其分组平铺)。环检测只能用结构性判据:段名是各机 remotes
-/// 的本地命名,中间机器无法解析他人段名——这里是未来引入全局实例 id
-/// (path-vector)的接缝,谓词可整体替换。
-pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str) -> Option<String> {
+/// 双层检查——
+/// 1. **语义判据**(段名=实例 id 后生效):非首段含本机实例 id = 绕回路径
+///    (互注册幽灵 `instB::instA::COM7`,A 收到即知是自己的口绕回来的)→ 丢弃;
+///    首段豁免——首段是本机 compose 产生的直连段,自连镜像 `selfId::COM7` 合法;
+/// 2. **结构判据**(永在,兜底旧版对端——其段名仍是本地 uuid,语义判据失明):
+///    段重复 = 环(自连第二轮 `me::me::COM7`、互注册绕回 `ab::ba::ab::…`)→ 丢弃。
+///    段数超上限丢弃;否则返回透传键(多级级联口在直连设备的 UI 可见,归其分组平铺)。
+pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str, self_id: &str) -> Option<String> {
     let key = ss_core::compose_port_key(dev_id, wire);
     let mut seen = HashSet::with_capacity(MAX_PASSTHROUGH_SEGMENTS + 1);
-    for seg in key.split(ss_core::PORT_KEY_SEP) {
+    for (i, seg) in key.split(ss_core::PORT_KEY_SEP).enumerate() {
+        if i > 0 && seg == self_id {
+            return None; // 非首段含本机实例 id → 绕回(幽灵),不透传
+        }
         if !seen.insert(seg) {
             return None; // 段重复 → 环,不透传
         }
@@ -187,13 +202,14 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             PortView { info, alias }
         })
         .collect();
-    // 远端桶(键加本设备段;后缀保持远端线名)。多级条目透传,环/超深由谓词判定;
-    // 线名已在 DeviceClient 入站归一(剥遗留 local::)。远端桶缓存本身不过滤
-    // (二级条目量级极小),谓词在两处消费点(此处 + 别名索引)兜底。
+    // 远端桶(键加本设备段;后缀保持远端线名)。多级条目透传,环/超深由谓词判定
+    // (语义判据用本机实例 id);线名已在 DeviceClient 入站归一(剥遗留 local::)。
+    // 远端桶缓存本身不过滤(二级条目量级极小),谓词在两处消费点兜底。
     for (dev_id, ports) in state.devices.remote_buckets() {
         for pv in ports {
-            let Some(name) = passthrough_port_key(&dev_id, &pv.info.name) else {
-                continue; // 环(段重复)或超深,不透传
+            let Some(name) = passthrough_port_key(&dev_id, &pv.info.name, &state.instance_id)
+            else {
+                continue; // 环(段重复/绕回)或超深,不透传
             };
             views.push(PortView {
                 info: ss_core::PortInfo { name, ..pv.info },
@@ -379,15 +395,18 @@ mod tests {
     #[test]
     fn passthrough_allows_bare_and_multilevel() {
         // 一级(现状形态):远端自己的口,照常透传
-        assert_eq!(passthrough_port_key("dev-b", "COM7"), Some("dev-b::COM7".into()));
+        assert_eq!(
+            passthrough_port_key("dev-b", "COM7", "inst-a"),
+            Some("dev-b::COM7".into())
+        );
         // 二级(远端的远端桶,即本次放宽):A→B→C 的 C 口
         assert_eq!(
-            passthrough_port_key("dev-b", "dev-c::COM7"),
+            passthrough_port_key("dev-b", "dev-c::COM7", "inst-a"),
             Some("dev-b::dev-c::COM7".into())
         );
         // 三跳(上限内)
         assert_eq!(
-            passthrough_port_key("a", "b::c::COM7"),
+            passthrough_port_key("a", "b::c::COM7", "self"),
             Some("a::b::c::COM7".into())
         );
     }
@@ -395,18 +414,39 @@ mod tests {
     #[test]
     fn passthrough_drops_repeated_segment_loops() {
         // 自连第二轮:镜像条目回到自己远端桶,compose 后本机段重复
-        assert_eq!(passthrough_port_key("dev-me", "dev-me::COM7"), None);
+        assert_eq!(passthrough_port_key("dev-me", "dev-me::COM7", "self"), None);
         // 互注册绕回:ab::ba::ab(第三轮增殖被斩断)
-        assert_eq!(passthrough_port_key("ab", "ba::ab::COM7"), None);
+        assert_eq!(passthrough_port_key("ab", "ba::ab::COM7", "self"), None);
         // 非环的重复段形态不涉及本机也照斩——结构性判据只看段链
-        assert_eq!(passthrough_port_key("ab", "cd::ab::COM7"), None);
+        assert_eq!(passthrough_port_key("ab", "cd::ab::COM7", "self"), None);
+    }
+
+    #[test]
+    fn passthrough_semantic_ghost_detection() {
+        // 语义判据(段名=实例 id 生效):非首段含本机实例 id = 绕回幽灵。
+        // 互注册:B 上报"我下级有 A 的口",线名首段是 A 的实例 id
+        let ghost = passthrough_port_key("inst-b", "inst-a::COM7", "inst-a");
+        assert_eq!(ghost, None, "非首段含本机 id 应识别为幽灵丢弃");
+        // 多级绕回:链中任何非首段位置含本机 id 都斩
+        assert_eq!(passthrough_port_key("b", "c::inst-a::COM7", "inst-a"), None);
+        // 首段豁免:自连镜像,首段=本机段(本机 compose 产生),合法保留
+        assert_eq!(
+            passthrough_port_key("inst-a", "COM7", "inst-a"),
+            Some("inst-a::COM7".into()),
+            "自连一级镜像合法(首段豁免)"
+        );
+        // 非本机 id 不受语义判据影响(仅结构判据管)
+        assert_eq!(
+            passthrough_port_key("inst-b", "inst-c::COM7", "inst-a"),
+            Some("inst-b::inst-c::COM7".into())
+        );
     }
 
     #[test]
     fn passthrough_drops_excessive_depth() {
         // 5 段(四跳)超上限:病态长链兜底
-        assert_eq!(passthrough_port_key("a", "b::c::d::COM7"), None);
+        assert_eq!(passthrough_port_key("a", "b::c::d::COM7", "self"), None);
         // 4 段(三跳)恰好在上限内
-        assert!(passthrough_port_key("a", "b::c::COM7").is_some());
+        assert!(passthrough_port_key("a", "b::c::COM7", "self").is_some());
     }
 }
