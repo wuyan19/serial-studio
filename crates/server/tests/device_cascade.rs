@@ -1168,3 +1168,90 @@ async fn three_level_cascade_routes_end_to_end() {
 
     let _ = a.manager.release(full_key, s).await;
 }
+
+/// 运行时新增设备自动建连回归:start 已过后 update_registry(GUI 常态——服务运行中
+/// 用户添加远程设备),新增 client 必须立即 spawn 并连上,无需手动"重连设备"。
+#[tokio::test]
+async fn runtime_add_connects_without_manual_reconnect() {
+    let b = boot(/*echo*/ true).await;
+    let a = boot(false).await;
+
+    // GUI 常态:数据面已启动,此时才添加远程设备(save_remotes → update_registry)
+    a.devices.start();
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
+        nickname: None,
+    }]);
+
+    // 轮询状态快照直到 dev-b 上线(本机回环 <1s;5s 兜底慢机)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if a.devices
+            .device_states()
+            .iter()
+            .any(|d| d.id == "dev-b" && d.online)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "运行时新增的设备未自动上线(被迫手动重连?)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 首连失败可见 + 自愈回归:远端暂不可达时,首次失败必须广播 Offline(否则前端
+/// 永悬"连接中…",用户只能手点重连),重试环内不刷屏;远端恢复后**自动上线**。
+#[tokio::test]
+async fn first_connect_failure_announces_then_self_heals() {
+    // 占一个端口再释放:制造"暂不可达"地址
+    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let a = boot(false).await;
+    let mut dev_rx = a.devices.subscribe();
+    a.devices.start();
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-late".into(),
+        host: "127.0.0.1".into(),
+        port: addr.port(),
+        nickname: None,
+    }]);
+
+    // 首次失败 → 必须有 Offline 沿(此前 set_offline 对从未上线的 client 早退,
+    // 新增设备在远端可达前拿不到任何状态反馈)
+    let ev = timeout(Duration::from_secs(3), dev_rx.recv())
+        .await
+        .expect("首次连接失败未广播任何设备事件")
+        .unwrap();
+    assert!(
+        matches!(ev, ss_server::device::DeviceEvent::Offline { .. }),
+        "首事件应为 Offline: {:?}",
+        ev
+    );
+
+    // 重试环不刷屏:最小退避 0.8s(jitter 下限)×2,窗口内不应再有事件
+    let spam = timeout(Duration::from_millis(500), dev_rx.recv()).await;
+    assert!(spam.is_err(), "重试环内不应重复广播: {:?}", spam);
+
+    // 远端恢复(同端口起 WS 握手桩)→ 后台退避重连自动上线,无需手动干预
+    let listener = TcpListener::bind(addr).await.expect("重新绑定原端口");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let _ = tokio_tungstenite::accept_async(stream).await; // 完成握手即视为在线
+        }
+    });
+    let ev = timeout(Duration::from_secs(6), dev_rx.recv())
+        .await
+        .expect("远端恢复后未自动上线")
+        .unwrap();
+    assert!(
+        matches!(ev, ss_server::device::DeviceEvent::Online { .. }),
+        "恢复后应为 Online: {:?}",
+        ev
+    );
+}

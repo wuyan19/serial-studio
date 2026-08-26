@@ -222,6 +222,9 @@ export default function App() {
   const [remotes, setRemotes] = useState<RemoteDevice[]>(() =>
     isLocal ? [] : initRemoteFromConn(connConfig),
   );
+  // remotes 的快照镜像：cmdTransport 空依赖化后经此读最新列表(web 改连换 key)。
+  const remotesRef = useRef(remotes);
+  remotesRef.current = remotes;
   // 展开的远程设备卡（= 需要连接）。桌面端先空（mount effect 加载 remotes 后全展开 → 自动重连）；
   // Web/远程窗口默认展开其唯一设备。
   const [expandedRemotes, setExpandedRemotes] = useState<Set<string>>(() =>
@@ -462,12 +465,18 @@ export default function App() {
   /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
    *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
    *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
-   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。 */
+   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。
+   *  remotes 经 ref 读取(web 改连换 key)——**绝不能进依赖**:本回调是
+   *  cmdTransport→openPort→bindTransport 身份链的头,一旦随 remotes 变化,本地
+   *  transport effect 会拆掉重建(注释自称"常驻"却守不住),重建窗口内后端
+   *  devices-changed 等事件无人监听→首添设备卡死"连接中…";已开端口的 RX
+   *  Channel 也随旧实例作废(串口变哑)。 */
   const cmdTransport = useCallback(
     (): Transport | undefined =>
-      transportsRef.current.get(isLocal ? "local" : (remotes[0]?.id ?? "")),
-    // isLocal 是模块常量;remotes 变化时 key 可能变(web 改连)
-    [remotes]
+      transportsRef.current.get(isLocal ? "local" : (remotesRef.current[0]?.id ?? "")),
+    // isLocal 是模块常量(getMode 逐 render 同值);remotesRef 每 render 刷新
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
 
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
@@ -552,6 +561,10 @@ export default function App() {
         void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
       }
     };
+    // 补拉初始快照:事件是增量推送,窗口加载/刷新后早已在线的设备不会再发
+    // 事件——不补拉,设备卡会永悬"连接中…"(此前只能手点重连触发 Offline/Online 沿)。
+    // 远程形态为空实现(服务端 WS 打开即推快照)。
+    void t.listDevices();
     return [
       t.onPorts((list) => dispatch({ type: "ports_listed", devId, ports: list })),
       t.onConnectedChange((conn) => {
@@ -655,7 +668,9 @@ export default function App() {
   }, [openPort, prunePort, reloadScripts, libError, pushToast]);
 
   // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
-  // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。
+  // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。重建窗口还会丢
+  // devices-changed 等事件（首添设备卡"连接中…"的根因）——**不变量:bindTransport
+  // 必须身份稳定**(其依赖链 openPort→cmdTransport 已 ref 化/空依赖,勿再引入状态依赖)。
   useEffect(() => {
     if (!isLocal) return;
     const devId = "local";
@@ -669,6 +684,21 @@ export default function App() {
       transportsRef.current.delete(devId);
     };
   }, [isLocal, bindTransport]);
+
+  // 设备卡状态收敛看门狗:任一设备非 online(undefined=未知悬"连接中…"/false=离线)
+  // 时兜底轮询设备快照。devices-changed 事件链任何一环丢失(加载竞态/webview 事件
+  // 异常/后端早于监听上线/快照 false 后 Online 沿丢失)都不再导致状态永悬——后端
+  // 已连上而前端不知情时 ≤1s 自动对齐。配合 dev_online reducer 幂等,离线期间的
+  // 周期轮询零重渲染;全部在线时每秒仅一次空扫描。
+  useEffect(() => {
+    if (!isLocal) return;
+    const tick = setInterval(() => {
+      const st = sessionRef.current;
+      if (!remotes.some((r) => st.devOnline[r.id] !== true)) return;
+      transportsRef.current.get("local")?.listDevices();
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [isLocal, remotes]);
 
   // 远程 Transport 引用计数（按需）——仅 Web/远程窗口形态:前端直连远端 ss。
   // 桌面形态远程设备已下沉到后端(DeviceClientManager),本地只有 "local" 一个 transport,
@@ -762,9 +792,10 @@ export default function App() {
     if (isTauri()) loadSrvSettings();
   }, [loadSrvSettings]);
 
-  // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）+ 设备在线快照
-  // （后端 DeviceClientManager 已在 Rust 侧建连,前端只取状态观察）;Web/远程窗口不加载
-  // （由 connConfig 派生单设备,连接走前端 RemoteTransport）。
+  // 远程设备加载：桌面端 → invoke load_remotes（remotes.json 落盘）。设备在线快照
+  // 不在此拉——transport 绑定时的 listDevices() 补拉已覆盖(见 bindTransport),此处
+  // 再直连 invoke 是重复路径。Web/远程窗口不加载(由 connConfig 派生单设备,连接走
+  // 前端 RemoteTransport)。
   useEffect(() => {
     if (!isLocal) return;
     tauriInvoke<RemoteDevice[]>("load_remotes")
@@ -773,11 +804,6 @@ export default function App() {
         setExpandedRemotes(new Set(loaded.map((r) => r.id)));
       })
       .catch((e) => console.error("加载远程设备失败", e));
-    tauriInvoke<{ id: string; online: boolean }[]>("list_devices")
-      .then((devices) => {
-        for (const d of devices) dispatch({ type: "dev_online", devId: d.id, online: d.online });
-      })
-      .catch((e) => console.error("加载设备状态失败", e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1087,11 +1113,10 @@ export default function App() {
     if (remotes.some((r) => r.host === host && r.port === remoteInput.port)) return;
     const id = crypto.randomUUID();
     const dev: RemoteDevice = { id, host, port: remoteInput.port, nickname: remoteInput.nickname.trim() || undefined };
-    setRemotes((prev) => {
-      const next = [...prev, dev];
-      if (isLocal) persistRemotes(next);
-      return next;
-    });
+    // 持久化在 updater 外调(StrictMode 双跑 updater,副作用内嵌会双发 save_remotes);
+    // 重复地址已在上面拦截,这里基于当前闭包 remotes 计算即无并发风险。
+    setRemotes((prev) => [...prev, dev]);
+    if (isLocal) persistRemotes([...remotes, dev]);
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
     setRemoteInput({ host: "", port: 18700, nickname: "" });
     setRemoteOpen(false);
@@ -1118,11 +1143,8 @@ export default function App() {
           remoteAddrRef.current.delete(dev.id);
           dispatch({ type: "teardown_dev", devId: dev.id });
         }
-        setRemotes((prev) => {
-          const next = prev.filter((r) => r.id !== dev.id);
-          if (isLocal) persistRemotes(next);
-          return next;
-        });
+        setRemotes((prev) => prev.filter((r) => r.id !== dev.id));
+        if (isLocal) persistRemotes(remotes.filter((r) => r.id !== dev.id)); // updater 外持久化(同 addRemote)
         setExpandedRemotes((prev) => {
           const n = new Set(prev);
           n.delete(dev.id);
@@ -1233,6 +1255,12 @@ export default function App() {
   const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
+  // 通道条端口显示的设备段:pid 首段(devId)优先换设备昵称,查无昵称/非本表设备
+  // (web 形态级联中段)退回裸 id;本地口("local")无前缀。悬停补 id+地址——与侧栏
+  // 设备组标签的 tooltip 同一套信息。端口段由 PortLabel 承担(串口别名优先)。
+  const { devId: activeDevId, name: activePortName } = parsePortId(activePort);
+  const activeDev =
+    activeDevId === "local" ? undefined : remotes.find((r) => r.id === activeDevId);
 
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
@@ -1679,7 +1707,15 @@ export default function App() {
         {activePort && activeConfig && (
           <div className="channel-strip">
             <span className="channel-strip__port">
-              <PortLabel name={activePort} alias={aliasOf(activePort)} />
+              {activeDev && (
+                <span
+                  className="channel-strip__dev"
+                  title={`${activeDev.id} · ${activeDev.host}:${activeDev.port}`}
+                >
+                  {activeDev.nickname?.trim() || activeDev.id}::
+                </span>
+              )}
+              <PortLabel name={activePortName} alias={aliasOf(activePort)} />
             </span>
             <span className="channel-strip__sep">·</span>
             <span className="channel-strip__config">{formatConfig(activeConfig)}</span>

@@ -40,6 +40,9 @@ export interface Transport {
   onPortDisconnected(cb: (port: string) => void): () => void;
   /** 远程设备在线状态快照变化(设备上下线/增删)。本地:后端 devices-changed 事件;远程:透传远端 ss 的 devices 消息。 */
   onDevices(cb: (devices: { id: string; online: boolean }[]) => void): () => void;
+  /** 主动拉一次设备在线快照(订阅 onDevices 后调用)。事件是增量推送,窗口加载/
+   *  刷新后早已在线的设备不会再发事件——不补拉初始态,设备卡会永悬"连接中…"。 */
+  listDevices(): Promise<void>;
   /** 持有者数量变化（有人加入/退出，端口未关）。 */
   onHolders(cb: (port: string, holders: number) => void): () => void;
   /** 端口元数据（别名等）变更——重新拉取端口列表（别的客户端改了别名时及时同步）。 */
@@ -389,6 +392,9 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   async list() {
     await this.send(JSON.stringify({ action: "list" }));
   }
+  /** 远程形态无需主动拉:服务端 WS 打开即推 Devices 快照(ws.rs 会话入口),设备
+   *  上下线再增量推送。此处空实现仅为满足接口——调用方订阅后统一触发一次。 */
+  async listDevices() {}
   onPorts(cb: (ports: PortInfo[]) => void) {
     this.handlers.ports.add(cb);
     return () => { this.handlers.ports.delete(cb); };
@@ -462,8 +468,18 @@ export class RemoteTransport extends TransportEventBase implements Transport {
 /** IPC 实现（本地模式）：Tauri invoke 命令 + event 监听。绕过 WS，进程内直连。 */
 export class LocalTransport extends TransportEventBase implements Transport {
   private unlisten: Array<() => void> = [];
+  /** dispose 已发生标记。setupEvents 逐个 `await listen()` 注册(异步),若 dispose
+   *  先于注册完成发生(StrictMode 双挂载/effect 快速拆建),晚到的注册经 track 立即
+   *  撤销——否则挂在已死实例上,事件回调永不清理成僵尸监听。 */
+  private disposed = false;
   /** per-port 字节流通道。Channel 无需 unlisten，关闭走 close_port_stream 摘除。 */
   private streamChannels = new Map<string, Channel<ArrayBuffer>>();
+
+  /** 登记注销函数;实例已销毁则注册即撤销。 */
+  private track(un: () => void) {
+    if (this.disposed) un();
+    else this.unlisten.push(un);
+  }
 
   constructor() {
     super();
@@ -474,27 +490,27 @@ export class LocalTransport extends TransportEventBase implements Transport {
     const setup = async () => {
       const { listen } = await import("@tauri-apps/api/event");
       // 数据走 per-port Channel 直传（open 时建），不再 listen("serial-data")。
-      this.unlisten.push(
+      this.track(
         await listen<string>("serial-opened", (e) =>
           this.handlers.opened.forEach((cb) => cb(e.payload)))
       );
-      this.unlisten.push(
+      this.track(
         await listen<string>("serial-closed", (e) =>
           this.handlers.closed.forEach((cb) => cb(e.payload)))
       );
-      this.unlisten.push(
+      this.track(
         await listen<string>("serial-disconnected", (e) =>
           this.handlers.disconnected.forEach((cb) => cb(e.payload)))
       );
-      this.unlisten.push(
+      this.track(
         await listen<{ port: string; holders: number }>("serial-holders", (e) =>
           this.handlers.holders.forEach((cb) => cb(e.payload.port, e.payload.holders)))
       );
-      this.unlisten.push(
+      this.track(
         await listen<{ message: string }>("serial-error", (e) =>
           this.handlers.error.forEach((cb) => cb(e.payload.message)))
       );
-      this.unlisten.push(
+      this.track(
         await listen<{ run_id?: string; name: string; success: boolean; message: string }>(
           "macro-result",
           (e) =>
@@ -503,7 +519,7 @@ export class LocalTransport extends TransportEventBase implements Transport {
             )
         )
       );
-      this.unlisten.push(
+      this.track(
         await listen<{ run_id?: string; name: string; success: boolean; message: string }>(
           "script-result",
           (e) =>
@@ -512,29 +528,21 @@ export class LocalTransport extends TransportEventBase implements Transport {
             )
         )
       );
-      this.unlisten.push(
+      this.track(
         await listen<{ run_id: string; message: string }>("script-log", (e) =>
           this.handlers.scriptLog.forEach((cb) => cb(e.payload.run_id, e.payload.message))
         )
       );
-      this.unlisten.push(
+      this.track(
         await listen("ports-meta-changed", () =>
           this.handlers.metaChanged.forEach((cb) => cb()))
       );
-      this.unlisten.push(
+      this.track(
         await listen("scripts-changed", () =>
           this.handlers.scriptsChanged.forEach((cb) => cb()))
       );
-      this.unlisten.push(
-        await listen("devices-changed", async () => {
-          // 快照式:事件只触发拉取,状态以后端为唯一真相
-          try {
-            const devices = await tauriInvoke<{ id: string; online: boolean }[]>("list_devices");
-            this.handlers.devices.forEach((cb) => cb(devices));
-          } catch (e) {
-            console.error("拉取设备状态失败", e);
-          }
-        })
+      this.track(
+        await listen("devices-changed", () => { void this.listDevices(); })
       );
     };
     setup().catch((e) => console.error("本地事件订阅失败", e));
@@ -543,6 +551,15 @@ export class LocalTransport extends TransportEventBase implements Transport {
   async list() {
     const ports = await tauriInvoke<PortInfo[]>("list_ports");
     this.handlers.ports.forEach((cb) => cb(ports));
+  }
+  /** 主动拉设备在线快照(事件只触发拉取,状态以后端为唯一真相)。 */
+  async listDevices() {
+    try {
+      const devices = await tauriInvoke<{ id: string; online: boolean }[]>("list_devices");
+      this.handlers.devices.forEach((cb) => cb(devices));
+    } catch (e) {
+      console.error("拉取设备状态失败", e);
+    }
   }
   onPorts(cb: (ports: PortInfo[]) => void) {
     this.handlers.ports.add(cb);
@@ -613,6 +630,7 @@ export class LocalTransport extends TransportEventBase implements Transport {
   }
 
   dispose() {
+    this.disposed = true;
     this.unlisten.forEach((fn) => fn());
     // 不调 close_port_stream：保持“端口随窗口 Destroyed 释放”的现有语义。
     // 仅清前端引用；后端通道由 Destroyed 的 remove_window 兜底。

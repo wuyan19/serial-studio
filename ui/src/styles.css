@@ -1305,6 +1305,11 @@ button {
   font-weight: 600;
   letter-spacing: 0.03em;
 }
+/* 设备段(昵称::)是上下文而非主体,降权显示——端口名才是主信息 */
+.channel-strip__dev {
+  color: var(--ink-dim);
+  font-weight: 400;
+}
 .channel-strip__sep {
   color: var(--ink-faint);
 }

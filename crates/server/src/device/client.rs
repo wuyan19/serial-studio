@@ -77,6 +77,11 @@ pub(crate) struct DeviceInner {
     pub(crate) pending: Mutex<Vec<PendingReply>>,
     /// 主动停止标记(remove 设备/断开按钮)→ run loop 不再重连。
     pub(crate) stopped: AtomicBool,
+    /// 离线已广播闩锁。语义:**进入离线态的第一拍必发事件,重试环内不刷屏**——
+    /// 初态 Connecting 的首次失败也发(否则远端暂不可达的新设备永远停在
+    /// "连接中…",用户看不见后台退避重连在跑,只能手点"重连设备");此后重复
+    /// 失败静默,直到下次成功上线把闩锁复位(session 入口)。
+    pub(crate) announced: AtomicBool,
     /// 会话取消信号(stop 触发,活跃 session 的 select 监听——仅靠 stopped 标志
     /// 会话感知不到,而自己的心跳 Ping/Pong 会持续刷新"无入站判死",连接永不退出)。
     pub(crate) session_stop: tokio::sync::Notify,
@@ -108,6 +113,7 @@ impl DeviceClient {
                 cached_ports: Mutex::new(Vec::new()),
                 pending: Mutex::new(Vec::new()),
                 stopped: AtomicBool::new(false),
+                announced: AtomicBool::new(false),
                 session_stop: tokio::sync::Notify::new(),
                 next_req: AtomicU64::new(1),
             }),
@@ -231,8 +237,13 @@ impl DeviceClient {
     }
 
     fn set_offline(&self, reason: &str) {
-        if !self.inner.online.swap(false, Ordering::Relaxed) {
-            return; // 已离线,幂等
+        // 状态沿闸门:Online→Offline 必发(was_online);初态 Connecting 的首次失败
+        // 也发(闩锁未扣);重试环内的重复失败静默(已扣)——否则每次退避重试都
+        // 推一次 Devices 快照,多设备多客户端下放大成消息风暴。
+        let was_online = self.inner.online.swap(false, Ordering::Relaxed);
+        let already_announced = self.inner.announced.swap(true, Ordering::Relaxed);
+        if !was_online && already_announced {
+            return;
         }
         // 关闭在用端口的 IO 状态(唤醒阻塞 read → port_task 走断开路径)
         let closed: Vec<Arc<RemoteSharedIo>> = {
@@ -349,6 +360,8 @@ impl DeviceClient {
         // 远端自己的口)保证列表恒为"本地 N + 镜像 N"不增殖;open 镜像口路由回本机
         // manager,即本地口的远程视图,占有权语义照常(附加到同一端口)。
         self.inner.online.store(true, Ordering::Relaxed);
+        // 复位离线闩锁:本轮在线期间的断开要走"必发"沿;再次失败也重新广播
+        self.inner.announced.store(false, Ordering::Relaxed);
         let _ = self.device_bus.send(DeviceEvent::Online {
             dev_id: self.inner.dev.id.clone(),
         });

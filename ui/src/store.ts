@@ -116,6 +116,9 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
     }
 
     case "dev_online": {
+      // 幂等:看门狗周期重放同值快照时零开销(不新建状态对象→不触发重渲染)。
+      // undefined→首值与 true/false 沿切换不受影响(严格相等对 undefined 恒 false)。
+      if (s.devOnline[a.devId] === a.online) return s;
       const devOnline = { ...s.devOnline, [a.devId]: a.online };
       if (a.online) return { ...s, devOnline };
       // 断连：本设备开着的端口标记"断开待重连"（重连成功后由端口事件重放）；

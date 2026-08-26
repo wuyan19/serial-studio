@@ -72,7 +72,12 @@ export function PortsPanel({
         return (
           <div key={grp.devId} className="macro-group">
             <div className="port-group__head">
-              <button className="port-group__toggle" onClick={() => onTogglePortGroup(grp.devId)}>
+              <button
+                className="port-group__toggle"
+                onClick={() => onTogglePortGroup(grp.devId)}
+                // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
+                title={dev ? `${dev.host}:${dev.port}` : undefined}
+              >
                 <span className={`dot ${grp.online ? "on" : "off"}`} />
                 <span className="macro-group__caret">{portCollapsed.has(grp.devId) ? "▶" : "▼"}</span>
                 <span className="port-group__name">{grp.label}</span>
