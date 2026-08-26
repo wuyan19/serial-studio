@@ -9,9 +9,15 @@
 // Why: the version must stay in sync across 4 files + Cargo.lock; a mismatch
 //      breaks the updater's version check against the release tag.
 //
-// How: reads the CURRENT version from Cargo.toml, then replaces the quoted
-//      string "<current>" -> "<new>" in each file. Matching the quoted exact
-//      value means dependency versions in package-lock.json are never touched.
+// How: reads the CURRENT version from Cargo.toml, then bumps each file with
+//      structure-aware replacement:
+//        - Cargo.toml: only the FIRST `version = "<current>"` (workspace.package
+//          block; a global replace could hit a dependency pinned to the same
+//          version — same bug class as the package-lock incident of v0.11.0);
+//        - *.json / package-lock.json: JSON parse + mutate + stringify(2-space),
+//          touching ONLY root `version` / `packages[""].version` — a naive
+//          quoted-string replace once corrupted @xterm/addon-fit's entry because
+//          its version happened to equal the app's old version.
 // Cross-platform (Node.js) - usable on Windows / macOS / Linux and in CI.
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -41,20 +47,37 @@ if (current === target) {
 }
 console.log(`Bumping ${current} -> ${target}`);
 
-function bumpFile(relPath) {
-  const path = join(root, relPath);
-  const text = readFileSync(path, "utf8");
-  const needle = `"${current}"`;
-  const count = text.split(needle).length - 1;
-  if (count === 0) throw new Error(`Quoted version "${current}" not found in ${relPath}`);
-  writeFileSync(path, text.split(needle).join(`"${target}"`));
-  console.log(`  ${relPath} (${count} occurrence(s))`);
+function writeFile(relPath, text) {
+  writeFileSync(join(root, relPath), text);
+  console.log(`  ${relPath}`);
 }
 
-bumpFile("Cargo.toml");
-bumpFile("crates/tauri-app/tauri.conf.json");
-bumpFile("ui/package.json");
-bumpFile("ui/package-lock.json");
+// Cargo.toml:只换第一处(workspace.package 块)——全局替换会误伤恰好同号的依赖
+{
+  const path = cargoPath;
+  const text = readFileSync(path, "utf8");
+  const needle = `version = "${current}"`;
+  if (!text.includes(needle)) throw new Error(`Quoted version not found in Cargo.toml`);
+  writeFile("Cargo.toml", text.replace(needle, `version = "${target}"`));
+}
+
+// JSON 家族:解析后只改根字段,序列化回写(npm 官方 lock 格式即 2 空格缩进)
+for (const [relPath, mutate] of [
+  ["crates/tauri-app/tauri.conf.json", (j) => (j.version = target)],
+  ["ui/package.json", (j) => (j.version = target)],
+  [
+    "ui/package-lock.json",
+    (j) => {
+      j.version = target;
+      if (j.packages?.[""]) j.packages[""].version = target;
+    },
+  ],
+]) {
+  const path = join(root, relPath);
+  const json = JSON.parse(readFileSync(path, "utf8"));
+  mutate(json);
+  writeFile(relPath, JSON.stringify(json, null, 2) + "\n");
+}
 
 console.log("Refreshing Cargo.lock via cargo check ...");
 try {
