@@ -29,7 +29,7 @@ use axum::{
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use ss_core::{EventBus, SerialManager, SessionId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -139,14 +139,38 @@ pub fn bare_name_of(port: &str) -> &str {
     ss_core::split_port_key(port).1
 }
 
+/// 列表透传深度上限(段数,含末段端口名):4 段 = 三跳级联。病态长链的兜底,
+/// 非功能开关——真实深度受物理注册关系约束(每跳首段须为该机已注册设备)。
+pub(crate) const MAX_PASSTHROUGH_SEGMENTS: usize = 4;
+
+/// 远端桶条目透传判定(纯函数,列表合并与别名索引共用):组装候选键后按段链
+/// 查重——**段重复 = 环**即丢弃(自连第二轮 `me::me::COM7`、互注册绕回
+/// `ab::ba::ab::COM7`);段数超上限丢弃;否则返回透传键(多级级联口在直连
+/// 设备的 UI 可见,归其分组平铺)。环检测只能用结构性判据:段名是各机 remotes
+/// 的本地命名,中间机器无法解析他人段名——这里是未来引入全局实例 id
+/// (path-vector)的接缝,谓词可整体替换。
+pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str) -> Option<String> {
+    let key = ss_core::compose_port_key(dev_id, wire);
+    let mut seen = HashSet::with_capacity(MAX_PASSTHROUGH_SEGMENTS + 1);
+    for seg in key.split(ss_core::PORT_KEY_SEP) {
+        if !seen.insert(seg) {
+            return None; // 段重复 → 环,不透传
+        }
+    }
+    if seen.len() > MAX_PASSTHROUGH_SEGMENTS {
+        return None; // 超深 → 病态长链,不透传
+    }
+    Some(key)
+}
+
 /// 列出端口并组合别名，返回面向客户端的 PortView。三条 list 路径（REST / WS / Tauri）共用。
 ///
 /// 合并三个来源:
 /// 1. 本地桶:manager.list_ports()(本机枚举 + 本地占有状态)+ ports.json 别名;
 /// 2. 远端设备桶:DeviceClient 缓存的远端 PortView(远端别名透传——别名归端口
-///    所在机器),键 = compose(devId, 远端线名)。**透传深度限 1**——只收远端自己的
-///    口(线名首段 = local),丢弃远端的远端桶:否则自连/互注册时列表每轮上报自我
-///    复制(回声环,4→8→12…),多级级联的口在所在设备自己的 UI 看(路由仍透传,仅列表不展示);
+///    所在机器),键 = compose(devId, 远端线名)。**多级条目透传**,环检测与深度
+///    上限见 [`passthrough_port_key`]——否则自连/互注册时列表每轮上报自我复制
+///    (回声环,4→8→12…);多级级联的口(`devB::devC::COM3`)归直连设备分组平铺;
 /// 3. 本地占有权快照覆盖 opened/holders/disconnected——**本地为唯一真相**
 ///    (远端 WS 断后其缓存是陈旧的,红标以本地 drainer 为准)。
 pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
@@ -163,15 +187,14 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             PortView { info, alias }
         })
         .collect();
-    // 远端桶(键加本设备段;后缀保持远端线名)。只收远端自己的口——线名含 `::`
-    // 即远端的远端桶(含指向本机的回声),不透传(深度限 1);线名已在 DeviceClient
-    // 入站归一(剥遗留 local::),此处直接判定。
+    // 远端桶(键加本设备段;后缀保持远端线名)。多级条目透传,环/超深由谓词判定;
+    // 线名已在 DeviceClient 入站归一(剥遗留 local::)。远端桶缓存本身不过滤
+    // (二级条目量级极小),谓词在两处消费点(此处 + 别名索引)兜底。
     for (dev_id, ports) in state.devices.remote_buckets() {
         for pv in ports {
-            if pv.info.name.contains(ss_core::PORT_KEY_SEP) {
-                continue; // 远端的远端桶,不透传;多级级联的口在所在设备自己的 UI 看(路由仍透传)
-            }
-            let name = ss_core::compose_port_key(&dev_id, &pv.info.name);
+            let Some(name) = passthrough_port_key(&dev_id, &pv.info.name) else {
+                continue; // 环(段重复)或超深,不透传
+            };
             views.push(PortView {
                 info: ss_core::PortInfo { name, ..pv.info },
                 alias: pv.alias,
@@ -351,5 +374,39 @@ mod tests {
         let obj = json.as_object().unwrap();
         assert!(!obj.contains_key("alias"), "None alias 不应出现在线上");
         assert_eq!(obj.len(), 4);
+    }
+
+    #[test]
+    fn passthrough_allows_bare_and_multilevel() {
+        // 一级(现状形态):远端自己的口,照常透传
+        assert_eq!(passthrough_port_key("dev-b", "COM7"), Some("dev-b::COM7".into()));
+        // 二级(远端的远端桶,即本次放宽):A→B→C 的 C 口
+        assert_eq!(
+            passthrough_port_key("dev-b", "dev-c::COM7"),
+            Some("dev-b::dev-c::COM7".into())
+        );
+        // 三跳(上限内)
+        assert_eq!(
+            passthrough_port_key("a", "b::c::COM7"),
+            Some("a::b::c::COM7".into())
+        );
+    }
+
+    #[test]
+    fn passthrough_drops_repeated_segment_loops() {
+        // 自连第二轮:镜像条目回到自己远端桶,compose 后本机段重复
+        assert_eq!(passthrough_port_key("dev-me", "dev-me::COM7"), None);
+        // 互注册绕回:ab::ba::ab(第三轮增殖被斩断)
+        assert_eq!(passthrough_port_key("ab", "ba::ab::COM7"), None);
+        // 非环的重复段形态不涉及本机也照斩——结构性判据只看段链
+        assert_eq!(passthrough_port_key("ab", "cd::ab::COM7"), None);
+    }
+
+    #[test]
+    fn passthrough_drops_excessive_depth() {
+        // 5 段(四跳)超上限:病态长链兜底
+        assert_eq!(passthrough_port_key("a", "b::c::d::COM7"), None);
+        // 4 段(三跳)恰好在上限内
+        assert!(passthrough_port_key("a", "b::c::COM7").is_some());
     }
 }

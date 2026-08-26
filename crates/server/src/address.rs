@@ -169,13 +169,14 @@ impl Inner {
         }
         for (dev_id, views) in self.devices.remote_buckets() {
             for pv in views {
-                // 与 DeviceClient 入站归一同一规则;此处幂等兜底
+                // 与 DeviceClient 入站归一同一规则;此处幂等兜底。
+                // 多级条目与列表合并共用透传谓词(环检测+深度上限)——否则列表可见
+                // 的级联口裸名别名解析不到,行为分裂
                 let wire = normalize_port_key(&pv.info.name);
-                if wire.contains(PORT_KEY_SEP) {
-                    continue; // 远端的远端桶,不在本机可列范围
-                }
-                if let Some(a) = pv.alias {
-                    map.entry(a).or_default().push(compose_port_key(&dev_id, &wire));
+                if let Some(key) = crate::passthrough_port_key(&dev_id, &wire) {
+                    if let Some(a) = pv.alias {
+                        map.entry(a).or_default().push(key);
+                    }
                 }
             }
         }

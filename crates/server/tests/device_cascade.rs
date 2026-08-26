@@ -826,9 +826,10 @@ async fn alias_suffix_open_registers_resolved_name() {
 }
 
 /// 互注册不增殖回归: A 注册 B,且 B 的列表里带指向 A 的二级条目(`dev-a::COM7`,
-/// 即"B 也注册了 A"的形态)。透传深度限 1 必须保证: A 的合并视图只含一级
-/// dev-b 条目、多轮 open/close 触发的列表重拉后无自我复制(历史回声环 4→8→12
-/// 直至消息风暴的回归锚点)。桩按新协议回带 req,顺带覆盖请求级回执配对路径。
+/// 即"B 也注册了 A"的形态)。透传放宽后二级条目(幽灵:自己口经对方绕回)合法
+/// 进入但**有界**——段重复环检测保证多轮 open/close 触发的列表重拉后无自我复制
+/// (历史回声环 4→8→12 直至消息风暴的回归锚点)。桩按新协议回带 req,顺带覆盖
+/// 请求级回执配对路径。
 #[tokio::test]
 async fn mutual_registration_list_no_proliferation() {
     // B 桩: 列表 = 自己的本地口 COM9 + 二级条目 dev-a::COM7(注册了 A 的形态);
@@ -939,24 +940,25 @@ async fn mutual_registration_list_no_proliferation() {
     }
     tokio::time::sleep(Duration::from_millis(300)).await; // 静置让最后一轮传播收敛
 
-    // 断言一:dev-b 前缀条目恒等于恰好一条 dev-b::COM9
+    // 断言一:dev-b 前缀条目恰好两条——远端自己的口 + 幽灵条目(自己口经对方
+    // 绕回,透传放宽后合法进入且有界:段链 [dev-b, dev-a] 无重复,环检测不斩)
     let v1 = list_views(&a).await;
-    let devb: Vec<_> = v1
+    let mut devb: Vec<_> = v1
         .iter()
         .filter(|v| v.info.name.contains("dev-b"))
         .map(|v| v.info.name.clone())
         .collect();
+    devb.sort();
     assert_eq!(
         devb,
-        vec!["dev-b::COM9".to_string()],
-        "互注册形态下 dev-b 桶应只贡献自己的一级端口: {:?}",
+        vec!["dev-b::COM9".to_string(), "dev-b::dev-a::COM7".to_string()],
+        "互注册形态下 dev-b 桶 = 一级端口 + 有界幽灵条目: {:?}",
         devb
     );
-    // 断言二:任何条目不得出现二级设备前缀(回声复制特征)
+    // 断言二:所有条目段链无重复(环检测斩断更深增殖——回声环的回归锚点)
     assert!(
-        v1.iter()
-            .all(|v| !v.info.name.starts_with("dev-b::dev-")),
-        "不得出现二级前缀条目(列表自我复制): {:?}",
+        v1.iter().all(|v| segments_unique(&v.info.name)),
+        "任何条目段不得重复(列表自我复制被环检测斩断): {:?}",
         v1.iter().map(|v| &v.info.name).collect::<Vec<_>>()
     );
     // 断言三:连续多次拉取数量稳定(diff 收敛,无每轮增殖)
@@ -967,6 +969,257 @@ async fn mutual_registration_list_no_proliferation() {
     }
 }
 
+fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// 键的段链无重复(环检测谓词 passthrough_port_key 的断言面)。
+fn segments_unique(key: &str) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    key.split(ss_core::PORT_KEY_SEP).all(|s| seen.insert(s))
+}
+
+/// 桩 C(最底层设备):裸名 COM7 回显,回执带 req 回显,列表恒报一条 COM7。
+/// 供协议边界桩测试与真实 hub 转发测试共用——后者由真实 B 直连此桩,
+/// 故 list/close 分支必须作答(真实 B 的 DeviceClient 会话建立即初始拉列表)。
+async fn device_c_stub(listener: TcpListener) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+    let (mut sink, mut source) = ws.split();
+    while let Some(Ok(msg)) = source.next().await {
+        let Message::Text(t) = msg else { continue };
+        let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+        let req = v["req"].clone();
+        match v["action"].as_str().unwrap_or("") {
+            "list" => {
+                let ports = serde_json::json!([{
+                    "name":"COM7","opened":false,"holders":0,"disconnected":false
+                }]);
+                let _ = sink
+                    .send(Message::Text(
+                        serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                    ))
+                    .await;
+            }
+            "open" => {
+                assert_eq!(v["port"].as_str(), Some("COM7"), "C 只接受裸名");
+                let cfg = serde_json::json!({
+                    "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
+                    "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
+                });
+                let _ = sink
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type":"acquired","port":"COM7","opened":true,
+                            "config":cfg,"holders":1,"req":req
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+            }
+            "write" => {
+                let _ = sink
+                    .send(Message::Text(
+                        serde_json::json!({"type":"ok","message":"written","port":"COM7","req":req})
+                            .to_string(),
+                    ))
+                    .await;
+                let data = hex_to_bytes(v["data"].as_str().unwrap_or(""));
+                let _ = sink
+                    .send(Message::Binary(ss_server::protocol::data_frame(
+                        "COM7", &data,
+                    )))
+                    .await;
+            }
+            "close" => {
+                let _ = sink
+                    .send(Message::Text(
+                        serde_json::json!({"type":"ok","message":"closed","port":"COM7","req":req})
+                            .to_string(),
+                    ))
+                    .await;
+            }
+            "ping" => {
+                let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 真实 hub 三级级联:A/B 均为真实 server 实例(B 对 A 是 server、对 C 桩是 client)。
+/// 验证透传放宽后 A 的列表出现二级条目 `dev-b::dev-c::COM7` 且可开、数据回路完整
+/// (与桩版 three_level_cascade_routes_end_to_end 互补:那条验协议边界,此条验真实
+/// B 的全转发路径——入站归一/缓存/列表合并/事件推送)。
+#[tokio::test]
+async fn cascade_three_level_real_hub_list_and_open() {
+    let c_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c_port = c_listener.local_addr().unwrap().port();
+    tokio::spawn(device_c_stub(c_listener));
+
+    // B:真实实例,注册桩 C
+    let b = boot(false).await;
+    b.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-c".into(),
+        host: "127.0.0.1".into(),
+        port: c_port,
+        nickname: None,
+    }]);
+    b.devices.start();
+
+    // A:真实实例,注册真实 B
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    // A 的合并列表应出现二级条目(透传放宽;修复前远端线名含 :: 即整桶丢弃)
+    let full_key = "dev-b::dev-c::COM7";
+    let mut listed = false;
+    for _ in 0..100 {
+        if list_views(&a).await.iter().any(|v| v.info.name == full_key) {
+            listed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(listed, "A 的列表应出现二级级联条目 {full_key}(透传放宽)");
+
+    // open:经真实 B 剥段转发到桩 C
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager
+            .acquire(full_key.into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "三级级联键应可经真实 B 打开");
+    assert_eq!(a.manager.holder_count(full_key).await, Some(1));
+    assert_eq!(
+        b.manager.holder_count("dev-c::COM7").await,
+        Some(1),
+        "B 侧应持有剥段后的键"
+    );
+
+    // 数据回路:写 → C 回显 → B 重打线名 → A 以完整级联键口径发布
+    let mut rx = a.manager.event_bus().subscribe();
+    a.manager
+        .write(full_key.into(), bytes::Bytes::from_static(b"ping"))
+        .await
+        .unwrap();
+    let mut echoed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(ss_core::SerialEvent::DataReceived { port, data }) => {
+                assert_eq!(port, full_key, "事件端口应为 A 侧完整级联键");
+                assert_eq!(data, b"ping", "跨两级回显数据应原样到达");
+                echoed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(echoed, "真实 B 转发的数据回显应可达");
+
+    // 释放逐级传播:A 末位拆毁 → ClosePort → B 末位释放
+    let _ = a.manager.release(full_key, s).await;
+    let mut released = false;
+    for _ in 0..100 {
+        if b.manager.holder_count("dev-c::COM7").await.is_none() {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(released, "A 释放后 B 侧占有应逐级释放");
+}
+
+/// 端口级断链传播:B→C 断开 → B 侧标 disconnected 并推 Disconnected 事件 →
+/// A 侧同线名 IO 注入断开(read Err)→ A 侧也标 disconnected(占有权保留)。
+/// 修复前 A 侧只重拉列表不触碰 IO——条目不知情,RX 静默断流。
+#[tokio::test]
+async fn cascade_disconnected_propagates_per_port() {
+    let c_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c_port = c_listener.local_addr().unwrap().port();
+    tokio::spawn(device_c_stub(c_listener));
+
+    let b = boot(false).await;
+    b.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-c".into(),
+        host: "127.0.0.1".into(),
+        port: c_port,
+        nickname: None,
+    }]);
+    b.devices.start();
+
+    let a = boot(false).await;
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        id: "dev-b".into(),
+        host: "127.0.0.1".into(),
+        port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
+        nickname: None,
+    }]);
+    a.devices.start();
+
+    let full_key = "dev-b::dev-c::COM7";
+    let s = SessionId::next();
+    let mut opened = false;
+    for _ in 0..100 {
+        if a.manager
+            .acquire(full_key.into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(opened, "三级级联键应可打开");
+
+    // 断中间跳:C 侧断开(B 的 DeviceClient stop → B 侧 IO close → drainer → 事件)
+    b.devices.disconnect("dev-c").unwrap();
+
+    // A 侧应感知:B 推 Disconnected{dev-c::COM7} → A 注入 IO 断开 → drainer 标记
+    let mut marked = false;
+    for _ in 0..100 {
+        if a.manager.is_disconnected(full_key).await {
+            marked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(marked, "中间跳断开后 A 侧端口应标 disconnected(传播)");
+    assert_eq!(
+        a.manager.holder_count(full_key).await,
+        Some(1),
+        "A 侧占有权应保留"
+    );
+    // 设备连接本身不受影响(A→B 仍在线,仅 B→C 断)
+    assert!(
+        a.devices
+            .device_states()
+            .iter()
+            .any(|d| d.id == "dev-b" && d.online),
+        "A→B 设备连接应保持在线"
+    );
+}
+
 /// 三级级联端到端路由回归: A→B→C(B 注册 C,A 注册 B)。A 以 `dev-b::dev-c::COM7`
 /// 操作——split 只剥首段、后缀整体透传:B 剥出 `dev-c::COM7` 转发(本桩再剥成
 /// `COM7` 发 C),C 的回执/帧被 B 重打线名 `dev-c::COM7` 后转给 A。验证级联根基
@@ -974,59 +1227,6 @@ async fn mutual_registration_list_no_proliferation() {
 #[tokio::test]
 async fn three_level_cascade_routes_end_to_end() {
     use ss_server::protocol::{data_frame, parse_data_frame};
-
-    fn hex_to_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
-            .collect()
-    }
-
-    // C 桩(最底层设备): 裸名 COM7 回显。回执带 req 回显。
-    async fn device_c(listener: TcpListener) {
-        let (stream, _) = listener.accept().await.unwrap();
-        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let (mut sink, mut source) = ws.split();
-        while let Some(Ok(msg)) = source.next().await {
-            let Message::Text(t) = msg else { continue };
-            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-            let req = v["req"].clone();
-            match v["action"].as_str().unwrap_or("") {
-                "open" => {
-                    assert_eq!(v["port"].as_str(), Some("COM7"), "C 只接受裸名");
-                    let cfg = serde_json::json!({
-                        "baud_rate":115200,"data_bits":"eight","stop_bits":"one",
-                        "parity":"none","flow_control":"none","line_ending":"lf","timeout_ms":100
-                    });
-                    let _ = sink
-                        .send(Message::Text(
-                            serde_json::json!({
-                                "type":"acquired","port":"COM7","opened":true,
-                                "config":cfg,"holders":1,"req":req
-                            })
-                            .to_string(),
-                        ))
-                        .await;
-                }
-                "write" => {
-                    let _ = sink
-                        .send(Message::Text(
-                            serde_json::json!({"type":"ok","message":"written","port":"COM7","req":req})
-                                .to_string(),
-                        ))
-                        .await;
-                    let data = hex_to_bytes(v["data"].as_str().unwrap_or(""));
-                    let _ = sink
-                        .send(Message::Binary(data_frame("COM7", &data)))
-                        .await;
-                }
-                "ping" => {
-                    let _ = sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
-                }
-                _ => {}
-            }
-        }
-    }
 
     // B 桩(hub 形态): 对 A 展示合并视图(dev-c::COM7);A 的命令剥段转发 C,
     // C 的回执/帧重打线名转回 A。两个独立泵任务(A→C / C→A),无双端交错。
@@ -1107,7 +1307,7 @@ async fn three_level_cascade_routes_end_to_end() {
     // 起 C、B 两级桩
     let c_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let c_addr = c_listener.local_addr().unwrap();
-    tokio::spawn(device_c(c_listener));
+    tokio::spawn(device_c_stub(c_listener));
     let b_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let b_addr = b_listener.local_addr().unwrap();
     let saw = Arc::new(std::sync::Mutex::new(Vec::new()));

@@ -543,11 +543,33 @@ impl DeviceClient {
                     )),
                 }
             }
+            // 端口级断链传播:远端硬件拔出(USB)或远端的下级断开经其 hub 转报——
+            // 本侧同线名 IO 注入断开错误,read 返 Err → 本侧 drainer 标 disconnected
+            // (占有权保留,可 reopen)。与 set_offline 的设备级 close_with_error 同构,
+            // 粒度为单端口,设备连接本身不受影响。登记键 = Acquired.resolved = 远端
+            // map 键,事件同为远端 map 键口径,按名查找即配对。未命中(本侧未开此口)
+            // 静默,RefreshList 兜底。
+            ServerMsg::Disconnected { port } => {
+                let wire = normalize_wire(&port);
+                let io = {
+                    let ports = self.inner.ports.lock().unwrap();
+                    ports
+                        .iter()
+                        .find(|(n, _)| n == &wire)
+                        .and_then(|(_, w)| w.upgrade())
+                }; // 锁内只取 Arc,close 在锁外(与 set_offline 同模式)
+                if let Some(io) = io {
+                    io.close_with_error(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        format!("远端端口已断开: {wire}"),
+                    ));
+                }
+                let _ = self.inner.cmd_tx.send(DeviceCommand::RefreshList);
+            }
             // 远端事件(端口状态/元数据变更)→ 重拉列表:**不直接扇出本地 meta_bus**
             // (自连时同样形成回授环)。重拉结果经 Ports 分支 diff,真变了才通知。
             ServerMsg::Opened { .. }
             | ServerMsg::Closed { .. }
-            | ServerMsg::Disconnected { .. }
             | ServerMsg::Holders { .. }
             | ServerMsg::MetaChanged { .. }
             | ServerMsg::ScriptsChanged { .. } => {
