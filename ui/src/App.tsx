@@ -265,6 +265,18 @@ export default function App() {
   const captureQueuesRef = useRef(new Map<PortId, { chunks: Uint8Array[]; bytes: number }>());
   /** 在途写盘的口集合(同口单飞:上批未落盘前不发起下批,防同 id 并发写乱序)。 */
   const captureInflightRef = useRef(new Set<PortId>());
+  /** 记录条显隐:按端口独立开关(右键菜单),会话级不持久化,**默认隐藏**——
+   *  Map 缺项即隐藏,点开过的口记 true。全局偏好曾试过一版,"所有 tab 一起动"
+   *  不符合直觉(各串口记录各的),改 per-port。 */
+  const [recBarByPort, setRecBarByPort] = useState<Map<PortId, boolean>>(new Map());
+  /** 切换某口的记录条显隐;其余端口不受影响。 */
+  const toggleRecBar = useCallback((pid: PortId) => {
+    setRecBarByPort((prev) => {
+      const n = new Map(prev);
+      n.set(pid, !(n.get(pid) ?? false));
+      return n;
+    });
+  }, []);
   const setCaptureSession = useCallback((pid: PortId, s: CaptureSession | undefined) => {
     setCaptureSessions((prev) => {
       const n = new Map(prev);
@@ -522,30 +534,6 @@ export default function App() {
     }
   }, [libNotify, libError, cmdTransport]);
 
-  /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
-   *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
-  const prunePort = useCallback((pid: PortId) => {
-    terminalsRef.current.delete(pid);
-    activityRef.current.delete(pid);
-    // 记录会话收尾:尾批积压 + flush + 摘句柄一条命令原子完成(忘调也无泄漏——进程退出兜底)
-    const ls = captureSessionsRef.current.get(pid);
-    if (ls?.id !== undefined) {
-      const tail = takeCaptureQueue(pid);
-      void tauriInvoke("capture_end", { id: ls.id, data: tail ? Array.from(tail) : null }).catch(() => {});
-    }
-    captureSessionsRef.current.delete(pid);
-    captureQueuesRef.current.delete(pid);
-    captureInflightRef.current.delete(pid);
-    dispatch({ type: "prune_port", pid });
-  }, []);
-
-  /** 记录默认名的设备标识:remotes 昵称优先,否则键首段(uuid)。本地口返回 undefined。 */
-  const devLabelOf = useCallback((pid: PortId): string | undefined => {
-    const { devId } = parsePortId(pid);
-    if (devId === "local") return undefined;
-    return remotesRef.current.find((r) => r.id === devId)?.nickname ?? devId;
-  }, []);
-
   /** 取走该口记录队列的剩余积压并合并(状态转换点收尾用);空队列返回 null。
    *  只碰 ref,故 useCallback([]) 稳定。 */
   const takeCaptureQueue = useCallback((pid: PortId): Uint8Array | null => {
@@ -557,6 +545,67 @@ export default function App() {
     return merged;
   }, []);
 
+  /** 收尾某口记录会话:先等在途批落盘(立即 end 会与其共享 fd 交错——相邻两批顺序
+   *  颠倒),再 capture_end 单命令原子完成 "尾批 + flush + 摘句柄"。onFail 供换文件
+   *  路径 toast;关 tab 路径静默。换文件场景等待期间新会话的批会延长等待至兜底,
+   *  属预期(保旧文件尾批顺序)。 */
+  const finishCapture = useCallback(
+    (pid: PortId, s: { id: number }, tail: Uint8Array | null, onFail?: (e: unknown) => void) => {
+      void waitInflight(captureInflightRef.current, pid).then(() => {
+        void tauriInvoke("capture_end", { id: s.id, data: tail ? Array.from(tail) : null }).catch((e) =>
+          onFail?.(e),
+        );
+      });
+    },
+    [],
+  );
+
+/** 等某口在途批落盘(单飞标志清零):100ms 轮询,≤1s 兜底强制放行。
+ *  只碰传入集合的读侧,不动标志本身——标志唯一属主是 flush 定时器的 .finally。 */
+function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
+  return new Promise((resolve) => {
+    let waits = 0;
+    const step = () => {
+      if (waits++ < 10 && inflight.has(pid)) {
+        setTimeout(step, 100);
+        return;
+      }
+      resolve();
+    };
+    step();
+  });
+}
+
+/** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
+ *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
+  const prunePort = useCallback((pid: PortId) => {
+    terminalsRef.current.delete(pid);
+    activityRef.current.delete(pid);
+    // 记录会话收尾:等在途批落盘后,尾批积压 + flush + 摘句柄原子完成
+    // (极端下 end 失败/忘调也无泄漏——句柄随进程退出由 OS 兜底)
+    const ls = captureSessionsRef.current.get(pid);
+    if (ls?.id !== undefined) {
+      const tail = takeCaptureQueue(pid);
+      finishCapture(pid, { id: ls.id }, tail);
+    }
+    captureSessionsRef.current.delete(pid);
+    captureQueuesRef.current.delete(pid);
+    // per-port 记录条显隐一并回收(默认隐藏语义:重开即全新状态,不残留上次的展开)
+    setRecBarByPort((prev) => {
+      const n = new Map(prev);
+      n.delete(pid);
+      return n;
+    });
+    dispatch({ type: "prune_port", pid });
+  }, [finishCapture, setRecBarByPort, takeCaptureQueue]);
+
+  /** 记录默认名的设备标识:remotes 昵称优先,否则键首段(uuid)。本地口返回 undefined。 */
+  const devLabelOf = useCallback((pid: PortId): string | undefined => {
+    const { devId } = parsePortId(pid);
+    if (devId === "local") return undefined;
+    return remotesRef.current.find((r) => r.id === devId)?.nickname ?? devId;
+  }, []);
+
   /** 选记录文件(原生保存对话框)→ 开始记录。用户取消不动现状;换文件先收尾旧句柄。
    *  对话框悬停期间旧会话保持 recording:flush 定时器照常写旧文件,数据零丢失。 */
   const selectCaptureFile = useCallback(
@@ -566,14 +615,20 @@ export default function App() {
       try {
         const t = await tauriInvoke<{ id: number; path: string } | null>("capture_begin", { defaultName });
         if (!t) return; // 用户取消
-        // await 后重读当前会话(双击双对话框/期间关 tab 的竞态防御):仍有旧句柄则
-        // "尾批写旧文件 + flush + 摘句柄"一条命令原子完成——两条 IPC 会交错,单条不会
+        // await 后重读:端口可能已在对话框悬停期间被移除(如设备断开触发 prunePort,
+        // 当时 idle 无从清起)——立即收掉刚开的档,不得给死端口登记会话,否则句柄挂到
+        // 进程退出,且同 pid 重开会无 UI 地静默续录
+        if (!sessionRef.current.openPorts.includes(pid)) {
+          void tauriInvoke("capture_end", { id: t.id, data: null }).catch(() => {});
+          libNotify(`端口已关闭,未开始记录:${t.path}`);
+          return;
+        }
+        // 仍有旧句柄(换文件)则 "尾批写旧文件 + flush + 摘句柄" 原子完成——两条 IPC
+        // 会交错,单条不会
         const cur = captureSessionsRef.current.get(pid);
         if (cur?.id !== undefined && cur.id !== t.id) {
           const tail = takeCaptureQueue(pid);
-          void tauriInvoke("capture_end", { id: cur.id, data: tail ? Array.from(tail) : null }).catch(
-            (e) => libError(`旧记录收尾失败:${String(e)}`),
-          );
+          finishCapture(pid, { id: cur.id }, tail, (e) => libError(`旧记录收尾失败:${String(e)}`));
         }
         captureQueuesRef.current.set(pid, { chunks: [], bytes: 0 });
         setCaptureSession(pid, { id: t.id, path: t.path, defaultName, state: "recording" });
@@ -581,22 +636,30 @@ export default function App() {
         libError(`选择记录文件失败:${String(e)}`);
       }
     },
-    [devLabelOf, libError, setCaptureSession, takeCaptureQueue],
+    [devLabelOf, libError, libNotify, setCaptureSession, takeCaptureQueue, finishCapture],
   );
 
-  /** 记录中 → 暂停;暂停 → 继续(同一文件追加)。暂停前先把 ≤500ms 已入队积压写掉
-   *  (记录=终端所见,已上屏数据不丢);暂停期间 RX 照常上屏但不入队。 */
+  /** 记录中 → 暂停;暂停 → 继续(同一文件追加)。暂停路径与 finishCapture 同一保序
+   *  纪律:先翻 paused 停止入队 → 等在途批落盘 → 补写尾批(记录=终端所见,已上屏
+   *  数据不丢且顺序不乱);暂停期间 RX 照常上屏但不入队。尾批失败静默(磁盘类错误
+   *  由定时器主路径 toast 报告)。 */
   const toggleCapture = useCallback(
     (pid: PortId) => {
       const s = captureSessionsRef.current.get(pid);
       if (!s || s.id === undefined || s.state === "error") return;
       if (s.state === "recording") {
         const tail = takeCaptureQueue(pid);
-        if (tail) {
-          // 尾批写入失败静默(best-effort;磁盘类错误由定时器主路径 toast 报告)
-          void tauriInvoke("capture_write", { id: s.id, data: Array.from(tail) }).catch(() => {});
-        }
         setCaptureSession(pid, { ...s, state: "paused" });
+        const id = s.id;
+        void waitInflight(captureInflightRef.current, pid).then(() => {
+          if (!tail) return;
+          // 尾批也参与单飞协议(占标志):若用户在等待期点了"继续",定时器的新批次
+          // 会因 has(pid) 被挡住,直到尾批落地——文件内顺序 = 终端所见顺序
+          captureInflightRef.current.add(pid);
+          void tauriInvoke("capture_write", { id, data: Array.from(tail) })
+            .catch(() => {})
+            .finally(() => captureInflightRef.current.delete(pid));
+        });
       } else {
         setCaptureSession(pid, { ...s, state: "recording", error: undefined });
       }
@@ -1861,7 +1924,7 @@ export default function App() {
                 disconnected={disconnectedPorts.has(port)}
                 onReconnect={() => reconnectPort(port)}
                 recbar={
-                  isLocal
+                  isLocal && (recBarByPort.get(port) ?? false)
                     ? {
                         state: captureSessions.get(port)?.state ?? "idle",
                         path: captureSessions.get(port)?.path ?? "",
@@ -1872,6 +1935,11 @@ export default function App() {
                         onSelect: () => void selectCaptureFile(port),
                         onToggle: () => toggleCapture(port),
                       }
+                    : undefined
+                }
+                recCtl={
+                  isLocal
+                    ? { visible: recBarByPort.get(port) ?? false, toggle: () => toggleRecBar(port) }
                     : undefined
                 }
               />

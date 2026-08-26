@@ -5,12 +5,13 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
-import { copyText, displayPortName } from "../lib";
+import { copyText, displayPortName, readClipboardText } from "../lib";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
 import { IconChevronDown, IconChevronUp, IconClose, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
+import { ContextMenu, type ContextMenuItem } from "./context-menu";
 
 // ===== 终端视图 =====
 
@@ -33,6 +34,7 @@ export function TermView({
   disconnected,
   onReconnect,
   recbar,
+  recCtl,
 }: {
   port: string;
   visible: boolean;
@@ -48,6 +50,8 @@ export function TermView({
   onReconnect?: () => void;
   /** 底部记录条(local 形态才有;undefined = 不渲染)。 */
   recbar?: TermRecBar;
+  /** 记录条显隐控制(右键菜单项;undefined = 该形态无记录条,菜单不含此项)。 */
+  recCtl?: { visible: boolean; toggle: () => void };
 }) {
   // 根 div = reparent 单元(DOM 在 term-pool 与 group 容器间搬移);内层才是 xterm open
   // 容器——根改 flex column 后底部要给记录条留位,xterm 必须住在 flex:1 的内层里。
@@ -55,6 +59,8 @@ export function TermView({
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  /** 右键菜单锚点(null = 关闭)。坐标为 viewport 系,ContextMenu 组件 fixed 定位直接用。 */
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   // 断开态 + 重连回调经 ref:customKeyEventHandler 在 [port] effect 内,直接闭包 props 会 stale
   const disconnectedRef = useRef(disconnected ?? false);
   const onReconnectRef = useRef(onReconnect);
@@ -218,6 +224,31 @@ export function TermView({
     }
   }, [focused]);
 
+  // 右键菜单项:复制(选中时)/粘贴/记录条显隐。xterm 的选词监听在 .xterm 元素上
+  // 先触发,这里只接管"弹什么菜单"(preventDefault 掉 WebView 默认菜单)。
+  const openCtxMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY });
+  };
+  const buildCtxItems = (): ContextMenuItem[] => {
+    const sel = termRef.current?.getSelection() ?? "";
+    const items: ContextMenuItem[] = [
+      { label: "复制", disabled: !sel, onSelect: () => void copyText(sel) },
+      {
+        label: "粘贴",
+        onSelect: () => {
+          void readClipboardText().then((text) => {
+            if (text) onWrite(port, text);
+          });
+        },
+      },
+    ];
+    if (recCtl) {
+      items.push({ sep: true }, { label: recCtl.visible ? "隐藏 记录条" : "显示 记录条", onSelect: recCtl.toggle });
+    }
+    return items;
+  };
+
   // 容器尺寸变化（窗口缩放、分栏拖动、兄弟 group 坍缩）→ 重排可见终端。
   // 替代原「仅 active 挂 window resize」：分栏下多个终端同时可见，window resize 抓不到分栏尺寸变化。
   useEffect(() => {
@@ -239,6 +270,7 @@ export function TermView({
     <div
       ref={rootRef}
       className="termview-root"
+      onContextMenu={openCtxMenu}
       style={{
         position: "absolute",
         inset: 0,
@@ -249,6 +281,18 @@ export function TermView({
       {/* xterm open 容器:占满根内剩余空间(记录条占底部);fit() 量测的是此层尺寸 */}
       <div ref={containerRef} className="termview-term" style={{ flex: "1 1 auto", minHeight: 0 }} />
       {recbar && <RecBar bar={recbar} />}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={buildCtxItems()}
+          onClose={(reason) => {
+            setCtxMenu(null);
+            // Escape 关闭时把焦点还给终端(点菜单项不抢焦,无需善后;点外则尊重用户去向)
+            if (reason === "escape") termRef.current?.focus();
+          }}
+        />
+      )}
     </div>
   );
 }

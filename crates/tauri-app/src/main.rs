@@ -824,6 +824,8 @@ fn run_gui() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
+        // 右键菜单"粘贴"读剪贴板走插件(WebView 的 navigator.clipboard.readText 会弹权限窗)
+        .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let app = window.app_handle();

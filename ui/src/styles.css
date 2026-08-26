@@ -1726,6 +1726,56 @@ button {
 }
 
 /* ============================================================
+   Context menu (右键浮层菜单;终端区/未来其他入口共用)
+   ============================================================ */
+/* 层级表:searchbar 50 / dialog 100 / manage-menu 200 / ctx-menu 210(浮层最上) */
+.ctx-menu {
+  position: fixed;
+  z-index: 210;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.ctx-menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  text-align: left;
+  transition: background var(--t-fast) var(--ease);
+}
+.ctx-menu__item:hover {
+  background: var(--surface-2);
+}
+.ctx-menu__item[data-disabled="true"] {
+  color: var(--ink-faint);
+  cursor: default;
+}
+.ctx-menu__item[data-disabled="true"]:hover {
+  background: transparent;
+}
+.ctx-menu__hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-xs);
+}
+.ctx-menu__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--hairline);
+}
+
+/* ============================================================
    Dialogs — shared shell
    ============================================================ */
 .dialog-overlay {

@@ -459,6 +459,28 @@ export function alignRemotesId(
   return { list, renamed };
 }
 
+/** 读系统剪贴板文本(右键菜单"粘贴"用)。local 形态走 Tauri 插件——WebView 的
+ *  navigator.clipboard.readText 会触发权限请求窗,插件经 Rust 侧读取无感;web 形态
+ *  回落 navigator.clipboard(浏览器按自身策略)。失败返回 null,调用方静默降级。 */
+export async function readClipboardText(): Promise<string | null> {
+  if (isTauri()) {
+    try {
+      const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+      return await readText();
+    } catch (e) {
+      console.warn("读取剪贴板失败(插件路径):", e);
+      return null;
+    }
+  }
+  try {
+    return await navigator.clipboard.readText();
+  } catch (e) {
+    // web 非安全上下文(http://LAN-IP)必失败:粘贴静默无反应时至少控制台有线索
+    console.warn("读取剪贴板失败(navigator 路径):", e);
+    return null;
+  }
+}
+
 // ===== 共享常量 =====
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
