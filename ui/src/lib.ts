@@ -174,6 +174,45 @@ export function displayPortName(pid: PortId): string {
   return idx < 0 ? pid : pid.slice(idx + 2);
 }
 
+// ===== 终端记录文件名 =====
+
+/** 文件名消毒:Windows/Mac/Linux 通吃——非法字符与控制符替换为 _,空串回落占位。
+ *  远程设备昵称/实例 uuid、串口名(含 / 的 ttyUSB 类)都过这里。纯函数,单测在 lib.test.ts。 */
+export function sanitizeFileName(s: string): string {
+  const cleaned = s.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
+  return cleaned || "_";
+}
+
+/** 文件名用本地时间戳:yyyyMMdd-HHmmss(如 20260826-163821)。 */
+export function timestampForFileName(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** 终端记录默认文件名:`<时间戳>-<端口>.log`;远程口带设备标识
+ *  `<时间戳>-<设备昵称|uuid>_<串口名>.log`(devLabel 缺省回退键首段)。
+ *  多级级联键取首段(直连设备的标识——它是本机注册的远端,非端口属主)。
+ *  纯函数,单测在 lib.test.ts。 */
+export function defaultCaptureName(pid: PortId, devLabel?: string): string {
+  const bare = displayPortName(pid);
+  const label = pid.includes("::")
+    ? `${sanitizeFileName(devLabel ?? parsePortId(pid).devId)}_${sanitizeFileName(bare)}`
+    : sanitizeFileName(bare);
+  return `${timestampForFileName()}-${label}.log`;
+}
+
+/** 合并字节块为单个连续数组(记录攒批落盘用)。纯函数,单测在 lib.test.ts。 */
+export function mergeChunks(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
 /** 桶内条目名 → pid（列表消费侧，幂等）：条目键首段已等于桶 devId（本地 transport
  *  的合并视图，键为完整 pid）则直通；否则（远程 transport 的远端侧键）加桶前缀。 */
 export function bucketPidOf(grpDevId: string, name: string): PortId {

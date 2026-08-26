@@ -1629,6 +1629,103 @@ button {
 }
 
 /* ============================================================
+   Terminal record bar (终端底部记录条;local 形态)
+   ============================================================ */
+.recbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--surface);
+  border-top: 1px solid var(--hairline);
+}
+.recbar__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.recbar[data-state="recording"] .recbar__dot {
+  background: var(--danger);
+  animation: recbar-pulse 1.2s ease-in-out infinite;
+}
+.recbar[data-state="paused"] .recbar__dot,
+.recbar[data-state="error"] .recbar__dot {
+  background: var(--ink-dim);
+}
+@keyframes recbar-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.recbar__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  border: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+}
+.recbar__input::placeholder {
+  color: var(--ink-faint);
+}
+.recbar__input:focus {
+  outline: none;
+}
+/* readOnly input 也可能经 Tab 获焦:键盘路径给可见焦点环(a11y),鼠标点击不给 */
+.recbar__input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.recbar__err {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+.recbar__btn {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--ink-dim);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  transition:
+    color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.recbar__btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+/* 停止=红 / 继续=绿(语义色 token,各主题块重定义 → 双主题自适应);
+   状态选择器特异性压过 .recbar__btn:hover 的换色,悬停仅保留底色反馈 */
+.recbar[data-state="recording"] .recbar__btn--toggle {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.recbar[data-state="paused"] .recbar__btn--toggle {
+  color: var(--link);
+  border-color: var(--link);
+}
+
+/* ============================================================
    Dialogs — shared shell
    ============================================================ */
 .dialog-overlay {

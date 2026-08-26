@@ -21,6 +21,7 @@ use ss_server::settings::Settings;
 use ss_server::supervisor::{ServiceStatus, ServiceSupervisor};
 use ss_server::AppState;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tauri::{
     ipc::{Channel, InvokeResponseBody},
@@ -439,6 +440,98 @@ async fn save_json_file(default_name: String, content: String) -> Result<bool, S
     }
 }
 
+// ===== 终端记录落盘(capture:串口 RX 流写文件,非应用诊断日志) =====
+//
+// GUI 会话级功能,不进 ss_server::AppState(headless 不涉及;Tauri 侧独立 managed state,
+// 与共享数据面解耦)。前端 onData 钩子按端口入队,~500ms 攒批经 capture_write 追加;
+// 句柄常驻本表,tab 关闭(capture_end)/进程退出(Drop→OS 收尾)即释放。
+// 命名刻意避开 log_*:那是 tracing 应用日志的领地。
+
+/// 终端记录会话登记:id → 写句柄。u64 id 由单调计数器分配,前端持 id 追加/结束。
+#[derive(Default)]
+struct CaptureFiles(
+    Mutex<HashMap<u64, std::io::BufWriter<std::fs::File>>>,
+    std::sync::atomic::AtomicU64,
+);
+
+/// capture_begin 的回执:句柄 id + 完整路径(前端只读展示用)。
+#[derive(Clone, serde::Serialize)]
+#[serde(crate = "serde")]
+struct CaptureTarget {
+    id: u64,
+    path: String,
+}
+
+/// 选位并开档:原生保存对话框(同步 rfd 在 blocking 线程弹——0.15 的 AsyncFileHandle
+/// 拿不到完整路径,同步版直接回 PathBuf)。选即建/truncate:可写性当场验证,覆盖确认
+/// 交给原生对话框。返回 None=用户取消。
+#[tauri::command]
+async fn capture_begin(state: tauri::State<'_, CaptureFiles>, default_name: String) -> Result<Option<CaptureTarget>, String> {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("记录文件", &["log"])
+            .save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let file = std::fs::File::create(&path).map_err(|e| format!("创建记录文件失败: {e}"))?;
+    let id = state
+        .1
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    state.0.lock().unwrap().insert(id, std::io::BufWriter::new(file));
+    Ok(Some(CaptureTarget {
+        id,
+        path: path.display().to_string(),
+    }))
+}
+
+/// 追加一批字节。磁盘 IO 经 spawn_blocking(勿占 async worker——与 set_port_alias 同一
+/// 标准);经 try_clone 复制句柄写、BufWriter 留在表内(capture_end 才摘),同 id 并发写由
+/// 前端单飞保证。写后即 flush:进程退出最多丢当前未满批(~500ms),不依赖退出钩子。
+#[tauri::command]
+async fn capture_write(state: tauri::State<'_, CaptureFiles>, id: u64, data: Vec<u8>) -> Result<(), String> {
+    let file = {
+        let files = state.0.lock().unwrap();
+        files
+            .get(&id)
+            .ok_or_else(|| "记录会话不存在或已结束".to_string())?
+            .get_ref()
+            .try_clone()
+            .map_err(|e| format!("复制文件句柄失败: {e}"))?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut f = file;
+        f.write_all(&data).map_err(|e| format!("写入记录失败: {e}"))?;
+        f.flush().map_err(|e| format!("刷盘记录失败: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 结束会话:可选尾批数据 + flush + 摘句柄在同一次调用内完成(前端"关 tab/换文件"
+/// 收尾走这里,避免 write/end 两条 IPC 交错)。flush 失败返回 Err——磁盘满等场景
+/// 最后一批丢了用户应知情,由前端 toast。
+#[tauri::command]
+async fn capture_end(
+    state: tauri::State<'_, CaptureFiles>,
+    id: u64,
+    data: Option<Vec<u8>>,
+) -> Result<(), String> {
+    let mut files = state.0.lock().unwrap();
+    let mut w = files
+        .remove(&id)
+        .ok_or_else(|| "记录会话不存在或已结束".to_string())?;
+    if let Some(data) = data {
+        w.write_all(&data).map_err(|e| format!("写入记录失败: {e}"))?;
+    }
+    w.flush().map_err(|e| format!("收尾刷盘失败: {e}"))
+}
+
 #[tauri::command]
 async fn write_port(
     state: tauri::State<'_, AppState>,
@@ -826,6 +919,7 @@ fn run_gui() {
 
             app.manage(state);
             app.manage(supervisor);
+            app.manage(CaptureFiles::default()); // 终端记录会话(GUI 侧独立状态,非应用日志)
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -854,6 +948,9 @@ fn run_gui() {
             stop_script,
             stop_macro,
             save_json_file,
+            capture_begin,
+            capture_write,
+            capture_end,
             show_system_menu,
         ])
         .run(tauri::generate_context!())

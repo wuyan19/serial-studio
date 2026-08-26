@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   alignRemotesId,
+  defaultCaptureName,
   dissolveGroup,
   displayPortName,
   groupBy,
+  mergeChunks,
   paramDefault,
   parseParamsFromCode,
   parsePortId,
   portIdOf,
   prefillRunValues,
   renameGroup,
+  sanitizeFileName,
+  timestampForFileName,
   upsertNamed,
   wireToPid,
 } from "./lib";
@@ -245,5 +249,52 @@ describe("alignRemotesId(段名=实例 id 的前端对齐)", () => {
     const { list, renamed } = alignRemotesId(remotes, [{ id: "inst-b", online: true }]);
     expect(renamed.size).toBe(0);
     expect(list).toBe(remotes);
+  });
+});
+
+describe("sanitizeFileName / defaultCaptureName(终端记录文件名)", () => {
+  it("消毒:非法字符与控制符替换为 _,空串回落占位", () => {
+    expect(sanitizeFileName('COM<x>:"/\\|?*5')).toBe("COM_x________5");
+    expect(sanitizeFileName("a\u0000b")).toBe("a_b");
+    expect(sanitizeFileName("  ")).toBe("_");
+    expect(sanitizeFileName("/dev/ttyUSB0")).toBe("_dev_ttyUSB0");
+  });
+
+  it("时间戳格式 yyyyMMdd-HHmmss", () => {
+    expect(timestampForFileName(new Date(2026, 7, 26, 16, 38, 21))).toBe("20260826-163821");
+    // 个位数补零
+    expect(timestampForFileName(new Date(2026, 0, 5, 3, 4, 5))).toBe("20260105-030405");
+  });
+
+  it("本地口:`<ts>-<裸名>.log`", () => {
+    expect(defaultCaptureName("COM5")).toMatch(/^\d{8}-\d{6}-COM5\.log$/);
+  });
+
+  it("远程口:`<ts>-<设备昵称|uuid>_<串口名>.log`,昵称优先、非法字符消毒", () => {
+    const pid = portIdOf("inst-b", "COM5");
+    expect(defaultCaptureName(pid, "机器B")).toMatch(/^\d{8}-\d{6}-机器B_COM5\.log$/);
+    // 无昵称回退键首段(uuid)
+    expect(defaultCaptureName(pid)).toMatch(/^\d{8}-\d{6}-inst-b_COM5\.log$/);
+    // 昵称带路径分隔符等非法字符 → 消毒
+    expect(defaultCaptureName(pid, 'a/b<c>')).toMatch(/^[0-9]{8}-[0-9]{6}-a_b_c__COM5\.log$/);
+  });
+
+  it("多级级联键取首段(直连设备标识,非端口属主)——钉住行为", () => {
+    // A 视角的三级口:instA 是 A 对直连 hub 的段名;端口实际在 instC,但文件归属
+    // 按"从哪台设备采的"算 → 首段。devLabel 提供时同样优先。
+    const pid = "instA::instB::COM3";
+    expect(defaultCaptureName(pid)).toMatch(/^[0-9]{8}-[0-9]{6}-instA_COM3\.log$/);
+    expect(defaultCaptureName(pid, "hubB")).toMatch(/^[0-9]{8}-[0-9]{6}-hubB_COM3\.log$/);
+  });
+});
+
+describe("mergeChunks(记录攒批合并)", () => {
+  it("多块按序拼接", () => {
+    const out = mergeChunks([Uint8Array.from([1, 2]), Uint8Array.from([3]), Uint8Array.from([4, 5])]);
+    expect([...out]).toEqual([1, 2, 3, 4, 5]);
+  });
+  it("空数组与单块边界", () => {
+    expect(mergeChunks([]).length).toBe(0);
+    expect([...mergeChunks([Uint8Array.from([9])])]).toEqual([9]);
   });
 });

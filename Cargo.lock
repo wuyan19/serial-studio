@@ -4094,6 +4094,7 @@ dependencies = [
  "clap",
  "hex",
  "rfd",
+ "serde",
  "serde_json",
  "ss-core",
  "ss-server",

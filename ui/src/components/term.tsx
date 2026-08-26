@@ -32,6 +32,7 @@ export function TermView({
   onReady,
   disconnected,
   onReconnect,
+  recbar,
 }: {
   port: string;
   visible: boolean;
@@ -45,7 +46,12 @@ export function TermView({
   disconnected?: boolean;
   /** 单键 R 重连回调(TermView 在断开态拦截 R)。 */
   onReconnect?: () => void;
+  /** 底部记录条(local 形态才有;undefined = 不渲染)。 */
+  recbar?: TermRecBar;
 }) {
+  // 根 div = reparent 单元(DOM 在 term-pool 与 group 容器间搬移);内层才是 xterm open
+  // 容器——根改 flex column 后底部要给记录条留位,xterm 必须住在 flex:1 的内层里。
+  const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -58,14 +64,14 @@ export function TermView({
   // DOM reparent：把本根 div 挪到所属 group 的终端容器。targetContainer 变（跨 group 搬）→ 重挪。
   // 用 useLayoutEffect：在 paint 前挪，避免 term-pool 闪现；xterm 实例不重建，canvas 跟随根 div 移动。
   useLayoutEffect(() => {
-    const el = containerRef.current;
+    const el = rootRef.current;
     if (el && targetContainer && el.parentNode !== targetContainer) {
       targetContainer.appendChild(el);
     }
     return () => {
       // 卸载（或换 target 重 reparent）前把根 div 移回 term-pool：React 按 fiber 记忆的位置
       // (term-pool) removeChild，若此时 DOM 在 group 容器里会找不到节点 → 崩溃白屏。先归位再删。
-      const el2 = containerRef.current;
+      const el2 = rootRef.current;
       const pool = document.querySelector(".term-pool");
       if (el2 && pool && el2.parentNode !== pool) pool.appendChild(el2);
     };
@@ -229,7 +235,89 @@ export function TermView({
     return () => ro.disconnect();
   }, [visible]);
 
-  return <div ref={containerRef} className="termview-root" style={{ position: "absolute", inset: 0, display: visible ? "block" : "none" }} />;
+  return (
+    <div
+      ref={rootRef}
+      className="termview-root"
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: visible ? "flex" : "none",
+        flexDirection: "column",
+      }}
+    >
+      {/* xterm open 容器:占满根内剩余空间(记录条占底部);fit() 量测的是此层尺寸 */}
+      <div ref={containerRef} className="termview-term" style={{ flex: "1 1 auto", minHeight: 0 }} />
+      {recbar && <RecBar bar={recbar} />}
+    </div>
+  );
+}
+
+
+// ===== 终端记录落盘条 =====
+
+/** 记录条渲染模型 + 动作(App 组装;local 形态才有)。 */
+export interface TermRecBar {
+  state: "idle" | "recording" | "paused" | "error";
+  /** 已选文件完整路径(idle 为空串,输入框只读展示)。 */
+  path: string;
+  /** 默认建议文件名(idle 态 placeholder)。 */
+  defaultName: string;
+  error?: string;
+  /** 打开原生保存对话框选位置(选中即开始记录)。 */
+  onSelect: () => void;
+  /** 记录中 → 暂停;暂停/错误 → 继续(同一文件追加)。 */
+  onToggle: () => void;
+}
+
+const RECBAR_STATE_LABEL: Record<TermRecBar["state"], string> = {
+  idle: "未在记录",
+  recording: "记录中",
+  paused: "已暂停",
+  error: "记录出错",
+};
+
+function RecBar({ bar }: { bar: TermRecBar }) {
+  const active = bar.state !== "idle";
+  return (
+    <div className="recbar" data-state={bar.state}>
+      <span
+        className="recbar__dot"
+        title={bar.error ?? RECBAR_STATE_LABEL[bar.state]}
+        aria-label={RECBAR_STATE_LABEL[bar.state]}
+      />
+      <input
+        className="recbar__input"
+        value={active ? bar.path : ""}
+        placeholder={bar.defaultName}
+        readOnly
+        title={bar.error ?? (active ? bar.path : `建议文件名:${bar.defaultName}`)}
+        spellCheck={false}
+        aria-label="记录文件路径"
+      />
+      {bar.state === "error" && <span className="recbar__err">{bar.error}</span>}
+      <button
+        className="recbar__btn"
+        onClick={bar.onSelect}
+        title={
+          active
+            ? "更换记录文件(当前文件收尾保存)"
+            : "选择记录文件位置,开始实时写入收到的数据"
+        }
+      >
+        {active ? "更改…" : "开始记录…"}
+      </button>
+      {active && bar.state !== "error" && (
+        <button
+          className="recbar__btn recbar__btn--toggle"
+          onClick={bar.onToggle}
+          title={bar.state === "recording" ? "暂停记录(数据不再写入)" : "继续记录(追加到当前文件)"}
+        >
+          {bar.state === "recording" ? "⏸ 暂停" : "▶ 继续"}
+        </button>
+      )}
+    </div>
+  );
 }
 
 

@@ -98,6 +98,21 @@ export interface TermInstance {
   search: SearchAddon;
 }
 
+// ===== 终端记录落盘(capture:串口 RX 流写文件;桌面 local 形态,会话级不持久化) =====
+
+/** 单端口记录会话状态(终端底部条渲染模型)。id = 后端 CaptureFiles 句柄号,
+ *  idle(未选文件)时缺省。命名避开 log:与软件自身诊断日志(tracing)区分。 */
+export interface CaptureSession {
+  id?: number;
+  /** 已选文件完整路径(idle 时为空串)。 */
+  path: string;
+  /** 默认建议文件名(idle 态输入框 placeholder)。 */
+  defaultName: string;
+  state: "idle" | "recording" | "paused" | "error";
+  /** error 态的错误摘要(写盘失败等)。 */
+  error?: string;
+}
+
 export interface SerialConfig {
   baud_rate: number;
   data_bits: string;
