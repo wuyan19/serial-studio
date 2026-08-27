@@ -7,8 +7,10 @@
 //! 解析规则(与 SKILL.md / MCP usage guide 同源):
 //! 1. 完整键(含 `::`,首段为设备 id)→ 原样返回;
 //!    首段非 id 而是唯一匹配的设备昵称 → 重写为该设备 id(`test::COM5` → `uuidB::COM5`)。
-//!    后缀不动,由目标机的 manager 继续解析——`test::GPS` 在 B 上按 B 的端口别名解析,
-//!    级联 `test::uuidC::…` 逐层生效,无需特判。
+//!    末段为叶别名(后缀不含 `::`)且在该设备作用域内唯一命中 → 一并重写
+//!    (`test::GPS` / `uuidB::GPS` → `uuidB::COM9`)——远端口别名随列表透传,
+//!    本机索引与远端 ports.json 同源,本地解析与远端解析殊途同归。
+//!    多级后缀透传,由下一跳继续解析——`test::uuidC::…` 逐层生效,无需特判。
 //! 2. 裸名:本机端口别名优先(与"裸名=本机"语义一致),其次在线设备的远端端口别名
 //!    (唯一命中才解析)。多个命中 = 真歧义(平名输入信息不足),warn + 原样透传,
 //!    下游 NotOpen 兜底;MCP 入口经 [`AddressResolver::lookup_port`] 报出候选列表。
@@ -17,7 +19,7 @@
 //! (`RwLock<HashMap>`),由 meta_bus 通知驱动重建(set_alias / 设备列表 diff 都发
 //! meta_bus);设备昵称直接扫注册表(个位数条目,免缓存恒新鲜)。
 
-use ss_core::{normalize_port_key, compose_port_key, split_port_key, PORT_KEY_SEP};
+use ss_core::{compose_port_key, normalize_port_key, split_port_key, PORT_KEY_SEP};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -62,8 +64,9 @@ struct Inner {
 }
 
 /// 本地端口元数据读取器。
-pub(crate) type MetaLoader =
-    Arc<dyn Fn() -> std::collections::BTreeMap<String, crate::port_meta_store::PortMeta> + Send + Sync>;
+pub(crate) type MetaLoader = Arc<
+    dyn Fn() -> std::collections::BTreeMap<String, crate::port_meta_store::PortMeta> + Send + Sync,
+>;
 
 /// 本机真实端口名集合(精确 + 小写双形态;小写形态供 Windows 大小写不敏感匹配)。
 #[derive(Default, Clone)]
@@ -144,18 +147,45 @@ impl Inner {
     }
 
     /// 完整键的首段甄别:设备 id 原样;唯一昵称重写为 id;其余原样(下游报未注册)。
+    /// 首段落定后,末段叶别名(后缀不含 `::`)在该设备作用域内唯一命中则一并重写。
     fn resolve_device_scope(self: &Arc<Self>, key: &str) -> String {
         let (first, rest) = split_port_key(key);
-        if self.devices.is_registered(first) {
-            return key.to_string();
+        let dev = if self.devices.is_registered(first) {
+            first.to_string()
+        } else {
+            match self.devices.ids_by_nickname(first) {
+                ids if ids.len() == 1 => ids[0].clone(),
+                ids if ids.len() > 1 => {
+                    tracing::warn!("设备昵称「{first}」匹配多台设备 {ids:?},不擅自选择");
+                    return key.to_string();
+                }
+                _ => return key.to_string(),
+            }
+        };
+        // 叶别名解析只对不含 :: 的末段尝试;多级后缀透传给下一跳(其 manager 解析)
+        if !rest.contains(PORT_KEY_SEP) {
+            if let Some(resolved) = self.resolve_leaf_alias(&dev, rest) {
+                return resolved;
+            }
         }
-        let ids = self.devices.ids_by_nickname(first);
-        match ids.len() {
-            0 => key.to_string(),
-            1 => compose_port_key(&ids[0], rest),
+        compose_port_key(&dev, rest)
+    }
+
+    /// 设备作用域内的叶别名 → 完整键。候选取自别名索引(键首段 == 该设备),
+    /// 唯一命中才重写;设备内歧义/无命中返回 None(原样透传)。
+    fn resolve_leaf_alias(&self, dev_id: &str, leaf: &str) -> Option<String> {
+        let aliases = self.port_aliases.read().unwrap();
+        let mut cands: Vec<&String> = aliases
+            .get(leaf)?
+            .iter()
+            .filter(|k| split_port_key(k).0 == dev_id)
+            .collect();
+        match cands.len() {
+            1 => Some(cands.remove(0).clone()),
+            0 => None,
             _ => {
-                tracing::warn!("设备昵称「{first}」匹配多台设备 {ids:?},不擅自选择");
-                key.to_string()
+                tracing::warn!("端口别名「{leaf}」在设备 {dev_id} 内匹配多个端口,不擅自选择");
+                None
             }
         }
     }
@@ -325,21 +355,79 @@ mod tests {
     #[test]
     fn unknown_name_is_none() {
         let real = real_names_of(&[]);
-        assert_eq!(resolve_bare("COM7", &real, &HashMap::new()), AliasMatch::None);
+        assert_eq!(
+            resolve_bare("COM7", &real, &HashMap::new()),
+            AliasMatch::None
+        );
     }
 
     #[test]
     fn full_key_and_device_nickname_resolution() {
         let r = resolver_with_devices();
         // 完整键:首段是注册设备 id → 原样
-        assert_eq!(
-            r.inner.resolve_device_scope("uuid-b::COM5"),
-            "uuid-b::COM5"
-        );
+        assert_eq!(r.inner.resolve_device_scope("uuid-b::COM5"), "uuid-b::COM5");
         // 首段是唯一昵称 → 重写为设备 id
         assert_eq!(r.inner.resolve_device_scope("test::COM5"), "uuid-b::COM5");
         // 未知首段 → 原样透传(下游报未注册)
         assert_eq!(r.inner.resolve_device_scope("ghost::COM5"), "ghost::COM5");
+    }
+
+    /// 预置别名索引的解析器(watcher_started=true 防重建清空预置索引)。
+    /// 设备 uuid-b(昵称 test);GPS 的候选键列表由调用方给定。
+    fn scoped_resolver_with_alias(gps_candidates: Vec<String>) -> AddressResolver {
+        let (meta_tx, _) = broadcast::channel(16);
+        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
+        devices.update_registry(&[ss_core::RemoteDevice {
+            id: "uuid-b".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            nickname: Some("test".into()),
+        }]);
+        AddressResolver {
+            inner: Arc::new(Inner {
+                devices,
+                self_id: "inst-self".into(),
+                port_aliases: RwLock::new(HashMap::from([("GPS".to_string(), gps_candidates)])),
+                real_names: RwLock::new(RealNames::default()),
+                watcher_started: AtomicBool::new(true),
+                meta_bus: meta_tx,
+                meta_loader: Arc::new(|| std::collections::BTreeMap::new()),
+            }),
+        }
+    }
+
+    #[test]
+    fn device_scope_resolves_leaf_alias() {
+        let r = scoped_resolver_with_alias(vec!["uuid-b::COM9".to_string()]);
+        // 昵称 + 叶别名 → 设备 id + 真实端口名
+        assert_eq!(r.inner.resolve_device_scope("test::GPS"), "uuid-b::COM9");
+        // 设备 id + 叶别名同样解析(本地检查与远端解析口径一致)
+        assert_eq!(r.inner.resolve_device_scope("uuid-b::GPS"), "uuid-b::COM9");
+        // 末段是真实端口名 → 不在别名索引,原样(compose 回原键)
+        assert_eq!(r.inner.resolve_device_scope("test::COM9"), "uuid-b::COM9");
+    }
+
+    #[test]
+    fn device_scope_leaf_alias_ambiguous_passthrough() {
+        // 同设备两个端口共用别名 GPS → 叶别名歧义不重写;首段昵称照常重写
+        let r = scoped_resolver_with_alias(vec![
+            "uuid-b::COM9".to_string(),
+            "uuid-b::COM7".to_string(),
+        ]);
+        assert_eq!(r.inner.resolve_device_scope("test::GPS"), "uuid-b::GPS");
+        // 别名属于别的设备(首段过滤后无候选)→ 叶别名透传
+        let r2 = scoped_resolver_with_alias(vec!["uuid-c::COM9".to_string()]);
+        assert_eq!(r2.inner.resolve_device_scope("uuid-b::GPS"), "uuid-b::GPS");
+    }
+
+    #[test]
+    fn device_scope_multihop_suffix_untouched() {
+        // 多级后缀(含 ::)不在本级解析叶别名,透传给下一跳
+        let r = scoped_resolver_with_alias(vec!["uuid-b::COM9".to_string()]);
+        assert_eq!(
+            r.inner.resolve_device_scope("test::uuid-c::GPS"),
+            "uuid-b::uuid-c::GPS"
+        );
     }
 
     #[test]
