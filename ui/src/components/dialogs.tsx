@@ -471,33 +471,34 @@ export function SettingsPanel({
 
 // ===== 快捷键改键对话框 =====
 
-/** 列表展示顺序（global 在前、terminal 在后，常用动作靠上）。
+/** 分组卡片展示(两列手工配平:左列 = 前两组,右列 = 后三组)。
  *  注意:新增 ActionId 时除了同步 types.ts 的 ActionId 联合与 shortcuts.ts 的
- *  DEFAULT_BINDINGS/ACTION_LABELS,也要加到这里——改键对话框只渲染此列表,
- *  漏加则该动作在改键页不可见(快捷键仍生效,只是无法在此改键)。 */
-const SHORTCUT_ORDER: ActionId[] = [
-  "search.open",
-  "macro.palette",
-  "script.palette",
-  "port.palette",
-  "theme.toggle",
-  "port.refresh",
-  "port.close-active",
-  "tab.next",
-  "tab.prev",
-  "activity.toggle-ports",
-  "activity.toggle-macros",
-  "activity.toggle-scripts",
-  "settings.open",
-  "about.open",
-  "remote.open",
-  "zoom.in",
-  "zoom.out",
-  "zoom.reset",
-  "port.reconnect",
+ *  DEFAULT_BINDINGS/ACTION_LABELS,也要加进对应组——改键对话框只渲染这些组,
+ *  漏加则该动作在改键页不可见(快捷键仍生效,只是无法在此改键)。
+ *  tab.select 特殊:一族固定键(Ctrl+Alt+1..9),落在「标签页」组渲染为说明行。 */
+const SHORTCUT_GROUPS: { title: string; items: ActionId[] }[] = [
+  {
+    title: "面板与搜索",
+    items: [
+      "search.open",
+      "macro.palette",
+      "script.palette",
+      "port.palette",
+      "activity.toggle-ports",
+      "activity.toggle-macros",
+      "activity.toggle-scripts",
+    ],
+  },
+  {
+    title: "端口与设备",
+    items: ["port.refresh", "port.close-active", "port.reconnect", "remote.open"],
+  },
+  { title: "标签页", items: ["tab.next", "tab.prev", "tab.select"] },
+  { title: "显示与外观", items: ["zoom.in", "zoom.out", "zoom.reset", "theme.toggle"] },
+  { title: "应用", items: ["settings.open", "about.open"] },
 ];
 
-/** 快捷键改键对话框：逐行展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。
+/** 快捷键改键对话框：分 5 组卡片两列展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。
  *  模态打开时 App 的全局 listener 已被抑制，这里的录制 listener 独占 keydown。
  *  录制中：读下一组非纯修饰符 keydown → setBinding 校验；Esc 取消录制。
  *  非录制：Esc 关闭对话框。 */
@@ -506,7 +507,15 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const [recording, setRecording] = useState<ActionId | null>(null);
   const [error, setError] = useState("");
   // Web 页面端(!isTauri)只隐藏 remote.open(已处远程,再开远程无意义);其余均显示
-  const order = isTauri() ? SHORTCUT_ORDER : SHORTCUT_ORDER.filter((a) => a !== "remote.open");
+  const groups = SHORTCUT_GROUPS.map((g) => ({
+    ...g,
+    items: isTauri() ? g.items : g.items.filter((a) => a !== "remote.open"),
+  }));
+  // 两列配平:左列(7+4 行)≈ 右列(3+4+2 行 + 多一个卡片头)
+  const columns: { title: string; items: ActionId[] }[][] = [
+    [groups[0], groups[1]],
+    [groups[2], groups[3], groups[4]],
+  ];
 
   useEffect(() => subscribeBindings(setMap), []);
 
@@ -548,45 +557,58 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
         </h3>
 
         <div className="shortcut-list">
-          {order.map((action) => {
-            const b = map[action];
-            const isRec = recording === action;
-            const isDefault = b.combo === DEFAULT_BINDINGS[action].combo;
-            return (
-              <div className="shortcut-row" key={action}>
-                <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
-                <button
-                  type="button"
-                  className={"kbd" + (isRec ? " kbd--rec" : "")}
-                  onClick={() => {
-                    setRecording(action);
-                    setError("");
-                  }}
-                >
-                  {isRec ? "按下新组合…" : formatCombo(b.combo)}
-                </button>
-                <button
-                  type="button"
-                  className="mini-btn"
-                  title="重置默认"
-                  aria-label={`重置「${ACTION_LABELS[action]}」为默认键`}
-                  disabled={isDefault}
-                  onClick={() => {
-                    resetBinding(action);
-                    setError("");
-                  }}
-                >
-                  ↺
-                </button>
-              </div>
-            );
-          })}
-          {/* tab.select 是一族键（Ctrl+Alt+1..9，0→末个），不可改键——静态说明行 */}
-          <div className="shortcut-row shortcut-row--fixed">
-            <span className="shortcut-row__label">{ACTION_LABELS["tab.select"]}</span>
-            <span className="kbd kbd--fixed">{formatCombo("mod+alt+1")}…9</span>
-            <span className="shortcut-row__hint">固定</span>
-          </div>
+          {columns.map((col, ci) => (
+            <div className="shortcut-col" key={ci}>
+              {col.map((g) => (
+                <section className="shortcut-group" key={g.title}>
+                  <h4 className="shortcut-group__title">{g.title}</h4>
+                  {g.items.map((action) => {
+                    if (action === "tab.select") {
+                      // tab.select 是一族键(Ctrl+Alt+1..9,0→末个),不可改键——静态说明行
+                      return (
+                        <div className="shortcut-row shortcut-row--fixed" key={action}>
+                          <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
+                          <span className="kbd kbd--fixed">{formatCombo("mod+alt+1")}…9</span>
+                          <span className="shortcut-row__hint">固定</span>
+                        </div>
+                      );
+                    }
+                    const b = map[action];
+                    const isRec = recording === action;
+                    const isDefault = b.combo === DEFAULT_BINDINGS[action].combo;
+                    return (
+                      <div className="shortcut-row" key={action}>
+                        <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
+                        <button
+                          type="button"
+                          className={"kbd" + (isRec ? " kbd--rec" : "")}
+                          onClick={() => {
+                            setRecording(action);
+                            setError("");
+                          }}
+                        >
+                          {isRec ? "按下新组合…" : formatCombo(b.combo)}
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          title="重置默认"
+                          aria-label={`重置「${ACTION_LABELS[action]}」为默认键`}
+                          disabled={isDefault}
+                          onClick={() => {
+                            resetBinding(action);
+                            setError("");
+                          }}
+                        >
+                          ↺
+                        </button>
+                      </div>
+                    );
+                  })}
+                </section>
+              ))}
+            </div>
+          ))}
         </div>
 
         {error && <p className="editor-error">{error}</p>}

@@ -1,5 +1,5 @@
 /** 组件目录 barrel：App 只从 "./components" 导入，不感知内部分文件。 */
-export { ActivityIcon, ConfigRow, GroupHead, InlineAliasInput, PortLabel, useDialogKeys, useEscClose } from "./primitives";
+export { ActivityIcon, CompositePortLabel, ConfigRow, GroupHead, InlineAliasInput, PortLabel, useDialogKeys, useEscClose } from "./primitives";
 export { ContextMenu, type ContextMenuItem } from "./context-menu";
 export { GroupView, SearchBar, TermView } from "./term";
 export {

@@ -132,6 +132,30 @@ export function PortLabel({ name, alias }: { name: string; alias?: string }) {
   );
 }
 
+/** 复合 pid 的友好显示:设备段(远程昵称优先,本地口省略)+ 端口段(PortLabel,别名优先)。
+ *  通道条 / 宏与脚本面板标题共用——三处同源,不再各拼一份。设备段是上下文而非
+ *  主体,降权显示(.port-label__dev)。 */
+export function CompositePortLabel({
+  dev,
+  portName,
+  alias,
+}: {
+  dev?: { label: string; title?: string };
+  portName: string;
+  alias?: string;
+}) {
+  return (
+    <>
+      {dev && (
+        <span className="port-label__dev" title={dev.title}>
+          {dev.label}::
+        </span>
+      )}
+      <PortLabel name={portName} alias={alias} />
+    </>
+  );
+}
+
 
 // ===== 别名 inline 编辑 =====
 
@@ -207,10 +231,11 @@ export function InlineAliasInput({
   );
 }
 
-/** 分组标题行：[前置元素] 折叠按钮 + 组名(可 inline 重命名) + 计数 + [操作按钮区] + ⋯ 菜单(重命名/解散)。
+/** 分组标题行：[前置元素] 折叠按钮 + 组名(可 inline 重命名) + 计数 + 右键菜单(重命名/解散/附加项)。
  *  三种侧栏分组共用（宏/脚本组、串口设备卡——经 leading/extraActions/renameLabel 插槽差异化），
  *  封装组级交互；成员列表由调用方各自渲染。
- *  head 为 div（内含 ⋯ button 与 inline input，避免 button 嵌 button）。
+ *  head 为 div（内含 inline input，不能是 button）。无 ⋯ 按钮——操作收进右键菜单,
+ *  与终端区右键同交互模式;键盘等价入口 = Menu 键 / Shift+F10。
  *  局部自管理 menuOpen/renaming 两个 UI 状态，不上升调用方。 */
 
 export function GroupHead({
@@ -234,13 +259,13 @@ export function GroupHead({
   onToggle: () => void;
   onRename?: (newName: string) => void;
   onDissolve?: () => void;
-  /** 隐藏 ⋯ 菜单（「未分组」是聚合组——成员 group 字段为 undefined，重命名/解散无意义） */
+  /** 隐藏右键菜单（「未分组」是聚合组——成员 group 字段为 undefined，重命名/解散无意义） */
   menuHidden?: boolean;
   /** 组名前置元素（串口设备卡的在线状态圆点）。 */
   leading?: React.ReactNode;
-  /** ⋯ 菜单附加项（渲染在重命名之后、解散之前；串口设备卡的断开/重连/删除）。 */
+  /** 右键菜单附加项（渲染在重命名之后、解散之前；串口设备卡的断开/重连/删除）。 */
   extraMenuItems?: { label: string; danger?: boolean; onSelect: () => void }[];
-  /** ⋯ 菜单里重命名项文案（串口设备卡传「重命名设备」）。 */
+  /** 右键菜单里重命名项文案（串口设备卡传「重命名设备」）。 */
   renameLabel?: string;
   /** 重命名输入框初值（默认 = 显示名 name。设备卡传真实昵称——无昵称时显示名是
    *  host:port 兜底,若预填它,不改直接回车会把地址误存成昵称）。 */
@@ -252,9 +277,9 @@ export function GroupHead({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  /** 右键打开时的鼠标锚点(相对 head 的坐标);null = ⋯ 点击的默认锚(组头右下)。 */
+  /** 菜单锚点(相对 head 的坐标):右键 = 鼠标处;null = 键盘触发(Menu/Shift+F10)的默认锚(组头右下)。 */
   const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null);
-  // ⋯ 可用性:显式隐藏(未分组/本地卡)或无任何动作时不渲染、右键也不弹
+  // 菜单可用性:显式隐藏(未分组/本地卡)或无任何动作时右键不弹
   const menuAvailable =
     !menuHidden && Boolean(onRename || onDissolve || (extraMenuItems?.length ?? 0));
   const headRef = useRef<HTMLDivElement>(null);
@@ -278,8 +303,22 @@ export function GroupHead({
       className="macro-group__head"
       ref={headRef}
       title={title}
+      tabIndex={0}
       onClick={renaming ? undefined : onToggle}
-      // 右键 = 点开 ⋯ 菜单(同一浮层、同锚定位置);重命名态放行原生右键(输入框剪切/粘贴)
+      // 键盘等价右键:Menu 键 / Shift+F10 弹菜单(⋯ 按钮移除后键盘唯一入口);
+      // Esc 关菜单。重命名态全放行(输入框自己的按键语义)
+      onKeyDown={(e) => {
+        if (renaming) return;
+        if (menuAvailable && (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))) {
+          e.preventDefault();
+          setMenuPos(null); // 键盘触发 = 默认锚(组头右下)
+          setMenuOpen(true);
+        } else if (e.key === "Escape" && menuOpen) {
+          setMenuOpen(false);
+          setMenuPos(null);
+        }
+      }}
+      // 右键 = 打开组操作菜单(重命名/解散/附加项);重命名态放行原生右键(输入框剪切/粘贴)
       onContextMenu={(e) => {
         if (renaming || !menuAvailable) return;
         e.preventDefault();
@@ -310,20 +349,6 @@ export function GroupHead({
         <span className="macro-group__name">{name}</span>
       )}
       <span className="macro-group__count">{count}</span>
-      {!renaming && menuAvailable && (
-        <button
-          className="macro-group__menu"
-          title="分组操作"
-          aria-label={`分组操作（${name}）`}
-          onClick={(e) => {
-            e.stopPropagation();
-            setMenuPos(null); // ⋯ 触发 = 默认锚(组头右下)
-            setMenuOpen((v) => !v);
-          }}
-        >
-          ⋯
-        </button>
-      )}
       {menuOpen && (
         <div
           className="group-menu"

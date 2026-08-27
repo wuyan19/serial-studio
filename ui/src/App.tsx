@@ -65,7 +65,7 @@ import {
   ScriptPalette,
   PortPalette,
   newStep,
-  PortLabel,
+  CompositePortLabel,
   RemoteDialog,
   RunCards,
   ScriptEditor,
@@ -1496,12 +1496,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
-  // 通道条端口显示的设备段:pid 首段(devId)优先换设备昵称,查无昵称/非本表设备
-  // (web 形态级联中段)退回裸 id;本地口("local")无前缀。悬停补 id+地址——与侧栏
-  // 设备组标签的 tooltip 同一套信息。端口段由 PortLabel 承担(串口别名优先)。
+  // 活动端口拆段:devId 优先换设备昵称,查无昵称/非本表设备(web 形态级联中段)
+  // 退回裸 id;本地口("local")无前缀。悬停补 id+地址——与侧栏设备组标签的
+  // tooltip 同一套信息。
   const { devId: activeDevId, name: activePortName } = parsePortId(activePort);
   const activeDev =
     activeDevId === "local" ? undefined : remotes.find((r) => r.id === activeDevId);
+  /** 活动端口友好显示(通道条 / 宏与脚本面板标题共用):设备段=远程昵称优先
+   *  (兜底 uuid,悬停补 id · 地址),本地口无前缀;端口段走 CompositePortLabel
+   *  的 PortLabel(串口别名优先,别名(真名))。 */
+  const activePortDev = activeDev
+    ? { label: activeDev.nickname?.trim() || activeDev.id, title: `${activeDev.id} · ${activeDev.host}:${activeDev.port}` }
+    : undefined;
+  const activePortLabel = activePort ? (
+    <CompositePortLabel dev={activePortDev} portName={activePortName} alias={aliasOf(activePort)} />
+  ) : null;
 
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
@@ -1726,7 +1735,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
           {activity === "macros" && (
             <NamedLibraryPanel
-              title={<>MACROS{activePort && <span className="accent">→ {activePort}</span>}</>}
+              title={<>MACROS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={macros}
               hasItems={Object.keys(macros).length > 0}
               collapsed={macroCollapsed}
@@ -1770,7 +1779,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
           {activity === "scripts" && (
             <NamedLibraryPanel
-              title={<>SCRIPTS{activePort && <span className="accent">→ {activePort}</span>}</>}
+              title={<>SCRIPTS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={scripts}
               hasItems={Object.keys(scripts).length > 0}
               collapsed={scriptCollapsed}
@@ -1968,15 +1977,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         {activePort && activeConfig && (
           <div className="channel-strip">
             <span className="channel-strip__port">
-              {activeDev && (
-                <span
-                  className="channel-strip__dev"
-                  title={`${activeDev.id} · ${activeDev.host}:${activeDev.port}`}
-                >
-                  {activeDev.nickname?.trim() || activeDev.id}::
-                </span>
-              )}
-              <PortLabel name={activePortName} alias={aliasOf(activePort)} />
+              {activePortLabel}
             </span>
             <span className="channel-strip__sep">·</span>
             <span className="channel-strip__config">{formatConfig(activeConfig)}</span>

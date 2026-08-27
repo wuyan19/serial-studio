@@ -397,26 +397,7 @@ button {
   color: var(--ink-faint);
   font-weight: 400;
 }
-/* 组头 ⋯ 菜单按钮（默认低调，组头 hover 时显现；重命名态由组件隐藏） */
-.macro-group__menu {
-  flex-shrink: 0;
-  padding: 0 4px;
-  background: transparent;
-  border: none;
-  color: var(--ink-faint);
-  font-family: inherit;
-  font-size: var(--fs-md);
-  line-height: 1;
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  opacity: 0;
-  transition: opacity var(--t-fast) var(--ease);
-}
-.macro-group__head:hover .macro-group__menu,
-.macro-group__menu:focus-visible {
-  opacity: 1;
-}
-/* 组操作浮层（绝对定位锚定组头右上） */
+/* 组操作浮层（右键组头弹出,绝对定位锚定鼠标位置） */
 .group-menu {
   position: absolute;
   top: calc(100% + 2px);
@@ -456,7 +437,7 @@ button {
 }
 /* 串口分组卡标题：本地卡 / 远程设备卡。组头复用宏/脚本的 .macro-group__head
    （GroupHead 组件统一三面板：整行点击折叠、hover 背景、inline 重命名），
-   仅在线点是串口侧自有元素（断开/重连/删除已收进 ⋯ 菜单）。 */
+   仅在线点是串口侧自有元素（断开/重连/删除已收进右键菜单）。 */
 /* 设备卡在线点（GroupHead leading 插槽；同 .sidebar__conn .dot 的语义色） */
 .macro-group__head .dot {
   width: 6px;
@@ -764,6 +745,12 @@ button {
 .port-label__raw {
   color: var(--ink-faint);
   margin-left: 4px;
+}
+/* CompositePortLabel 的设备段(昵称::):上下文而非主体,降权显示。
+ * 通道条 / 宏与脚本面板标题共用。 */
+.port-label__dev {
+  color: var(--ink-dim);
+  font-weight: 400;
 }
 .port-item__holders {
   font-size: var(--fs-xs);
@@ -1246,11 +1233,6 @@ button {
   color: var(--ink);
   font-weight: 600;
   letter-spacing: 0.03em;
-}
-/* 设备段(昵称::)是上下文而非主体,降权显示——端口名才是主信息 */
-.channel-strip__dev {
-  color: var(--ink-dim);
-  font-weight: 400;
 }
 .channel-strip__sep {
   color: var(--ink-faint);
@@ -2103,8 +2085,10 @@ button {
   color: var(--ink);
 }
 .macro-editor__add { align-self: flex-start; }
-/* Shortcuts 对话框：标题/按钮固定，快捷键列表超高滚动（同 macro-editor 模式） */
+/* Shortcuts 对话框：加宽承载两列分组卡片；标题/按钮固定，卡片超高滚动（同 macro-editor 模式） */
 .dialog--shortcuts {
+  width: 720px; /* 覆盖 dialog--med 的 560(两列卡片各 ~330) */
+  max-width: 92vw;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2165,10 +2149,33 @@ button {
    Shortcuts — rebind dialog(设置页入口按钮已移除,入口在管理菜单)
    ============================================================ */
 .shortcut-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: start;
+  margin: 4px 0 8px;
+}
+.shortcut-col {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin: 4px 0 8px;
+  gap: 12px;
+  min-width: 0; /* 允许行内 label 收缩截断 */
+}
+/* 分组卡片：surface-2 面浮起一档，hairline-soft 弱边界——分组是导航辅助非主体 */
+.shortcut-group {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-md);
+  padding: 10px 12px 6px;
+}
+.shortcut-group__title {
+  margin: 2px 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
 .shortcut-row {
   display: flex;
@@ -2178,6 +2185,10 @@ button {
 }
 .shortcut-row__label {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--ink);
   font-size: var(--fs-base);
 }
