@@ -105,12 +105,17 @@ jobs:
   # 1) updaterJsonPreferNsisLazyDownload 使 url 指向 api.github.com 资产端点——
   #    匿名限流(60 次/h/IP)返回 403 Forbidden,且国内直连 api.github.com 不通;
   # 2) 即便是 github.com/.../releases/download 直链,国内直连同样不稳。
-  # 本 job 在全部矩阵完成、latest.json 汇齐后,把 url 统一改写为 ghproxy 镜像再覆盖上传。
-  mirror-updater-urls:
+  # 双清单策略:endpoints 只作用于拉清单,安装包下载地址是清单里的 url 字段(单值、无多址回退),
+  # 故让「下载路由随清单走」——
+  #   latest.json        恒为 github 直连 url(endpoints[0] 拉到它的客户端,下载也直连)
+  #   latest-mirror.json ghproxy 前缀 url(endpoints[1] 兜底拉到它的客户端,下载也走镜像)
+  # 镜像故障只影响必须走镜像的用户;能直连/走代理的用户不再被第三方镜像绑架
+  # (2026-08 ghproxy.net 证书过期曾致全体下载中断——单清单统一镜像改写的教训)。
+  updater-manifests:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Rewrite latest.json download URLs to ghproxy mirror
+      - name: Emit direct + mirror updater manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -119,7 +124,7 @@ jobs:
           # 本 job 无 checkout,gh release 必须显式 -R 指仓库(否则回退 git 探测报 not a git repository)
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern latest.json --output latest.json
           python3 - <<'PY'
-          import json, subprocess, os
+          import json, subprocess, os, copy
           tag, repo = os.environ["TAG"], os.environ["GITHUB_REPOSITORY"]
           d = json.load(open("latest.json"))
           # asset id → 文件名(api 端点 url 无文件名,经 release 资产清单反查)。
@@ -130,7 +135,7 @@ jobs:
                f'.[] | select(.tag_name=="{tag}") | .assets[] | "\\(.id) \\(.name)"']
           ).decode()
           assets = dict(line.split(" ", 1) for line in out.splitlines())
-          prefix = "https://ghproxy.net/https://github.com/"
+          prefix = "https://ghproxy.net/"
           for k, v in d["platforms"].items():
               u = v["url"]
               if "/assets/" in u:  # api.github.com 资产端点 → 该 tag 的 releases/download 直链
@@ -138,9 +143,14 @@ jobs:
                   if aid not in assets:
                       raise SystemExit(f"asset id {aid} 在 release 中无对应文件")
                   u = f"https://github.com/{repo}/releases/download/{tag}/{assets[aid]}"
-              if not u.startswith("https://ghproxy.net/"):
-                  v["url"] = "https://ghproxy.net/" + u
+              v["url"] = u  # latest.json 恒为 github 直连(重复执行幂等)
+          m = copy.deepcopy(d)
+          for k, v in m["platforms"].items():
+              if not v["url"].startswith(prefix):
+                  v["url"] = prefix + v["url"]
           json.dump(d, open("latest.json", "w"), indent=2, ensure_ascii=False)
-          print("改写完成:", {k: v["url"].rsplit('/', 1)[-1] for k, v in d["platforms"].items()})
+          json.dump(m, open("latest-mirror.json", "w"), indent=2, ensure_ascii=False)
+          print("latest.json(直连):", {k: v["url"].rsplit('/', 1)[-1] for k, v in d["platforms"].items()})
+          print("latest-mirror.json(镜像):", {k: v["url"].rsplit('/', 1)[-1] for k, v in m["platforms"].items()})
           PY
-          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" latest.json --clobber
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" latest.json latest-mirror.json --clobber

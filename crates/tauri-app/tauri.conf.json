@@ -41,7 +41,7 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE0RDE5RTNCMUI5RTM2RjcKUldUM05wNGJPNTdSRk05cXMyZFZHWGpacUk2aUVUeXI3a0hlME1nVkQ4K2paclVEazhZVU52d1gK",
       "endpoints": [
         "https://github.com/wuyan19/serial-studio/releases/latest/download/latest.json",
-        "https://ghproxy.net/https://github.com/wuyan19/serial-studio/releases/latest/download/latest.json"
+        "https://ghproxy.net/https://github.com/wuyan19/serial-studio/releases/latest/download/latest-mirror.json"
       ]
     }
   }

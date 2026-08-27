@@ -132,13 +132,14 @@ tauri-plugin-opener = "2"      # 打开 Release 页（macOS / 更新失败回退
     "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6...(你的公钥 base64)",
     "endpoints": [
       "https://github.com/wuyan19/serial-studio/releases/latest/download/latest.json",
-      "https://ghproxy.net/https://github.com/wuyan19/serial-studio/releases/latest/download/latest.json"
+      "https://ghproxy.net/https://github.com/wuyan19/serial-studio/releases/latest/download/latest-mirror.json"
     ]
   }
 }
 ```
 
-> 第二个 endpoint 是 GitHub 的国内镜像回退（LLM-Switch 同款 `ghproxy.net`）。updater 按数组顺序尝试，主 URL 不可达才用镜像。是否保留按目标用户网络决定，但**至少保证一个 endpoint 对用户可达**。
+> **双清单策略**：endpoints 只作用于「拉清单」，安装包下载地址是清单里每平台唯一的 `url` 字段（无多址回退）——所以让**下载路由随清单走**：`latest.json` 恒为 github 直连 url（endpoints[0] 拉到它的客户端，下载也直连）；`latest-mirror.json` 是 ghproxy 前缀 url 版（endpoints[1] 兜底拉到它的客户端，下载也走镜像）。updater 按数组顺序尝试 endpoint，主站不可达才回落镜像。两份清单由 release.yml 的 `updater-manifests` job 发版时生成上传。镜像故障只影响必须走镜像的用户，能直连/走代理的用户不受牵连（2026-08 ghproxy.net 证书过期曾致全体下载中断——当时单清单统一改写镜像 url 的教训）。
+> ⚠️ 注意 endpoints 是**烧进已发布客户端**的：老版本客户端的两条 endpoint 都读 `latest.json` 这一个文件，改清单内容只能惠及其中一个人群。
 
 ### 4.3 权限 — `crates/tauri-app/capabilities/default.json`
 
@@ -494,7 +495,7 @@ updater 的 endpoint 是 `releases/latest/download/latest.json`，而 `releases/
 1. **Linux deb 不支持自动更新** → 必须改 AppImage（§6.2）。
 2. **`createUpdaterArtifacts: true` 必加**（Tauri 2 与 Tauri 1 的差异）→ 不加则无 `.sig`，校验必败。
 3. **仅桌面本地模式启用更新 UI**（§5.2）→ Web/远程窗口不渲染，避免误导。
-4. **endpoint 可达性** → GitHub 在国内不稳定，配 `ghproxy.net` 镜像兜底；至少保证一个对用户可达。
+4. **endpoint 可达性与下载路由** → GitHub 在国内不稳定，配 `ghproxy.net` 镜像兜底。下载无多址回退，用**双清单**（`latest.json` 直连 + `latest-mirror.json` 镜像前缀，endpoints[1] 指向后者）让下载地址随清单走——镜像故障只影响必须走镜像的用户，不绑架能直连/走代理的用户（§4.2）。
 5. **版本号四处 + tag 必须齐平**（§7.1）→ 不齐会导致检查更新误判。
 6. **headless 不注册 updater 插件**（§4.4）→ 后台服务无需自更新入口。
 7. **私钥不入库、妥善备份** → 丢失则无法再向老版本推送可校验更新。
