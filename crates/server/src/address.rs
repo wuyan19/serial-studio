@@ -54,6 +54,11 @@ struct Inner {
     /// **真实名恒优先于别名**:远端设备可能把它的口起了与本机口同名的别名,
     /// 若别名无条件命中,同一输入的路由目标会随设备在线状态漂移(可写错设备)。
     real_names: RwLock<RealNames>,
+    /// 各远端设备的真实叶名(小写集)。设备作用域叶别名解析的同则防护:
+    /// 远端 validate_alias 只在写入时点校验别名不与真实口同名,之后插上的
+    /// 口不受其约束——解析侧以「命中该设备真实叶名即透传」兜底,别名永远
+    /// 遮蔽不了远端真实口。
+    device_real_names: RwLock<HashMap<String, std::collections::HashSet<String>>>,
     /// watcher 是否已启动(惰性:首次 resolver 调用时才需要 runtime)。
     watcher_started: AtomicBool,
     /// 重建触发源:set_alias / 设备 Ports diff / 设备注册表变更都发此广播。
@@ -90,6 +95,7 @@ impl AddressResolver {
                 self_id,
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),
+                device_real_names: RwLock::new(HashMap::new()),
                 watcher_started: AtomicBool::new(false),
                 meta_bus,
                 meta_loader: Arc::new(crate::port_meta_store::load),
@@ -173,7 +179,20 @@ impl Inner {
 
     /// 设备作用域内的叶别名 → 完整键。候选取自别名索引(键首段 == 该设备),
     /// 唯一命中才重写;设备内歧义/无命中返回 None(原样透传)。
+    /// **真实名恒优先**:leaf 命中该设备的真实叶名(小写,Windows 口径与
+    /// resolve_bare 一致)时透传——远端 validate_alias 是写入时点快照,
+    /// 之后新插的口不受其约束,别名遮蔽真实口在这里兜底。
     fn resolve_leaf_alias(&self, dev_id: &str, leaf: &str) -> Option<String> {
+        if self
+            .device_real_names
+            .read()
+            .unwrap()
+            .get(dev_id)
+            .map(|s| s.contains(&leaf.to_lowercase()))
+            .unwrap_or(false)
+        {
+            return None;
+        }
         let aliases = self.port_aliases.read().unwrap();
         let mut cands: Vec<&String> = aliases
             .get(leaf)?
@@ -204,6 +223,8 @@ impl Inner {
                 map.entry(a).or_default().push(port); // 本机键 = 裸名(store 即裸名键)
             }
         }
+        // 各设备真实叶名(小写)——设备作用域叶别名解析的「真实名恒优先」判据
+        let mut device_real: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (dev_id, views) in self.devices.remote_buckets() {
             for pv in views {
                 // 与 DeviceClient 入站归一同一规则;此处幂等兜底。
@@ -211,6 +232,13 @@ impl Inner {
                 // 的级联口裸名别名解析不到,行为分裂
                 let wire = normalize_port_key(&pv.info.name);
                 if let Some(key) = crate::passthrough_port_key(&dev_id, &wire, &self.self_id) {
+                    // 真实叶名 = 复合键末段(多级级联即最末跳的口名)
+                    let leaf = key
+                        .rsplit(PORT_KEY_SEP)
+                        .next()
+                        .unwrap_or(&key)
+                        .to_lowercase();
+                    device_real.entry(dev_id.clone()).or_default().insert(leaf);
                     if let Some(a) = pv.alias {
                         map.entry(a).or_default().push(key);
                     }
@@ -219,6 +247,7 @@ impl Inner {
         }
         *self.real_names.write().unwrap() = real;
         *self.port_aliases.write().unwrap() = map;
+        *self.device_real_names.write().unwrap() = device_real;
     }
 
     /// 惰性启动:**先订阅后重建**——订阅与重建之间发生的变更必然触发循环内再重建,
@@ -389,11 +418,52 @@ mod tests {
                 self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::from([("GPS".to_string(), gps_candidates)])),
                 real_names: RwLock::new(RealNames::default()),
+                device_real_names: RwLock::new(HashMap::from([(
+                    "uuid-b".to_string(),
+                    std::collections::HashSet::from(["com9".to_string()]),
+                )])),
                 watcher_started: AtomicBool::new(true),
                 meta_bus: meta_tx,
-                meta_loader: Arc::new(|| std::collections::BTreeMap::new()),
+                meta_loader: Arc::new(std::collections::BTreeMap::new),
             }),
         }
+    }
+
+    /// 真实名遮蔽防护:别名与该设备真实叶名同名(COM9 既是 COM7 的别名、
+    /// 又是设备上后来插入的真实口)时,真实名输入透传,不被别名重写。
+    #[test]
+    fn device_scope_real_name_beats_shadowing_alias() {
+        // 别名 COM9 → uuid-b::COM7;设备真实叶名含 com9(rebuild 测试里
+        // scoped_resolver_with_alias 预置了 com9)
+        let (meta_tx, _) = broadcast::channel(16);
+        let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
+        devices.update_registry(&[ss_core::RemoteDevice {
+            id: "uuid-b".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            nickname: Some("test".into()),
+        }]);
+        let r = AddressResolver {
+            inner: Arc::new(Inner {
+                devices,
+                self_id: "inst-self".into(),
+                port_aliases: RwLock::new(HashMap::from([(
+                    "COM9".to_string(),
+                    vec!["uuid-b::COM7".to_string()],
+                )])),
+                real_names: RwLock::new(RealNames::default()),
+                device_real_names: RwLock::new(HashMap::from([(
+                    "uuid-b".to_string(),
+                    std::collections::HashSet::from(["com9".to_string()]),
+                )])),
+                watcher_started: AtomicBool::new(true),
+                meta_bus: meta_tx,
+                meta_loader: Arc::new(std::collections::BTreeMap::new),
+            }),
+        };
+        // 真实名输入(大小写不敏感) → 透传,不重写到 COM7
+        assert_eq!(r.inner.resolve_device_scope("uuid-b::COM9"), "uuid-b::COM9");
+        assert_eq!(r.inner.resolve_device_scope("test::com9"), "uuid-b::com9");
     }
 
     #[test]
@@ -403,7 +473,7 @@ mod tests {
         assert_eq!(r.inner.resolve_device_scope("test::GPS"), "uuid-b::COM9");
         // 设备 id + 叶别名同样解析(本地检查与远端解析口径一致)
         assert_eq!(r.inner.resolve_device_scope("uuid-b::GPS"), "uuid-b::COM9");
-        // 末段是真实端口名 → 不在别名索引,原样(compose 回原键)
+        // 末段是真实端口名(com9 在设备真实叶名集)→ 真实名恒优先,透传(compose 回原键)
         assert_eq!(r.inner.resolve_device_scope("test::COM9"), "uuid-b::COM9");
     }
 
@@ -459,6 +529,7 @@ mod tests {
                 self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),
+                device_real_names: RwLock::new(HashMap::new()),
                 watcher_started: AtomicBool::new(false),
                 meta_bus: meta_tx,
                 meta_loader: loader,

@@ -129,8 +129,14 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
     // MAX_SELECTION_ATTEMPTS 次无效输入告别断开,防失控客户端无限占连接
     const MAX_SELECTION_ATTEMPTS: usize = 3;
     let mut attempts = 0;
-    let (port, display) = loop {
-        let Some(line) = read_line(&mut stream).await else {
+    // 选口阶段读到行尾后的剩余字节(脚本 pipelining,如 "COM7\r\nAT\r\n" 的
+    // AT\r\n)留在 leftover,选中后作为首笔输入转发——不丢数据,也不因读到
+    // 第二行而把选口输入误判成 "COM7\r\nAT" 烧掉尝试次数
+    let mut leftover: Vec<u8> = Vec::new();
+    // 会话阶段行尾归一的初始状态随 break 携带:选口末行以裸 \r 结束时置位,
+    // 吞下一块开头配对的 \n(跨选口/会话边界的 CRLF 不拆成两个回车)
+    let (port, display, mut pending_cr) = loop {
+        let Some((line, bare_cr)) = read_line(&mut stream, &mut leftover).await else {
             return Ok(()); // 客户端已断开
         };
         let typed = line.trim_matches(|c: char| c == '\r' || c == '\n' || c == ' ' || c == '\0');
@@ -162,7 +168,7 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
         match selected {
             Some((key, alias)) => {
                 let display = friendly_port_name(&key, alias.as_deref(), &state);
-                break (key, display);
+                break (key, display, bare_cr);
             }
             None => {
                 attempts += 1;
@@ -175,6 +181,17 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
         }
     };
 
+    // 选中后统一复查(两条路径汇合):菜单是快照,选择瞬间口可能已被关或设备
+    // 断开——不复查则 event_fut 订阅到不存在的口,会话表现为连上但完全无响应
+    if !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
+        farewell(
+            &mut stream,
+            &format!("Port {} is no longer open. Closing.\r\n", display),
+        )
+        .await;
+        return Ok(());
+    }
+
     let _ = stream
         .write_all(format!("\r\nConnected to {}.\r\n", display).as_bytes())
         .await;
@@ -186,11 +203,22 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
     let port_for_read = port.clone();
     let port_for_log = port.clone();
     let mgr = state.manager.clone();
+    // leftover 随 read_fut 移交,作为首笔待转发字节(pipelining 已到未消费)
 
     // 客户端 → 串口
     let read_fut = async move {
         let mut buf = vec![0u8; 1024];
-        let mut pending_cr = false; // \r 落在上一读块末尾时,吞掉下一块开头的 \n
+        // pending_cr 继承选口末行状态:裸 \r 收尾时吞下一块开头的配对 \n
+        // 先排空选口阶段的 leftover(pipelining 已到但未消费的字节,已滤 IAC)
+        if !leftover.is_empty() {
+            let filtered: Vec<u8> = leftover.into_iter().filter(|&b| b != 0).collect();
+            let normalized = normalize_line_endings(&filtered, &mut pending_cr);
+            if !normalized.is_empty() {
+                let _ = mgr
+                    .write(port_for_read.clone(), bytes::Bytes::from(normalized))
+                    .await;
+            }
+        }
         loop {
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => return,
@@ -253,11 +281,27 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
 }
 
 /// 读一行选口输入:滤 IAC 协商字节(telnet 客户端连接即回协商,不滤会被误当
-/// 端口名)、回显(WILL ECHO 下服务器负责),直到收到 \r/\n。客户端断开返回 None。
-async fn read_line(stream: &mut TcpStream) -> Option<String> {
-    let mut line = String::new();
-    let mut buf = vec![0u8; 256];
+/// 端口名)、回显(WILL ECHO 下服务器负责),返回 (首行, 末尾是否裸 \r)。
+/// 行尾 CRLF 算一个行尾一并消费;行尾之后的字节留在 leftover——脚本
+/// pipelining("COM7\r\nAT\r\n")的第二行属于选中后的数据,不该并入选口输入。
+/// 末尾是裸 \r(无配对 \n)时返回 true——配对的 \n 可能在下一读块,由会话
+/// 阶段的 pending_cr 吞并,不致变成发给设备的多余回车。客户端断开返回 None。
+async fn read_line(stream: &mut TcpStream, leftover: &mut Vec<u8>) -> Option<(String, bool)> {
     loop {
+        if let Some(pos) = leftover.iter().position(|&b| b == b'\r' || b == b'\n') {
+            let term = leftover[pos];
+            let line: Vec<u8> = leftover.drain(..=pos).collect();
+            let mut bare_cr = false;
+            if term == b'\r' {
+                if leftover.first() == Some(&b'\n') {
+                    leftover.remove(0); // CRLF 是一个行尾
+                } else {
+                    bare_cr = true;
+                }
+            }
+            return Some((String::from_utf8_lossy(&line).into_owned(), bare_cr));
+        }
+        let mut buf = vec![0u8; 256];
         let n = stream.read(&mut buf).await.ok()?;
         if n == 0 {
             return None;
@@ -266,10 +310,7 @@ async fn read_line(stream: &mut TcpStream) -> Option<String> {
         if !payload.is_empty() {
             let _ = stream.write_all(&payload).await;
         }
-        line.push_str(&String::from_utf8_lossy(&payload));
-        if line.contains('\n') || line.contains('\r') {
-            return Some(line);
-        }
+        leftover.extend_from_slice(&payload);
     }
 }
 

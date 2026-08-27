@@ -232,6 +232,52 @@ async fn telnet_invalid_selection_reprompts_then_exhausts() {
     assert!(resp_text.contains("COM9"), "应回显用户输入: {}", resp_text);
 }
 
+/// 菜单陈旧竞态:菜单构建后、编号选择前端口被关 → 选中后统一复查并告别,
+/// 而非挂在一个订阅不存在端口的死会话上。
+#[tokio::test]
+async fn telnet_stale_menu_selection_rejected() {
+    let (addr, manager, _bus, _log, _telnet) = boot().await;
+    let session = SessionId::next();
+    manager
+        .acquire("COM7".into(), SerialConfig::default(), session)
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect(&addr).await.unwrap();
+    read_until(&mut client, "Select <1~1>".as_bytes()).await;
+    // 菜单已出,选择前端口被释放(菜单变陈旧)
+    manager.release_all(session).await;
+    client.write_all(b"1\r\n").await.unwrap();
+    read_until(&mut client, "no longer open".as_bytes()).await;
+    assert_clean_eof(&mut client).await;
+}
+
+/// 脚本 pipelining:选口名与首条命令一次发出,选口取首行,剩余字节作为
+/// 首笔数据转发到串口(不丢数据、不把 "COM7\r\nAT" 误判为选口输入)。
+#[tokio::test]
+async fn telnet_pipelined_input_selects_then_forwards_rest() {
+    let (addr, manager, _bus, write_log, _telnet) = boot().await;
+    let session = SessionId::next();
+    manager
+        .acquire("COM7".into(), SerialConfig::default(), session)
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect(&addr).await.unwrap();
+    read_until(&mut client, "Select <1~1>".as_bytes()).await;
+    client.write_all(b"COM7\r\nAT\r\n").await.unwrap();
+    read_until(&mut client, "Connected to".as_bytes()).await;
+
+    // leftover "AT\r\n" 应作为首笔输入转发(行尾归一后为 "AT\r")
+    let recorded = wait_for_write(&write_log, b"AT\r").await;
+    assert_eq!(
+        recorded,
+        b"AT\r".to_vec(),
+        "pipelining 剩余字节应转发且行尾归一"
+    );
+    manager.release_all(session).await;
+}
+
 /// 名称选口回退路径:菜单构建前已开的口按名输入(脚本场景)。
 #[tokio::test]
 async fn telnet_selects_by_name_fallback() {
