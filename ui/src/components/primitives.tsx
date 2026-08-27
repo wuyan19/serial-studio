@@ -207,9 +207,10 @@ export function InlineAliasInput({
   );
 }
 
-/** 分组标题行：折叠按钮 + 组名(可 inline 重命名) + 计数 + ⋯ 菜单(重命名/解散)。
- *  宏/脚本侧栏共用，封装组级交互；成员列表由调用方各自渲染。
- *  head 为 div（内含 ⋯ button 与 inline input，避免 button 嵌 button）——同 .port-group__head 模式。
+/** 分组标题行：[前置元素] 折叠按钮 + 组名(可 inline 重命名) + 计数 + [操作按钮区] + ⋯ 菜单(重命名/解散)。
+ *  三种侧栏分组共用（宏/脚本组、串口设备卡——经 leading/extraActions/renameLabel 插槽差异化），
+ *  封装组级交互；成员列表由调用方各自渲染。
+ *  head 为 div（内含 ⋯ button 与 inline input，避免 button 嵌 button）。
  *  局部自管理 menuOpen/renaming 两个 UI 状态，不上升调用方。 */
 
 export function GroupHead({
@@ -220,18 +221,42 @@ export function GroupHead({
   onRename,
   onDissolve,
   menuHidden = false,
+  leading,
+  extraMenuItems,
+  renameLabel = "重命名分组",
+  renameInitial,
+  renamePlaceholder = "分组名",
+  title,
 }: {
   name: string;
   count: number;
   collapsed: boolean;
   onToggle: () => void;
-  onRename: (newName: string) => void;
-  onDissolve: () => void;
+  onRename?: (newName: string) => void;
+  onDissolve?: () => void;
   /** 隐藏 ⋯ 菜单（「未分组」是聚合组——成员 group 字段为 undefined，重命名/解散无意义） */
   menuHidden?: boolean;
+  /** 组名前置元素（串口设备卡的在线状态圆点）。 */
+  leading?: React.ReactNode;
+  /** ⋯ 菜单附加项（渲染在重命名之后、解散之前；串口设备卡的断开/重连/删除）。 */
+  extraMenuItems?: { label: string; danger?: boolean; onSelect: () => void }[];
+  /** ⋯ 菜单里重命名项文案（串口设备卡传「重命名设备」）。 */
+  renameLabel?: string;
+  /** 重命名输入框初值（默认 = 显示名 name。设备卡传真实昵称——无昵称时显示名是
+   *  host:port 兜底,若预填它,不改直接回车会把地址误存成昵称）。 */
+  renameInitial?: string;
+  /** 重命名输入框占位文案。 */
+  renamePlaceholder?: string;
+  /** 组名悬停提示（串口设备卡兜底显示 host:port——设了昵称后地址无处可看）。 */
+  title?: string;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  /** 右键打开时的鼠标锚点(相对 head 的坐标);null = ⋯ 点击的默认锚(组头右下)。 */
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null);
+  // ⋯ 可用性:显式隐藏(未分组/本地卡)或无任何动作时不渲染、右键也不弹
+  const menuAvailable =
+    !menuHidden && Boolean(onRename || onDissolve || (extraMenuItems?.length ?? 0));
   const headRef = useRef<HTMLDivElement>(null);
 
   // 菜单/重命名态：点 head 外部收起（InlineAliasInput 的 blur 已自行提交，这里仅兜底关 UI）。
@@ -240,6 +265,7 @@ export function GroupHead({
     const onDown = (e: MouseEvent) => {
       if (headRef.current && !headRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
+        setMenuPos(null);
         setRenaming(false);
       }
     };
@@ -248,15 +274,35 @@ export function GroupHead({
   }, [menuOpen, renaming]);
 
   return (
-    <div className="macro-group__head" ref={headRef} onClick={renaming ? undefined : onToggle}>
-      <span className="macro-group__caret">{collapsed ? "▶" : "▼"}</span>
+    <div
+      className="macro-group__head"
+      ref={headRef}
+      title={title}
+      onClick={renaming ? undefined : onToggle}
+      // 右键 = 点开 ⋯ 菜单(同一浮层、同锚定位置);重命名态放行原生右键(输入框剪切/粘贴)
+      onContextMenu={(e) => {
+        if (renaming || !menuAvailable) return;
+        e.preventDefault();
+        // 浮层锚定到鼠标位置(原生右键菜单手感);水平钳制防溢出组头右缘
+        const hr = headRef.current?.getBoundingClientRect();
+        if (hr) {
+          const left = Math.max(0, Math.min(e.clientX - hr.left, hr.width - 130));
+          setMenuPos({ left, top: e.clientY - hr.top + 2 });
+        }
+        setMenuOpen(true);
+      }}
+    >
+      {leading}
+      {/* 单字形 + 旋转:▼/▶ 两个字形在各平台字体里字号不一致(收起态偏大),
+          同一 ▶ 旋转 90° 保证两种状态视觉同大,顺带平滑过渡 */}
+      <span className={`macro-group__caret${collapsed ? "" : " macro-group__caret--open"}`}>▶</span>
       {renaming ? (
         <InlineAliasInput
-          initial={name}
-          placeholder="分组名"
+          initial={renameInitial ?? name}
+          placeholder={renamePlaceholder}
           onCommit={(n) => {
             setRenaming(false);
-            onRename(n);
+            onRename?.(n);
           }}
           onCancel={() => setRenaming(false)}
         />
@@ -264,13 +310,14 @@ export function GroupHead({
         <span className="macro-group__name">{name}</span>
       )}
       <span className="macro-group__count">{count}</span>
-      {!renaming && !menuHidden && (
+      {!renaming && menuAvailable && (
         <button
           className="macro-group__menu"
           title="分组操作"
           aria-label={`分组操作（${name}）`}
           onClick={(e) => {
             e.stopPropagation();
+            setMenuPos(null); // ⋯ 触发 = 默认锚(组头右下)
             setMenuOpen((v) => !v);
           }}
         >
@@ -278,25 +325,45 @@ export function GroupHead({
         </button>
       )}
       {menuOpen && (
-        <div className="group-menu" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="group-menu__item"
-            onClick={() => {
-              setMenuOpen(false);
-              setRenaming(true);
-            }}
-          >
-            重命名分组
-          </button>
-          <button
-            className="group-menu__item group-menu__item--danger"
-            onClick={() => {
-              setMenuOpen(false);
-              onDissolve();
-            }}
-          >
-            解散分组
-          </button>
+        <div
+          className="group-menu"
+          style={menuPos ? { left: menuPos.left, top: menuPos.top, right: "auto" } : undefined}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {onRename && (
+            <button
+              className="group-menu__item"
+              onClick={() => {
+                setMenuOpen(false);
+                setRenaming(true);
+              }}
+            >
+              {renameLabel}
+            </button>
+          )}
+          {extraMenuItems?.map((it) => (
+            <button
+              key={it.label}
+              className={`group-menu__item${it.danger ? " group-menu__item--danger" : ""}`}
+              onClick={() => {
+                setMenuOpen(false);
+                it.onSelect();
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+          {onDissolve && (
+            <button
+              className="group-menu__item group-menu__item--danger"
+              onClick={() => {
+                setMenuOpen(false);
+                onDissolve();
+              }}
+            >
+              解散分组
+            </button>
+          )}
         </div>
       )}
     </div>

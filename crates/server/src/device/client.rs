@@ -67,6 +67,10 @@ pub(crate) enum PendingReply {
 /// 设备共享态:连接重建后复用(cmd_tx 不换,外部 sender 恒有效)。
 pub(crate) struct DeviceInner {
     pub(crate) dev: RemoteDevice,
+    /// 当前昵称(rename 经 update_registry 原地更新,不重建连接)。dev.nickname
+    /// 只是构造时快照——**读昵称一律走 nickname()**,重建场景(reconnect/adopt)
+    /// 以本格覆盖快照,防改名后回退旧名。
+    pub(crate) nickname: std::sync::RwLock<Option<String>>,
     /// 本机实例 id(握手自报用;段名=实例 id 的身份交换)。
     pub(crate) self_id: String,
     /// 所属 manager 的 weak 引用(握手学到对端实例 id 时反向调 adopt;
@@ -114,9 +118,11 @@ impl DeviceClient {
         meta_bus: broadcast::Sender<()>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let nickname = std::sync::RwLock::new(dev.nickname.clone());
         Self {
             inner: Arc::new(DeviceInner {
                 dev,
+                nickname,
                 self_id,
                 owner,
                 online: AtomicBool::new(false),
@@ -135,8 +141,19 @@ impl DeviceClient {
         }
     }
 
+    /// 设备记录(id/host/port 恒可靠;nickname 是构造快照,读当前昵称用 [`nickname`](Self::nickname))。
     pub fn device(&self) -> &RemoteDevice {
         &self.inner.dev
+    }
+
+    /// 当前昵称(rename 原地更新后的权威值)。
+    pub fn nickname(&self) -> Option<String> {
+        self.inner.nickname.read().unwrap().clone()
+    }
+
+    /// 原地更新昵称(update_registry:同 id 同地址仅昵称变)——不触碰连接。
+    pub fn set_nickname(&self, n: Option<String>) {
+        *self.inner.nickname.write().unwrap() = n;
     }
 
     /// 端口列表缓存快照(列表合并用)。

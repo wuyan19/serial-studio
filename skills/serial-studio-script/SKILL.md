@@ -36,7 +36,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 
 把易变值(MAC、目标端口、次数……)从 code 抽出,换参重跑不改脚本。值都注入 `args.<name>`。声明方式:
 
-**code 顶部注释**(自包含, 一段代码搞定)。**default 不带方括号**(写 `default=值`,不要写 `[default=值]`):
+**code 顶部注释**(自包含, 一段代码搞定)。**default 为可选参数且不带方括号**(写 `default=值`,不要写 `[default=值]`):
 
 - `// @param <name> string default=值`
 - `// @param <name> select 选项1|选项2|... default=选项`(选项用 `|` 分隔)
@@ -54,7 +54,7 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 
 ## 硬约束(违背即出错)
 
-1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`;不判就把"没收到"当"收到"继续走。
+1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`。
 2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
 4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具 `serial_run_script` 运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,循环要有退出条件。内存上限 64MiB,超出被强杀。

@@ -422,6 +422,20 @@ export async function persistRemotes(remotes: RemoteDevice[]) {
   }
 }
 
+/** 校验设备昵称（镜像 remotes_store::validate_nicknames 规则，前端先拦——
+ * persistRemotes 对后端拒绝是静默的，不能靠后端兜底造成前后端状态漂移）。
+ * 返回 null = 合法；否则为错误提示。空串 = 清除昵称（合法，标题回退 host:port）。 */
+export function validateRemoteNickname(nickname: string, others: RemoteDevice[]): string | null {
+  const nick = nickname.trim();
+  if (!nick) return null; // 空 = 清除昵称
+  if (nick.includes("::")) return "设备昵称不能包含「::」（复合键分隔符）";
+  if (nick === "local") return "设备昵称不能为「local」（系统保留字）";
+  if (others.some((r) => r.nickname?.trim() === nick)) {
+    return `设备昵称「${nick}」已用于其它设备，请换一个`;
+  }
+  return null;
+}
+
 /** 设备在线快照条目(Devices 推送)。host/port 供 id 对齐;旧版后端缺省。 */
 export interface DeviceStateEntry {
   id: string;

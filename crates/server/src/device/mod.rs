@@ -127,6 +127,7 @@ impl DeviceClientManager {
             return false;
         }
         let mut dev = old.device().clone();
+        dev.nickname = old.nickname(); // 携带当前昵称(dev 快照可能是改名前的旧值)
         tracing::info!(
             "设备 {} 身份学习:段名 {} → 实例 id {}(地址 {}:{})",
             old_id,
@@ -156,19 +157,18 @@ impl DeviceClientManager {
     }
 
     /// 更新注册表(save_remotes 后):新增即建连,删除即断连;已有设备的地址
-    /// 变化按"删旧建新"处理(简单可靠,连接状态不迁移)。
+    /// 变化按"删旧建新"处理(简单可靠,连接状态不迁移);**仅昵称变化原地更新**
+    /// (改名不碰连接——昵称参与寻址,ids_by_nickname 读的就是 client 上的可变格)。
     pub fn update_registry(&self, remotes: &[RemoteDevice]) {
         let mut devices = self.devices.lock().unwrap();
-        let want: HashMap<String, (String, u16)> = remotes
-            .iter()
-            .map(|d| (d.id.clone(), (d.host.clone(), d.port)))
-            .collect();
+        let want: HashMap<&str, &RemoteDevice> =
+            remotes.iter().map(|d| (d.id.as_str(), d)).collect();
         // 删除不再存在的 / 地址变化的(旧 client 的句柄随通道失效走断开路径)
         let stale_ids: Vec<String> = devices
             .iter()
             .filter(|(id, c)| {
-                want.get(*id)
-                    .map(|(h, p)| c.device().host != *h || c.device().port != *p)
+                want.get(id.as_str())
+                    .map(|d| c.device().host != d.host || c.device().port != d.port)
                     .unwrap_or(true)
             })
             .map(|(id, _)| id.clone())
@@ -178,12 +178,21 @@ impl DeviceClientManager {
                 old.stop();
             }
         }
-        // 新增
-        for d in remotes {
-            if devices.contains_key(&d.id) {
-                continue;
+        // 遍历 want(同 id 后者胜)而非原始 remotes:重复 id 条目(手编 remotes.json
+        // 可造,store 只校验昵称不校验 id 唯一)只处理一条,否则前一条 spawn 的
+        // client 被后一条 insert 覆盖而无人 stop,run task 泄漏至进程重启。
+        for d in want.values().copied() {
+            match devices.get(&d.id) {
+                // 存活且地址未变:仅昵称变 → 原地更新(连接/端口缓存不动)
+                Some(c) if c.device().host == d.host && c.device().port == d.port => {
+                    if c.nickname().as_deref() != d.nickname.as_deref() {
+                        tracing::info!("设备 {} 昵称更新为 {:?}", d.id, d.nickname);
+                        c.set_nickname(d.nickname.clone());
+                    }
+                }
+                // 地址变(stale 已删)或新 id → 建连
+                _ => self.spawn_client_locked(&mut devices, d.clone()),
             }
-            self.spawn_client_locked(&mut devices, d.clone());
         }
     }
 
@@ -264,7 +273,7 @@ impl DeviceClientManager {
         let devices = self.devices.lock().unwrap();
         devices
             .values()
-            .filter(|c| c.device().nickname.as_deref() == Some(nick))
+            .filter(|c| c.nickname().as_deref() == Some(nick))
             .map(|c| c.device().id.clone())
             .collect()
     }
@@ -272,9 +281,7 @@ impl DeviceClientManager {
     /// 设备 id → 昵称(serial_list / MCP 展示用)。
     pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
         let devices = self.devices.lock().unwrap();
-        devices
-            .get(dev_id)
-            .and_then(|c| c.device().nickname.clone())
+        devices.get(dev_id).and_then(|c| c.nickname())
     }
 
     /// 设置远端端口别名(转发;port 为剥前缀后的远端线名)。
@@ -310,7 +317,11 @@ impl DeviceClientManager {
     /// 旧句柄发命令失败走断开路径;reopen 经 devices 表查到**新** client,走新通道。
     pub fn reconnect(&self, dev_id: &str) -> Result<(), String> {
         let mut devices = self.devices.lock().unwrap();
-        match devices.get(dev_id).map(|c| c.device().clone()) {
+        match devices.get(dev_id).map(|c| {
+            let mut dev = c.device().clone();
+            dev.nickname = c.nickname(); // 携带当前昵称(防改名后重建回退旧名)
+            dev
+        }) {
             Some(dev) => {
                 if let Some(old) = devices.remove(dev_id) {
                     old.stop();
@@ -341,5 +352,68 @@ impl ss_core::PortOpener for CompositeOpener {
             (ss_core::LOCAL_DEVICE_ID, name) => ss_core::serial::open(name, config),
             (dev, rest) => self.devices.open_blocking(dev, rest, config),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(id: &str, nickname: Option<&str>) -> RemoteDevice {
+        RemoteDevice {
+            id: id.into(),
+            host: "192.0.2.1".into(),
+            port: 18700,
+            nickname: nickname.map(str::to_string),
+        }
+    }
+
+    /// 仅昵称变化 → 原地更新:连接对象不换(Arc 同一),寻址查询即时反映新名。
+    /// (started=false,update_registry 不会 spawn 连接任务,纯注册表操作。)
+    #[test]
+    fn update_registry_renames_in_place() {
+        let (bus, _rx) = broadcast::channel::<()>(4);
+        let m = DeviceClientManager::empty(bus, "self");
+
+        m.update_registry(&[dev("uuid-a", Some("旧名"))]);
+        assert_eq!(m.nickname_of("uuid-a").as_deref(), Some("旧名"));
+        let before = m.devices.lock().unwrap().get("uuid-a").cloned().unwrap();
+
+        m.update_registry(&[dev("uuid-a", Some("新名"))]);
+        assert_eq!(m.nickname_of("uuid-a").as_deref(), Some("新名"));
+        assert_eq!(m.ids_by_nickname("新名"), vec!["uuid-a".to_string()]);
+        assert!(m.ids_by_nickname("旧名").is_empty());
+
+        let after = m.devices.lock().unwrap().get("uuid-a").cloned().unwrap();
+        assert!(Arc::ptr_eq(&before, &after), "改名不得删旧建新(会断连接)");
+    }
+
+    /// 重建场景(reconnect / adopt)携带当前昵称——dev 快照可能是改名前旧值。
+    #[test]
+    fn rebuild_keeps_renamed_nickname() {
+        let (bus, _rx) = broadcast::channel::<()>(4);
+        let m = DeviceClientManager::empty(bus, "self");
+
+        m.update_registry(&[dev("uuid-a", Some("旧名"))]);
+        m.update_registry(&[dev("uuid-a", Some("新名"))]);
+
+        m.reconnect("uuid-a").unwrap();
+        assert_eq!(m.nickname_of("uuid-a").as_deref(), Some("新名"));
+
+        assert!(m.adopt_device_id("uuid-a", "learned-id"), "无冲突应迁移成功");
+        assert_eq!(m.nickname_of("learned-id").as_deref(), Some("新名"));
+        assert!(m.ids_by_nickname("新名").contains(&"learned-id".to_string()));
+    }
+
+    /// 清除昵称(空)同样生效:ids_by_nickname 不再命中,回退 host:port 展示由前端兜底。
+    #[test]
+    fn update_registry_clears_nickname() {
+        let (bus, _rx) = broadcast::channel::<()>(4);
+        let m = DeviceClientManager::empty(bus, "self");
+
+        m.update_registry(&[dev("uuid-a", Some("名"))]);
+        m.update_registry(&[dev("uuid-a", None)]);
+        assert_eq!(m.nickname_of("uuid-a"), None);
+        assert!(m.ids_by_nickname("名").is_empty());
     }
 }

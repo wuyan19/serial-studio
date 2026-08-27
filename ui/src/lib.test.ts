@@ -13,6 +13,7 @@ import {
   prefillRunValues,
   renameGroup,
   sanitizeFileName,
+  validateRemoteNickname,
   timestampForFileName,
   upsertNamed,
   wireToPid,
@@ -296,5 +297,23 @@ describe("mergeChunks(记录攒批合并)", () => {
   it("空数组与单块边界", () => {
     expect(mergeChunks([]).length).toBe(0);
     expect([...mergeChunks([Uint8Array.from([9])])]).toEqual([9]);
+  });
+});
+
+describe("validateRemoteNickname(设备昵称前端预校验)", () => {
+  const others: RemoteDevice[] = [
+    { id: "a", host: "h1", port: 1, nickname: "GPS" },
+    { id: "b", host: "h2", port: 2 },
+  ];
+  it("合法:正常名 / 空串=清除昵称", () => {
+    expect(validateRemoteNickname("新设备", others)).toBeNull();
+    expect(validateRemoteNickname("  ", others)).toBeNull();
+    expect(validateRemoteNickname("", others)).toBeNull();
+  });
+  it("非法:复合键分隔符 / 保留字 / 跨设备重复", () => {
+    expect(validateRemoteNickname("a::COM5", others)).toContain("::");
+    expect(validateRemoteNickname("local", others)).toContain("local");
+    expect(validateRemoteNickname("GPS", others)).toContain("已用于其它设备");
+    expect(validateRemoteNickname("gps", others)).toBeNull(); // 查重大小写敏感(与后端一致)
   });
 });

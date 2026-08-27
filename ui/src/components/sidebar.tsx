@@ -40,6 +40,7 @@ export function PortsPanel({
   onReconnectRemote,
   onDisconnectRemote,
   onRemoveRemote,
+  onRenameRemote,
   onRefresh,
 }: {
   portGroups: PortGroupView[];
@@ -57,6 +58,8 @@ export function PortsPanel({
   onReconnectRemote: (dev: RemoteDevice) => void;
   onDisconnectRemote: (dev: RemoteDevice) => void;
   onRemoveRemote: (dev: RemoteDevice) => void;
+  /** 设备卡改名(空串=清除昵称,标题回退 host:port)。仅本地桌面形态传入。 */
+  onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -69,36 +72,36 @@ export function PortsPanel({
       </div>
       {portGroups.map((grp) => {
         const dev = grp.devId === "local" ? null : remotes.find((r) => r.id === grp.devId);
+        // 设备卡重命名仅本地桌面形态(remotes.json 持久化;web/远程窗口 connConfig 派生不落盘)
+        const canRename = dev !== null && getMode() === "local";
         return (
-          <div key={grp.devId} className="macro-group">
-            <div className="port-group__head">
-              <button
-                className="port-group__toggle"
-                onClick={() => onTogglePortGroup(grp.devId)}
-                // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
-                title={dev ? `${dev.host}:${dev.port}` : undefined}
-              >
-                <span className={`dot ${grp.online ? "on" : "off"}`} />
-                <span className="macro-group__caret">{portCollapsed.has(grp.devId) ? "▶" : "▼"}</span>
-                <span className="port-group__name">{grp.label}</span>
-              </button>
-              <div className="port-group__actions">
-                <span className="port-group__count">{grp.ports.length}</span>
-                {/* 按钮区固定占位(46px)：本地卡无按钮也占位，使 count 列在所有卡上对齐 */}
-                <div className="port-group__btns">
-                  {dev && (
-                    <>
-                      {grp.online === true ? (
-                        <button className="port-group__action" title="断开设备" aria-label={`断开设备 ${grp.label}`} onClick={() => onDisconnectRemote(dev)}><IconPower /></button>
-                      ) : (
-                        <button className="port-group__action" title="重连设备" aria-label={`重连设备 ${grp.label}`} onClick={() => onReconnectRemote(dev)}><IconRefresh /></button>
-                      )}
-                      <button className="port-group__action port-group__action--danger" title="删除设备" aria-label={`删除设备 ${grp.label}`} onClick={() => onRemoveRemote(dev)}><IconTrash /></button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
+          <div key={grp.devId} className="macro-group port-group">
+            <GroupHead
+              name={grp.label}
+              count={grp.ports.length}
+              collapsed={portCollapsed.has(grp.devId)}
+              onToggle={() => onTogglePortGroup(grp.devId)}
+              // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
+              title={dev ? `${dev.host}:${dev.port}` : undefined}
+              // 三态:在线=绿 / 离线=红 / 连接中(unknown)=无修饰类,落 .dot 默认灰
+              leading={<span className={`dot ${grp.online === true ? "on" : grp.online === false ? "off" : ""}`} />}
+              onRename={canRename ? (n) => { if (dev) onRenameRemote(dev, n); } : undefined}
+              renameLabel="重命名设备"
+              renameInitial={dev?.nickname ?? ""}
+              renamePlaceholder="设备昵称(留空显示地址)"
+              menuHidden={!dev}
+              extraMenuItems={
+                dev
+                  ? [
+                      // 在线可断开;离线/连接中可重连(状态相关项)
+                      grp.online === true
+                        ? { label: "断开设备", onSelect: () => { if (dev) onDisconnectRemote(dev); } }
+                        : { label: "重连设备", onSelect: () => { if (dev) onReconnectRemote(dev); } },
+                      { label: "删除设备", danger: true, onSelect: () => { if (dev) onRemoveRemote(dev); } },
+                    ]
+                  : undefined
+              }
+            />
             {!portCollapsed.has(grp.devId) &&
               (grp.ports.length === 0 ? (
                 <p className="sidebar__empty">

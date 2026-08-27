@@ -369,7 +369,6 @@ button {
   color: var(--ink-dim);
   font-size: var(--fs-xs);
   font-weight: 600;
-  text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
   border-radius: var(--r-sm);
@@ -378,9 +377,17 @@ button {
 .macro-group__head:hover {
   background: var(--surface-2);
 }
+/* 折叠三角:单字形 + 旋转(▼/▶ 两字形平台字体大小不一,收起态偏大);
+   inline-block 是 transform 生效的前提。字号 7px ≈ 旧 ▼@9px 的视觉大小
+   (▶ 字形本身偏大,统一用它后需整体缩小回原观感) */
 .macro-group__caret {
-  font-size: 9px;
+  display: inline-block;
+  font-size: 7px;
   color: var(--ink-faint);
+  transition: transform var(--t-fast) var(--ease);
+}
+.macro-group__caret--open {
+  transform: rotate(90deg);
 }
 .macro-group__name {
   flex: 1;
@@ -447,63 +454,23 @@ button {
 .group-menu__item--danger:hover {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
-/* 串口分组卡标题：本地卡 / 远程设备卡。head 为 div（内含 toggle button + 可选删除 button，
-   避免 button 嵌套 button）。复用 macro-group 的 caret/count 子元素样式。 */
-.port-group__head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-}
-/* 端口数：浅色灰（与宏分组 count 同款），与按钮同区，停 btns 占位区前（gap 贴按钮）。
-   padding-right:6px 与端口项 holders 的 padding-right 对齐，保证文本右缘同列。 */
-.port-group__count {
+/* 串口分组卡标题：本地卡 / 远程设备卡。组头复用宏/脚本的 .macro-group__head
+   （GroupHead 组件统一三面板：整行点击折叠、hover 背景、inline 重命名），
+   仅在线点是串口侧自有元素（断开/重连/删除已收进 ⋯ 菜单）。 */
+/* 设备卡在线点（GroupHead leading 插槽；同 .sidebar__conn .dot 的语义色） */
+.macro-group__head .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   flex-shrink: 0;
-  font-size: var(--fs-xs);
-  color: var(--ink-faint);
-  font-weight: 400;
-  padding-right: 6px;
+  background: var(--ink-faint); /* 连接中(unknown) */
 }
-/* 操作区：count + btns 整体推到右端（margin-left:auto），右缘 = head padding 内 */
-.port-group__actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  flex-shrink: 0;
+.macro-group__head .dot.on {
+  background: var(--link);
+  box-shadow: 0 0 6px var(--link);
 }
-/* 按钮占位区：固定 46px(重连22 + 删除22 + gap2)，本地卡无按钮也占位 → count 列恒对齐 */
-.port-group__btns {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-  width: 46px;
-  flex-shrink: 0;
-}
-.port-group__toggle {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  color: var(--ink);
-  font-size: var(--fs-md);
-  font-weight: 700;
-  cursor: pointer;
-  border-radius: var(--r-sm);
-}
-.port-group__toggle:hover {
-  background: var(--surface-2);
-}
-.port-group__name {
-  flex: 1;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.macro-group__head .dot.off {
+  background: var(--danger);
 }
 /* Tab 来源标识：多设备时非本地端口后缀设备昵称/地址 */
 .tab__src {
@@ -522,35 +489,10 @@ button {
 .port-item-row:hover .port-item__force {
   opacity: 1;
 }
-/* 远程设备卡操作按钮（重连 / 删除）：常显。独立 class（不复用 macro-action 的 absolute 布局），
-   作 flex item 排在标题行右侧。 */
-.port-group__action {
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--ink-faint);
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  flex-shrink: 0;
-}
-.port-group__action:hover {
-  color: var(--ink);
-  background: var(--surface-3);
-}
-.port-group__action--danger:hover {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-}
-.port-group__action svg {
-  width: 14px;
-  height: 14px;
-}
-/* 端口项左缩进：表归属其上的分组卡（本地 / 远程设备） */
-.macro-group .port-item-row {
+/* 条目行左缩进:归属其上的分组(端口行/宏/脚本行同一规则)——比组头窄一级,
+   子项与组头层级分明(全宽行看着像组头的平级兄弟) */
+.macro-group .port-item-row,
+.macro-group .macro-row {
   padding-left: 16px;
 }
 .sidebar__conn {

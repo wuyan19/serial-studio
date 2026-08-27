@@ -33,6 +33,7 @@ import {
   parsePortId,
   persistMacros,
   persistRemotes,
+  validateRemoteNickname,
   persistScriptArgs,
   persistScripts,
   portIdOf,
@@ -1347,6 +1348,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     setRemoteOpen(false);
   };
 
+  /** 设备卡改名（空串 = 清除昵称，标题回退 host:port）。预校验 + updater 外持久化（同 addRemote）；
+   * 落盘钩子 update_registry 对同 id 同地址仅昵称变 → 后端原地更新（连接不断，`新昵称::COM5` 寻址即时生效）。 */
+  const renameRemote = (dev: RemoteDevice, nickname: string) => {
+    const err = validateRemoteNickname(nickname, remotes.filter((r) => r.id !== dev.id));
+    if (err) {
+      libError(err);
+      return;
+    }
+    const nick = nickname.trim() || undefined;
+    if ((dev.nickname?.trim() || undefined) === nick) return; // 未变
+    const next = remotes.map((r) => (r.id === dev.id ? { ...r, nickname: nick } : r));
+    setRemotes(next);
+    if (isLocal) persistRemotes(next);
+  };
+
   /** 删除远程设备：关其所有 Tab + 显式销毁 transport（引用计数 effect 不再遍历已删 devId）+ 移出列表。 */
   const removeRemote = (dev: RemoteDevice) => {
     setConfirmState({
@@ -1703,6 +1719,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onReconnectRemote={reconnectRemote}
               onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
+              onRenameRemote={renameRemote}
               onRefresh={() => refreshPorts()}
             />
           )}
