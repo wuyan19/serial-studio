@@ -90,8 +90,8 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口寻址:完整键(COM5 / /dev/ttyUSB0 / 设备id::COM5)、端口别名(GPS)或设备昵称作用域(test::COM5)。缺省时使用唯一打开的串口" },
                         "data": { "type": "string", "description": "要发送的数据" },
+                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),缺省时使用唯一打开的串口" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
                         "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
                         "timeout_ms": { "type": "integer", "default": 0, "description": "发送后等待响应的超时（毫秒），0 不等待" }
@@ -344,15 +344,17 @@ async fn tool_serial_send(args: Value, state: &AppState) -> Value {
             if timeout_ms > 0 {
                 // 带静默期读取：首字节等到 timeout_ms，之后连续无新数据即视为响应完整，
                 // 避免 drain() 取首片即返回导致多分片响应被截断。
+                // 静默期 250ms：交互式 CLI「立即回显→执行停顿→输出」两段式间隔常大于
+                // 40ms；代价是每次调用尾延约 +210ms,换完整响应值得
                 let resp = manager
-                    .drain_buffer_quiet(&port, timeout_ms, 40)
+                    .drain_buffer_quiet(&port, timeout_ms, 250)
                     .await
                     .unwrap_or_default();
-                ok_text(format!(
-                    "Sent {} bytes. Response: {}",
-                    n,
-                    String::from_utf8_lossy(&resp)
-                ))
+                if resp.is_empty() {
+                    ok_text(format!("Sent {} bytes, no response", n))
+                } else {
+                    ok_text(String::from_utf8_lossy(&resp).into_owned())
+                }
             } else {
                 ok_text(format!("Sent {} bytes", n))
             }
