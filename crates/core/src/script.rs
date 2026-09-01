@@ -18,15 +18,16 @@
 //!   reject → 抛异常中断脚本。这与「原语失败吞错」不冲突(失败是 Ok 路径吞,停止是主动 Err)。
 //! - API 暂为全局函数,后续收敛为 `serial` 对象。
 //! - 脚本 `log(msg)` 输出经 EventBus(`SerialEvent::ScriptLog`)流到前端(WS/Tauri 两出口),按 run_id 路由;
-//!   MCP 路径不订阅 EventBus,日志静默丢弃。`ScriptResult` 仍与 `MacroResult` 同构。
+//!   MCP 路径不订阅 EventBus,但 MCP 入口 [`run_script`] 内建 [`ScriptLogSink`] 收集 log() 输出,
+//!   随 [`ScriptRunOutcome`] 返回给调用方拼进 JSON-RPC 响应——两条路径都能看到日志。
 
 use crate::event_bus::SerialEvent;
 use crate::manager::SerialManager;
 use rquickjs::prelude::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Promise};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +66,91 @@ const OUTER_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 /// None 超时路径(WS/Tauri,长跑)的极大兜底:防 rquickjs C-level hang 时调用方永挂、注册表/permit
 /// 永久泄漏。远大于正常复现时长(数天),正常脚本不应触达;命中按 Timeout(线程仍泄漏,v1 限制)。
 const NONE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 3600);
+/// ScriptLogSink 单条消息上限:脚本可能 dump 整段接收缓冲区,超长单条截断,否则总量上限形同虚设。
+const MAX_LOG_ENTRY_BYTES: usize = 4 * 1024;
+/// ScriptLogSink 收集上限:最多 200 条 / 总量 16 KiB(日志整段进 MCP 响应 → AI 上下文,须防膨胀)。
+/// 超限丢最旧保最新——失败点附近的最新日志对调试价值最高。
+const MAX_LOG_ENTRIES: usize = 200;
+const MAX_LOG_TOTAL_BYTES: usize = 16 * 1024;
+
+/// 脚本 `log()` 输出的收集器(MCP 路径用)。
+///
+/// `push` 在脚本线程的 QuickJS 同步闭包里调用(短临界区、无 await),`std::sync::Mutex` 即可;
+/// 读取发生在脚本结束后(调用方持有 Clone 的 Arc,脚本线程 panic/超时也不影响可读)。
+/// 容量上限见上方 const:单条截断 + 总量丢最旧,`dropped_count` 记丢弃条数,`logs()` 返回时
+/// 自动在头部拼 `(前 N 条日志已丢弃)`——调用方零感知、不会漏拼。
+#[derive(Clone, Default)]
+pub struct ScriptLogSink {
+    inner: Arc<Mutex<ScriptLogSinkInner>>,
+}
+
+#[derive(Default)]
+struct ScriptLogSinkInner {
+    entries: VecDeque<String>,
+    total_bytes: usize,
+    dropped_count: usize,
+}
+
+impl ScriptLogSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 追加一条日志(单条超长截断;总量/条数超限丢最旧)。
+    pub fn push(&self, message: String) {
+        // 中毒也继续:数据是纯 append 日志,持锁 panic 后恢复读取无害(勿让 MCP handler 二次 panic)。
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let message = if message.len() > MAX_LOG_ENTRY_BYTES {
+            let mut cut = String::new();
+            // 按字节边界截断(中文多字节,截到 char 边界)。
+            for (i, c) in message.char_indices() {
+                if i + c.len_utf8() > MAX_LOG_ENTRY_BYTES {
+                    break;
+                }
+                cut.push(c);
+            }
+            cut.push_str("…(截断)");
+            cut
+        } else {
+            message
+        };
+        // 先逐字节数计(粗略,UTF-8 前缀 char_indices 截断后的 cut 长度 ≤ 上限)。
+        inner.total_bytes += message.len();
+        inner.entries.push_back(message);
+        while inner.entries.len() > MAX_LOG_ENTRIES
+            || (inner.total_bytes > MAX_LOG_TOTAL_BYTES && inner.entries.len() > 1)
+        {
+            let dropped = inner.entries.pop_front();
+            match dropped {
+                Some(d) => {
+                    inner.total_bytes -= d.len();
+                    inner.dropped_count += 1;
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// 读取已收集日志(克隆;≤16 KiB 成本可忽略)。若有丢弃,首条为 `(前 N 条日志已丢弃)`。
+    pub fn logs(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::with_capacity(inner.entries.len() + 1);
+        if inner.dropped_count > 0 {
+            out.push(format!("(前 {} 条日志已丢弃)", inner.dropped_count));
+        }
+        out.extend(inner.entries.iter().cloned());
+        out
+    }
+}
+
+/// MCP 入口 [`run_script`] 的执行结果:成败 + 脚本 `log()` 收集的日志。
+///
+/// MCP 是同步请求/响应,无法中途推日志;日志缓冲随结果一次性返回(成功/失败/超时均带)。
+pub struct ScriptRunOutcome {
+    pub result: Result<(), ScriptError>,
+    /// 脚本 log() 输出(可能为空;超限已截断,见 [`ScriptLogSink`])。
+    pub logs: Vec<String>,
+}
 
 /// 一个脚本参数定义(string / select)。运行时收集值注入 QuickJS 的 `args.<name>`。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -89,7 +175,7 @@ pub struct ScriptParam {
 ///
 /// `code` 为 JS 源码,被包成 `(async () => { ... })()` 求值,顶层可直接 `await`。
 /// `params` 为声明的运行时参数(持久化进 scripts.json);运行收集的值经 `run_script` 的
-/// `args` 参数注入,不入库。超时由执行入口默认 30s 或显式传入(见 [`run_script_with_timeout`]),
+/// `args` 参数注入,不入库。超时由执行入口默认 300s 或显式传入(见 [`run_script_with_timeout`]),
 /// 不入库——与宏不在 `Macro` 顶层存 timeout 一致。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Script {
@@ -104,9 +190,9 @@ pub struct Script {
     pub code: String,
 }
 
-/// 执行一段 JS 脚本(MCP 路径:默认 30s 超时,不暴露停止)。`args` 为运行时参数值,注入 `args.<name>`。
+/// 执行一段 JS 脚本(MCP 路径:默认 300s 超时,不暴露停止)。`args` 为运行时参数值,注入 `args.<name>`。
 ///
-/// MCP 是同步请求/响应,客户端无法中途喊停,且无限 JSON-RPC 调用有 DoS 风险,故保留 30s 兜底;
+/// MCP 是同步请求/响应,客户端无法中途喊停,且无限 JSON-RPC 调用有 DoS 风险,故保留超时兜底;
 /// 内部建一个永不 set 的 abort flag。WS/Tauri 路径请直接调 [`run_script_with_timeout`]
 /// 传 `None` 超时 + 外部 abort(支持长跑 + 停止按钮)。
 pub async fn run_script(
@@ -114,10 +200,12 @@ pub async fn run_script(
     script: &Script,
     manager: Arc<SerialManager>,
     args: HashMap<String, String>,
-) -> Result<(), ScriptError> {
+) -> ScriptRunOutcome {
     let abort = Arc::new(AtomicBool::new(false));
     // MCP 是同步 JSON-RPC,无实时日志出口;run_id="" → publish 的 ScriptLog 无订阅者被丢(见 event_to_msg 不转发)。
-    run_script_with_timeout(
+    // 故内建 sink 收集 log() 输出,随 ScriptRunOutcome 一次性返回给 MCP 调用方拼进响应。
+    let sink = ScriptLogSink::new();
+    let result = run_script_with_timeout(
         port,
         &script.code,
         manager,
@@ -125,8 +213,16 @@ pub async fn run_script(
         args,
         "",
         abort,
+        Some(sink.clone()),
     )
-    .await
+    .await;
+    // 读取时序:Ok/失败/panic 路径经 oneshot happens-before,所有 push 已完成,快照完备;
+    // 外层兜底超时(脚本线程卡死)路径线程可能仍在 push——Mutex 下读取安全,只是快照可能
+    // 不完整,晚到的 push 写进没人再读的 sink,无副作用。
+    ScriptRunOutcome {
+        result,
+        logs: sink.logs(),
+    }
 }
 
 /// 执行一段 JS 脚本,注入串口原语。
@@ -139,6 +235,7 @@ pub async fn run_script(
 ///   + 64MiB/4MiB 内存栈上限兜底。停止经 interrupt 让线程干净退出(不泄漏)。
 /// - `abort`:外部停止信号,set 后 interrupt 在下个字节码边界抛异常,脚本退出。调用方持有克隆
 ///   以便注册到停止注册表(ws.rs / main.rs 的 `script_runs`)。
+#[allow(clippy::too_many_arguments)] // 参数组随功能演进增长;收敛成 config struct 的收益暂不抵改动面
 pub async fn run_script_with_timeout(
     port: &str,
     code: &str,
@@ -147,6 +244,7 @@ pub async fn run_script_with_timeout(
     args: HashMap<String, String>,
     run_id: &str, // 本次运行标识:脚本 log() 输出按此路由到前端(WS/Tauri);MCP 入口传 ""
     abort: Arc<AtomicBool>,
+    log_sink: Option<ScriptLogSink>, // Some 时 log() 双写:publish(前端)+ sink(MCP 随结果返回);None = 仅现状
 ) -> Result<(), ScriptError> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
@@ -171,6 +269,7 @@ pub async fn run_script_with_timeout(
                 args,
                 run_id,
                 abort_for_thread,
+                log_sink,
             ))
         });
         let result = match std::panic::catch_unwind(run) {
@@ -216,6 +315,7 @@ async fn await_abort(abort: Arc<AtomicBool>) {
 }
 
 /// 脚本实际执行(在独立线程的 current_thread runtime 内,future 无需 `Send`)。
+#[allow(clippy::too_many_arguments)] // 同 run_script_with_timeout,内部穿透传参
 async fn run_script_inner(
     port: String,
     code: String,
@@ -224,6 +324,7 @@ async fn run_script_inner(
     args: HashMap<String, String>,
     run_id: String, // 脚本 log() 按此路由到前端(WS/Tauri);MCP 传 ""
     abort: Arc<AtomicBool>,
+    log_sink: Option<ScriptLogSink>,
 ) -> Result<(), ScriptError> {
     let deadline = timeout.as_ref().map(|t| Instant::now() + *t);
 
@@ -367,14 +468,19 @@ async fn run_script_inner(
 
                 // log(message):脚本日志输出(不中断脚本,区别 throw)。同步 publish ScriptLog →
                 // EventBus → 前端(按 run_id 路由)。必须同步:若用 Async 包装,JS 不 await 则 future 不执行→丢失。
-                // MCP 路径 run_id="" 且 server 不订阅 EventBus,日志静默丢弃。
+                // MCP 路径 run_id="" 且 server 不订阅 EventBus → 额外双写 sink(先 sink 后 publish,
+                // 两把锁无嵌套),随 ScriptRunOutcome 返回。
                 {
                     let mgr = manager.clone();
                     let rid = run_id.clone();
                     let dp = port.clone();
+                    let sink = log_sink.clone();
                     globals.set(
                         "log",
                         Func::from(move |message: String| {
+                            if let Some(s) = sink.as_ref() {
+                                s.push(message.clone());
+                            }
                             mgr.event_bus().publish(SerialEvent::ScriptLog {
                                 run_id: rid.clone(),
                                 port: dp.clone(),
@@ -483,6 +589,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -507,6 +614,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(
@@ -560,6 +668,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         match result {
@@ -581,6 +690,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(
@@ -597,6 +707,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(
@@ -614,6 +725,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
@@ -626,6 +738,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         assert!(
@@ -650,6 +763,7 @@ mod tests {
             args,
             "log-rid",
             abort_flag(),
+            None,
         )
         .await;
         match result {
@@ -672,7 +786,7 @@ mod tests {
         });
         let start = Instant::now();
         let result =
-            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort)
+            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort, None)
                 .await;
         stopper.await.unwrap();
         assert!(
@@ -699,7 +813,7 @@ mod tests {
         });
         let start = Instant::now();
         let result =
-            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort)
+            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort, None)
                 .await;
         stopper.await.unwrap();
         assert!(
@@ -737,7 +851,8 @@ mod tests {
                 None,
                 HashMap::new(),
                 "log-rid",
-                abort_a
+                abort_a,
+                None,
             ),
             run_script_with_timeout(
                 "COM0",
@@ -746,7 +861,8 @@ mod tests {
                 None,
                 HashMap::new(),
                 "log-rid",
-                abort_b
+                abort_b,
+                None,
             ),
         );
         stopper.await.unwrap();
@@ -776,6 +892,7 @@ mod tests {
             HashMap::new(),
             "rid-xyz",
             abort_flag(),
+            None,
         )
         .await;
         assert!(result.is_ok(), "log 不应中断脚本: {:?}", result);
@@ -809,7 +926,7 @@ mod tests {
         );
     }
 
-    /// MCP 入口 run_script(run_id="")不 panic:log 的 ScriptLog 无订阅者静默丢弃。
+    /// MCP 入口 run_script(run_id="")不 panic:EventBus 无订阅者静默丢弃,但 sink 收集到日志。
     #[tokio::test]
     async fn mcp_entry_log_silent() {
         let m = mgr();
@@ -817,9 +934,97 @@ mod tests {
             description: None,
             group: None,
             params: vec![],
-            code: r#"log("x")"#.to_string(),
+            code: r#"log("x"); log("y")"#.to_string(),
         };
-        let result = run_script("COM0", &script, m, HashMap::new()).await;
-        assert!(result.is_ok(), "MCP 入口 log 不应 panic/中断: {:?}", result);
+        let outcome = run_script("COM0", &script, m, HashMap::new()).await;
+        assert!(
+            outcome.result.is_ok(),
+            "MCP 入口 log 不应 panic/中断: {:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.logs, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    /// MCP 入口失败路径:脚本 throw 后 sink 已收集的日志仍随 outcome 返回(失败响应也要带日志)。
+    #[tokio::test]
+    async fn mcp_entry_logs_returned_on_failure() {
+        let m = mgr();
+        let script = Script {
+            description: None,
+            group: None,
+            params: vec![],
+            code: r#"log("before"); throw new Error("boom")"#.to_string(),
+        };
+        let outcome = run_script("COM0", &script, m, HashMap::new()).await;
+        assert!(
+            matches!(&outcome.result, Err(ScriptError::Script(msg)) if msg == "boom"),
+            "应失败且消息正确: {:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.logs, vec!["before".to_string()]);
+    }
+
+    /// 超时路径:sink 已收集的日志在 Timeout 后仍可读——exec 被 timeout drop,
+    /// push 与读取间经 oneshot happens-before。AI 调试死循环脚本的日志不丢。
+    /// 经 run_script_with_timeout + 短超时覆盖(直跑 run_script 入口要等满 300s)。
+    #[tokio::test]
+    async fn log_sink_survives_timeout() {
+        let sink = ScriptLogSink::new();
+        let result = run_script_with_timeout(
+            "COM0",
+            r#"log("started"); while (true) { await sleep(20); }"#,
+            mgr(),
+            Some(Duration::from_millis(200)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            Some(sink.clone()),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ScriptError::Timeout)),
+            "死循环应超时: {:?}",
+            result
+        );
+        assert_eq!(sink.logs(), vec!["started".to_string()]);
+    }
+
+    /// sink 截断:条数超限丢最旧保最新,logs() 首条拼丢弃计数;单条超长截断。
+    #[test]
+    fn log_sink_truncation() {
+        let sink = ScriptLogSink::new();
+        for i in 0..(MAX_LOG_ENTRIES + 10) {
+            sink.push(format!("msg-{i}"));
+        }
+        let logs = sink.logs();
+        assert_eq!(
+            logs[0], "(前 10 条日志已丢弃)",
+            "超限条数应记录丢弃计数"
+        );
+        assert_eq!(logs.len(), MAX_LOG_ENTRIES + 1, "应保留最新 200 条 + 1 条标记");
+        assert_eq!(logs[1], "msg-10".to_string());
+        assert_eq!(logs.last().unwrap(), &format!("msg-{}", MAX_LOG_ENTRIES + 9));
+
+        // 单条超长:截断到 ≤4 KiB(含截断标记),不突破条目上限。
+        let sink2 = ScriptLogSink::new();
+        sink2.push("x".repeat(100_000));
+        let logs2 = sink2.logs();
+        assert_eq!(logs2.len(), 1);
+        assert!(logs2[0].len() <= MAX_LOG_ENTRY_BYTES + "…(截断)".len());
+        assert!(logs2[0].ends_with("…(截断)"));
+
+        // 多字节字符在 char 边界截断,不出破碎 UTF-8。
+        let sink3 = ScriptLogSink::new();
+        sink3.push("中".repeat(10_000));
+        assert!(sink3.logs()[0].ends_with("…(截断)"));
+
+        // 总字节超限(条数未超):同样丢最旧。
+        let sink4 = ScriptLogSink::new();
+        for i in 0..8 {
+            sink4.push(format!("m{i}-").to_string() + &"y".repeat(3 * 1024));
+        }
+        let logs4 = sink4.logs();
+        assert!(logs4.len() < 8, "总量超 16KiB 应丢最旧: 剩 {} 条", logs4.len());
+        assert!(logs4[0].starts_with("(前 "));
     }
 }

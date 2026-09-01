@@ -19,7 +19,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(包成 `(
 | `await expect(pattern, timeout_ms, [port])` | 用正则 `pattern` 匹配**整行**接收缓冲 | 首条匹配行;**超时无匹配返回空串 `""`** |
 | `await clear([port])` | 清空接收缓冲 | 无 |
 | `await sleep(ms)` | 睡眠 ms 毫秒 | 无 |
-| `log(message)` | 输出日志(**不中断脚本**,可循环调用) | 无 |
+| `log(message)` | 输出调试日志(**不中断脚本**,可循环调用) | 无 |
 
 `[port]` 缺省 = 当前活动端口;传端口寻址则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send` 静默失败、`expect` 返回空串,照样要判空。
 
@@ -55,9 +55,9 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 ## 硬约束(违背即出错)
 
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`。
-2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。
+2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。日志出口:UI 运行实时显示;**经 MCP 运行(`serial_run_script` / `serial_run_saved_script`)时,log 输出会随工具响应一次性返回**(无论成功/失败/超时都带,上限最近 200 条/16 KiB,超限丢最旧)——调试脚本时在关键分支 `log` 中间变量即可看到。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量转成 `"/OK/"`,斜杠让正则编译失败)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
-4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具 `serial_run_script` 运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,循环要有退出条件。内存上限 64MiB,超出被强杀。
+4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具(`serial_run_script` / `serial_run_saved_script`)运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,循环要有退出条件。内存上限 64MiB,超出被强杀。
 
 ## 核心模式
 

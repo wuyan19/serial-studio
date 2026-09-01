@@ -562,6 +562,7 @@ async fn handle_client_msg(
                     args,
                     &run_id,
                     abort,
+                    None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
                 )
                 .await;
                 script_runs.lock().unwrap().remove(&run_id_for_cleanup);

@@ -30,5 +30,8 @@ pub use opener::{PortOpener, RealPortOpener};
 pub use port_io::{PortIo, SerialPortIo};
 pub use port_task::{PortCommand, PortHandle};
 pub use rx_buffer::RxBuffer;
-pub use script::{run_script, run_script_with_timeout, Script, ScriptError, ScriptParam};
+pub use script::{
+    run_script, run_script_with_timeout, Script, ScriptError, ScriptLogSink, ScriptParam,
+    ScriptRunOutcome,
+};
 pub use types::*;

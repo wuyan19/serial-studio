@@ -147,7 +147,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_run_script",
-                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms),以及同步 log(message) 输出调试日志(日志随本工具响应返回,最多最近 200 条/16 KiB,超限丢最旧);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -159,8 +159,21 @@ fn handle_tools_list() -> Value {
                 }
             },
             {
+                "name": "serial_run_saved_script",
+                "description": "按 name 执行脚本库(scripts.json)中已保存的脚本(先用 serial_list_scripts 查看、serial_save_script 保存)。执行路径与 serial_run_script 相同:脚本内 log(message) 的调试日志随本工具响应返回;params 声明的 default 会自动填充(显式传入的 args 优先,键值均 string);受 enable_scripting 开关限制,默认关闭。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "脚本库中的脚本名(serial_list_scripts 可查)" },
+                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),同 serial_send 的 port。缺省时使用唯一打开的串口" },
+                        "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string,未传的键用脚本声明的 default 填充。可选", "additionalProperties": { "type": "string" } }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
                 "name": "serial_save_script",
-                "description": "保存(或覆盖)一个 JS 脚本到 serial-studio 脚本库(scripts.json),供日后在 UI 或 MCP 复用。这是**数据管理而非执行代码**,不受 enable_scripting 开关限制。name 是脚本唯一标识,已存在则覆盖。脚本内容仍需先用 serial_run_script 调试验证。",
+                "description": "保存(或覆盖)一个 JS 脚本到 serial-studio 脚本库(scripts.json),供日后在 UI 或 MCP 复用(保存后可用 serial_run_saved_script 按名执行)。这是**数据管理而非执行代码**,不受 enable_scripting 开关限制。name 是脚本唯一标识,已存在则覆盖。脚本内容仍需先用 serial_run_script 调试验证。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -223,12 +236,8 @@ async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
         "serial_status" => tool_serial_status(arguments, state).await,
         "serial_grep" => tool_serial_grep(arguments, state).await,
         "serial_clear" => tool_serial_clear(arguments, state).await,
-        "serial_run_script" => {
-            let enable_scripting = state
-                .enable_scripting
-                .load(std::sync::atomic::Ordering::Relaxed);
-            tool_serial_run_script(arguments, state, enable_scripting).await
-        }
+        "serial_run_script" => tool_serial_run_script(arguments, state).await,
+        "serial_run_saved_script" => tool_serial_run_saved_script(arguments, state).await,
         "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
@@ -482,17 +491,63 @@ async fn tool_serial_clear(args: Value, state: &AppState) -> Value {
     }
 }
 
-async fn tool_serial_run_script(
-    args: Value,
+async fn tool_serial_run_script(args: Value, state: &AppState) -> Value {
+    let code = match args.get("code").and_then(|c| c.as_str()) {
+        Some(c) => c,
+        None => return error_text("Missing required parameter: code".into()),
+    };
+    // 运行时参数 args(注入脚本 args.<name>);缺省空。值非 string 的条目跳过。
+    let run_args = supplied_run_args(args.get("args"));
+    let script = ss_core::Script {
+        description: None,
+        group: None,
+        params: Vec::new(),
+        code: code.to_string(),
+    };
+    execute_script(state, &args, script, run_args).await
+}
+
+/// 执行脚本库(scripts.json)中已保存的脚本:按 name 取出后走与 serial_run_script
+/// 相同的执行路径(闸门/预检/并发上限/日志返回)。读到即快照——run 期间 save/delete
+/// 覆盖同名脚本不影响本次执行(scripts_store 的 LOCK 只保证读不与写交错)。
+async fn tool_serial_run_saved_script(args: Value, state: &AppState) -> Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return error_text("Missing required parameter: name".into()),
+    };
+    let script = match crate::scripts_store::load().get(&name) {
+        Some(s) => s.clone(),
+        None => {
+            return error_text(format!(
+                "无脚本「{}」,用 serial_list_scripts 查看可用脚本",
+                name
+            ))
+        }
+    };
+    // name 查找先于 execute_script 内的闸门:属只读元数据访问(list 工具本可见),无害;
+    // 执行能力仍统一由闸门拦截。
+    let run_args = merge_run_args(&script.params, args.get("args"));
+    execute_script(state, &args, script, run_args).await
+}
+
+/// 脚本执行统一路径(enable_scripting 闸门 → resolve_port → 端口预检 → 并发上限 →
+/// run_script → 日志随响应返回)。serial_run_script 与 serial_run_saved_script 共用,
+/// 执行 JS 的工具必经此路——闸门语义单一真相,新增执行类工具不会漏拦。
+async fn execute_script(
     state: &AppState,
-    enable_scripting: bool,
+    args: &Value,
+    script: ss_core::Script,
+    run_args: std::collections::HashMap<String, String>,
 ) -> Value {
     let manager = &state.manager;
     // 远程 MCP 路径强制闸门:服务器无认证,脚本执行须显式开启
-    if !enable_scripting {
+    if !state
+        .enable_scripting
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         return error_text("脚本执行未启用(settings.json 的 enable_scripting=false)".into());
     }
-    let port = match resolve_port(&args, state).await {
+    let port = match resolve_port(args, state).await {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
@@ -505,29 +560,62 @@ async fn tool_serial_run_script(
         Ok(p) => p,
         Err(_) => return error_text("脚本执行并发已满,稍后再试".into()),
     };
-    let code = match args.get("code").and_then(|c| c.as_str()) {
-        Some(c) => c,
-        None => return error_text("Missing required parameter: code".into()),
+    let ss_core::ScriptRunOutcome { result, logs } =
+        ss_core::run_script(&port, &script, manager.clone(), run_args).await;
+    // 日志随结果返回(MCP 无实时推送出口):成功/失败/超时均拼上 log() 收集的输出,AI 才能调试脚本。
+    // 空日志省略该段,避免噪音。
+    match result {
+        Ok(()) => ok_text(with_logs("脚本执行完成", &logs)),
+        Err(e) => error_text(with_logs(
+            &format!("脚本失败: {}", e.display_message()),
+            &logs,
+        )),
+    }
+}
+
+/// 调用方显式提供的运行时参数(值非 string 的条目跳过,与 serial_run_script 现状一致)。
+fn supplied_run_args(supplied: Option<&Value>) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(Value::Object(m)) = supplied {
+        for (k, v) in m {
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 运行时参数合并:显式 args 优先;**key 缺失**才用脚本 params 声明的 default 填充。
+/// 显式空串视为已提供、不覆盖 default(与 UI 表单语义一致);key 存在但值非 string
+/// 也视为已提供(跳过值、不填 default,别把"值非 string"当"缺 key")。
+/// select 的 default 不在 options 中也宽容填入——save 侧不校验 options,run 侧校验
+/// 会造成"能存不能跑"的坑。
+fn merge_run_args(
+    params: &[ss_core::ScriptParam],
+    supplied: Option<&Value>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = supplied_run_args(supplied);
+    let present: std::collections::HashSet<&String> = match supplied {
+        Some(Value::Object(m)) => m.keys().collect(),
+        _ => std::collections::HashSet::new(),
     };
-    // 运行时参数 args(注入脚本 args.<name>);缺省空。值非 string 的条目跳过。
-    let run_args: std::collections::HashMap<String, String> = args
-        .get("args")
-        .and_then(|a| a.as_object())
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let script = ss_core::Script {
-        description: None,
-        group: None,
-        params: Vec::new(),
-        code: code.to_string(),
-    };
-    match ss_core::run_script(&port, &script, manager.clone(), run_args).await {
-        Ok(()) => ok_text("脚本执行完成".into()),
-        Err(e) => error_text(format!("脚本失败: {}", e.display_message())),
+    for p in params {
+        if !present.contains(&p.name) {
+            if let Some(d) = &p.default {
+                out.entry(p.name.clone()).or_insert_with(|| d.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 拼接脚本日志到工具响应文本:有日志才附"脚本日志:"段,无日志原样返回(省噪音)。
+fn with_logs(message: &str, logs: &[String]) -> String {
+    if logs.is_empty() {
+        message.to_string()
+    } else {
+        format!("{}\n\n脚本日志:\n{}", message, logs.join("\n"))
     }
 }
 
@@ -764,7 +852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_has_ten() {
+    async fn tools_list_contains_expected_tools() {
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             &make_state(),
@@ -773,10 +861,11 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            10,
-            "7 个执行类 + 3 个脚本库管理(save/list/delete)"
+            11,
+            "7 个执行类 + 4 个脚本库工具(run_saved/save/list/delete)"
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"serial_run_saved_script"));
         assert!(names.contains(&"serial_save_script"));
         assert!(names.contains(&"serial_list_scripts"));
         assert!(names.contains(&"serial_delete_script"));
@@ -788,6 +877,97 @@ mod tests {
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"code":"await sleep(1)"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// serial_run_saved_script 同受 enable_scripting 闸门:默认 false 拒执行。
+    #[tokio::test]
+    async fn serial_run_saved_script_disabled_by_default() {
+        ensure_test_config_dir();
+        let name = unique_name("gate");
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
+            name
+        );
+        handle_request(&req, &make_state()).await;
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_run_saved_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "enable_scripting=false 应拦 saved 脚本执行"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("未启用"), "应提示未启用: {}", text);
+    }
+
+    /// serial_run_saved_script:name 不存在报错并提示 list;name 缺失/空串报缺参。
+    #[tokio::test]
+    async fn serial_run_saved_script_name_not_found_or_missing() {
+        ensure_test_config_dir();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_saved_script","arguments":{"name":"no-such-script-xyz"}}}"#;
+        let resp = handle_request(req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("无脚本") && text.contains("serial_list_scripts"),
+            "应报无脚本并提示 list: {}",
+            text
+        );
+        // name 空串 → 缺参(对齐 save/delete 的非空检查)
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_saved_script","arguments":{"name":""}}}"#;
+        let resp = handle_request(req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// merge_run_args:default 只填缺失 key;显式空串不覆盖;非 string 值视为已提供跳过。
+    #[test]
+    fn merge_run_args_semantics() {
+        let params = vec![
+            ss_core::ScriptParam {
+                name: "a".into(),
+                label: None,
+                kind: "string".into(),
+                default: Some("DA".into()),
+                options: vec![],
+            },
+            ss_core::ScriptParam {
+                name: "b".into(),
+                label: None,
+                kind: "string".into(),
+                default: Some("DB".into()),
+                options: vec![],
+            },
+            ss_core::ScriptParam {
+                name: "c".into(),
+                label: None,
+                kind: "string".into(),
+                default: None,
+                options: vec![],
+            },
+        ];
+        // 未传任何 args:有 default 的填上
+        let m = merge_run_args(&params, None);
+        assert_eq!(m.get("a").map(String::as_str), Some("DA"));
+        assert_eq!(m.get("b").map(String::as_str), Some("DB"));
+        assert!(!m.contains_key("c"));
+
+        // 显式空串 a="":已提供,不用 default;显式 b="x" 优先
+        let supplied = serde_json::json!({"a": "", "b": "x"});
+        let m = merge_run_args(&params, Some(&supplied));
+        assert_eq!(m.get("a").map(String::as_str), Some(""));
+        assert_eq!(m.get("b").map(String::as_str), Some("x"));
+
+        // key 存在但值非 string:a=42 → 跳过值且不填 default(不算缺 key)
+        let supplied = serde_json::json!({"a": 42});
+        let m = merge_run_args(&params, Some(&supplied));
+        assert!(!m.contains_key("a"), "非 string 值应跳过且不填 default");
+        assert_eq!(m.get("b").map(String::as_str), Some("DB"));
+
+        // args 非对象(如数组):当空处理,default 正常填
+        let m = merge_run_args(&params, Some(&serde_json::json!([])));
+        assert_eq!(m.get("a").map(String::as_str), Some("DA"));
     }
 
     #[tokio::test]
