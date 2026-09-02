@@ -3,7 +3,7 @@
 //! 移植自 terminal-serial，适配 serial-studio 的异步 SerialManager + 多串口：
 //! - 工具加 `port` 参数（缺省时用唯一打开的串口）
 //! - handle_request 与各 tool 函数均为 async（调 manager 的 async 方法）
-//! - 暴露 6 工具：serial_list / serial_send / serial_read / serial_status / serial_grep / serial_clear
+//! - 暴露 11 工具：6 基础(list/send/read/status/grep/clear) + 2 脚本执行(run_script/run_saved_script) + 3 脚本库(save/list/delete)
 
 use crate::address::AliasMatch;
 use crate::AppState;
@@ -86,12 +86,12 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_send",
-                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，自动追加换行。设置 timeout_ms > 0 时会等待并返回响应。",
+                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，自动追加换行。timeout_ms>0 时等待并返回响应（首字节等到超时，250ms 静默期收尾）；该读取是破坏性的（清空缓冲），勿再用 grep/read 接力取同一响应。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "data": { "type": "string", "description": "要发送的数据" },
-                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
                         "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
                         "timeout_ms": { "type": "integer", "default": 0, "description": "发送后等待响应的超时（毫秒），0 不等待" }
@@ -105,7 +105,7 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名" },
+                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "输出编码：text 为文本，hex 为十六进制" },
                         "timeout_ms": { "type": "integer", "default": 100, "description": "缓冲区空时等待超时（毫秒）" }
                     }
@@ -117,17 +117,17 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名" }
+                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" }
                     }
                 }
             },
             {
                 "name": "serial_grep",
-                "description": "在接收缓冲区中搜索匹配模式（非破坏）。text 模式支持正则，hex 模式按字节序列。",
+                "description": "在接收缓冲区中搜索匹配模式（非破坏、可反复；返回全部匹配行）。text 模式为行正则，hex 模式按字节序列。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名" },
+                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
                         "pattern": { "type": "string", "description": "搜索模式" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "pattern 的编码：text 为文本（正则），hex 为十六进制字节序列" },
                         "timeout_ms": { "type": "integer", "default": 1000, "description": "等待匹配的超时（毫秒）" }
@@ -141,17 +141,17 @@ fn handle_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口名或别名" }
+                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" }
                     }
                 }
             },
             {
                 "name": "serial_run_script",
-                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms),以及同步 log(message) 输出调试日志(日志随本工具响应返回,最多最近 200 条/16 KiB,超限丢最旧);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "description": "在串口上执行一段 JS 脚本(QuickJS)。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms),同步 log(message) 输出调试日志(日志随本工具响应返回,最多最近 200 条/16 KiB,超限丢最旧),以及同步文件函数 file_stat(path)/file_md5(path)/read_file(path)/read_b64_chunk(path,index,chunk_bytes)(读宿主机文件,详见 serial_script_guide);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭;运行上限 5 分钟,超时被中止。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),同 serial_send 的 port。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址同 serial_send" },
                         "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" },
                         "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string。可选", "additionalProperties": { "type": "string" } }
                     },
@@ -160,12 +160,12 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_run_saved_script",
-                "description": "按 name 执行脚本库(scripts.json)中已保存的脚本(先用 serial_list_scripts 查看、serial_save_script 保存)。执行路径与 serial_run_script 相同:脚本内 log(message) 的调试日志随本工具响应返回;params 声明的 default 会自动填充(显式传入的 args 优先,键值均 string);受 enable_scripting 开关限制,默认关闭。",
+                "description": "按 name 执行脚本库(scripts.json)中已保存的脚本(先用 serial_list_scripts 查看、serial_save_script 保存)。执行路径与 serial_run_script 相同(含 5 分钟运行上限;默认关闭,须 enable_scripting 开启):脚本内 log(message) 的调试日志随本工具响应返回;params 声明的 default 会自动填充(显式传入的 args 优先,键值均 string)。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "脚本库中的脚本名(serial_list_scripts 可查)" },
-                        "port": { "type": "string", "description": "串口寻址:完整键、端口别名或设备昵称作用域(test::COM5),同 serial_send 的 port。缺省时使用唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址同 serial_send" },
                         "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string,未传的键用脚本声明的 default 填充。可选", "additionalProperties": { "type": "string" } }
                     },
                     "required": ["name"]
@@ -189,7 +189,7 @@ fn handle_tools_list() -> Value {
                                 "properties": {
                                     "name": { "type": "string", "description": "args.<name> 取值键名" },
                                     "label": { "type": "string", "description": "UI 显示标签;缺省用 name" },
-                                    "type": { "type": "string", "enum": ["string", "select"], "description": "参数类型" },
+                                    "type": { "type": "string", "enum": ["string", "select", "file"], "description": "参数类型;file 表示值为宿主机文件路径(UI 采集带文件选择按钮,脚本内配合 read_b64_chunk/file_md5 等文件函数使用)" },
                                     "default": { "type": "string", "description": "缺省值(可选)" },
                                     "options": { "type": "array", "items": { "type": "string" }, "description": "select 的可选项;string 留空" }
                                 },
@@ -782,8 +782,8 @@ serial_list 输出会标注每个端口的别名与所属设备昵称。
 
 ## 推荐工作流
 
-- 简单命令-响应：`serial_send(data="AT", timeout_ms=1000)`（一步拿响应）。
-- 等待特定输出：`serial_send` → `serial_grep(pattern="OK", timeout_ms=3000)` → `serial_clear`。
+- 简单命令-响应：`serial_send(data="AT", timeout_ms=1000)`（一步拿响应；该读取破坏性清空缓冲）。
+- 等待特定输出：`serial_send`（不设 timeout_ms）→ `serial_grep(pattern="OK", timeout_ms=3000)` → `serial_clear`。send 设了 timeout_ms 时响应已被其读走，勿再 grep/read 接力。
 - 不要用 `serial_read` 轮询等待——每次读都会清空缓冲区，目标未到时数据会丢。
 
 ## 陷阱
@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(
             tools.len(),
             11,
-            "7 个执行类 + 4 个脚本库工具(run_saved/save/list/delete)"
+            "8 个执行类(含 run/run_saved) + 3 个脚本库工具(save/list/delete)"
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"serial_run_saved_script"));

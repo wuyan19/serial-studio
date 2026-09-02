@@ -41,17 +41,17 @@ export interface MacroResult {
 }
 
 /** 一个 JS 脚本定义(与后端 ss_core::Script 对齐)。code 为 JS 源码。 */
-/** 脚本运行时参数定义(string / select),与后端 ss_core::ScriptParam 对齐。 */
+/** 脚本运行时参数定义(string / select / file),与后端 ss_core::ScriptParam 对齐。 */
 export interface ScriptParam {
   /** 脚本里 args.<name> 取值的键名。 */
   name: string;
   /** UI 标签;缺省用 name。 */
   label?: string;
-  /** "string" | "select"。 */
-  type: "string" | "select";
+  /** "string" | "select" | "file"(file = 宿主机文件路径,采集时带浏览按钮)。 */
+  type: "string" | "select" | "file";
   /** 缺省值(运行收集时预填)。 */
   default?: string;
-  /** select 的可选项;string 留空。 */
+  /** select 的可选项;string/file 留空。 */
   options?: string[];
 }
 

@@ -18,3 +18,7 @@ regex = "1"
 # 脚本引擎:rquickjs 绑定 QuickJS,futures feature 启用 AsyncRuntime/promise-as-future。
 # rquickjs 无 tokio feature——async 由 Rust futures 驱动,在 tokio runtime 上 await 时 tokio 原语才生效。
 rquickjs = { version = "0.12.2", features = ["futures"] }
+
+# 脚本文件函数:read_b64_chunk 编码 / file_md5 校验(流式)
+base64 = "0.22"
+md-5 = "0.10"

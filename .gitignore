@@ -22,3 +22,4 @@
 /.tauri/
 *.key*
 
+.zcode/

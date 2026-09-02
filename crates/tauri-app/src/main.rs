@@ -440,6 +440,16 @@ async fn save_json_file(default_name: String, content: String) -> Result<bool, S
     }
 }
 
+/// 脚本 file 类型参数的"浏览"按钮：原生文件选择框（同步 rfd 在 blocking 线程弹，与
+/// capture_begin 同款）。返回 None=用户取消。
+#[tauri::command]
+async fn pick_open_file() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().pick_file())
+        .await
+        .map_err(|e| e.to_string())
+        .map(|p| p.map(|path| path.to_string_lossy().into_owned()))
+}
+
 // ===== 终端记录落盘(capture:串口 RX 流写文件,非应用诊断日志) =====
 //
 // GUI 会话级功能,不进 ss_server::AppState(headless 不涉及;Tauri 侧独立 managed state,
@@ -951,6 +961,7 @@ fn run_gui() {
             stop_script,
             stop_macro,
             save_json_file,
+            pick_open_file,
             capture_begin,
             capture_write,
             capture_end,

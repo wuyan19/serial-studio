@@ -11,6 +11,9 @@
 //!
 //! 暴露的全局 async 函数:send / expect / clear / sleep(以及同步函数 log,输出脚本日志)。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
 //!
+//! 同步文件函数:read_file(全量文本,上限 64MiB)/ read_b64_chunk(按块 base64 随机访问,块须
+//! ≥3、3 的倍数且 ≤1MiB,越界返空串)/ file_stat(exists/size JSON)/ file_md5(流式 hex)。
+//!
 //! v1 限制(后续完善):
 //! - 串口原语失败用 tracing 记录、不抛 JS 异常(rquickjs `Async` 闭包的 `Ctx<'js>` 生命周期短于
 //!   返回 future,无法 move 进 async 块抛异常)。用户脚本自己的 `throw` 经 `into_future` 正常传播。
@@ -24,7 +27,7 @@
 use crate::event_bus::SerialEvent;
 use crate::manager::SerialManager;
 use rquickjs::prelude::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Promise};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Ctx, Promise};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -152,7 +155,7 @@ pub struct ScriptRunOutcome {
     pub logs: Vec<String>,
 }
 
-/// 一个脚本参数定义(string / select)。运行时收集值注入 QuickJS 的 `args.<name>`。
+/// 一个脚本参数定义(string / select / file)。运行时收集值注入 QuickJS 的 `args.<name>`。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScriptParam {
     /// 脚本里 `args.<name>` 取值的键名。
@@ -160,13 +163,14 @@ pub struct ScriptParam {
     /// UI 显示标签;缺省用 name。
     #[serde(default)]
     pub label: Option<String>,
-    /// "string" | "select"(`#[serde(rename)]` 因 type 是 Rust 关键字)。
+    /// "string" | "select" | "file"(`#[serde(rename)]` 因 type 是 Rust 关键字)。
+    /// file:值为文件路径 string,UI 采集时带文件选择按钮;select 用 options 下拉。
     #[serde(rename = "type")]
     pub kind: String,
     /// 缺省值(运行收集时预填)。
     #[serde(default)]
     pub default: Option<String>,
-    /// select 的可选项;string 类型留空。
+    /// select 的可选项;string/file 类型留空。
     #[serde(default)]
     pub options: Vec<String>,
 }
@@ -184,10 +188,33 @@ pub struct Script {
     /// 分组名(侧栏按组折叠);空 = 未分组。
     #[serde(default)]
     pub group: Option<String>,
-    /// 声明的运行时参数(string/select),持久化进 scripts.json。旧脚本缺省为空。
+    /// 声明的运行时参数(string/select/file),持久化进 scripts.json。旧脚本缺省为空。
     #[serde(default)]
     pub params: Vec<ScriptParam>,
     pub code: String,
+}
+
+/// 文件函数上限。`read_b64_chunk` 的块即单次内存峰值,封顶防脚本传超大值在 Rust 侧
+/// 直接分配(QuickJS 的 64MiB 堆限制管不到这里,极端值触发 alloc_error 会 abort 全进程);
+/// `read_file` 全量进内存,与 SKILL.md "小文件" 契约一致设 64MiB。
+const FILE_CHUNK_MAX: u64 = 1024 * 1024;
+const FILE_READ_MAX: u64 = 64 * 1024 * 1024;
+
+/// 读类文件函数的常规文件预检:目录/命名管道/设备等非常规路径直接 throw——
+/// 对它们做阻塞读会卡死脚本线程(中断机制打不穿陷入 syscall 的线程)并泄漏句柄。
+/// 返回 Metadata 供大小上限检查复用(file_stat 的 exists 语义同款)。
+fn regular_file_meta(ctx: &Ctx<'_>, fn_name: &str, path: &str) -> rquickjs::Result<std::fs::Metadata> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => Ok(m),
+        Ok(_) => Err(rquickjs::Exception::throw_message(
+            ctx,
+            &format!("{fn_name} {path}: 不是常规文件(目录/设备/管道不支持)"),
+        )),
+        Err(e) => Err(rquickjs::Exception::throw_message(
+            ctx,
+            &format!("{fn_name} {path}: {e}"),
+        )),
+    }
 }
 
 /// 执行一段 JS 脚本(MCP 路径:默认 300s 超时,不暴露停止)。`args` 为运行时参数值,注入 `args.<name>`。
@@ -488,6 +515,131 @@ async fn run_script_inner(
                             });
                         }),
                     ).map_err(|e| e.to_string())?;
+                }
+
+                // 文件函数(同步,本地 IO 快且阻塞仅影响本脚本线程):read_file 全量读(小文件;
+                // 大文件用 read_b64_chunk 流式)、read_b64_chunk 按块随机访问(块对齐 3 字节
+                // 保证拼接后 base64 -d 正确,支撑串口上传等 MB 级场景,内存峰值一块)、
+                // file_stat/file_md5 元信息与校验(md5 流式,内存常数级)。
+                // 失败直接 throw(Exception::throw_message),消息经 exc_to_msg 提取。
+                {
+                    globals.set(
+                        "file_stat",
+                        Func::from(|_ctx: Ctx<'_>, path: String| -> rquickjs::Result<String> {
+                            // 仅常规文件算 exists(目录/设备文件对"读文件上传"无意义)
+                            match std::fs::metadata(&path) {
+                                Ok(m) if m.is_file() => {
+                                    Ok(serde_json::json!({"exists": true, "size": m.len()}).to_string())
+                                }
+                                _ => Ok(serde_json::json!({"exists": false}).to_string()),
+                            }
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    globals.set(
+                        "file_md5",
+                        Func::from(|ctx: Ctx<'_>, path: String| -> rquickjs::Result<String> {
+                            let io_err =
+                                |e: std::io::Error| {
+                                    rquickjs::Exception::throw_message(
+                                        &ctx,
+                                        &format!("file_md5 {path}: {e}"),
+                                    )
+                                };
+                            regular_file_meta(&ctx, "file_md5", &path)?;
+                            let f = std::fs::File::open(&path).map_err(io_err)?;
+                            let mut reader = std::io::BufReader::new(f);
+                            use md5::Digest as _;
+                            let mut hasher = md5::Md5::new();
+                            std::io::copy(&mut reader, &mut hasher).map_err(io_err)?;
+                            Ok(format!("{:x}", hasher.finalize()))
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    globals.set(
+                        "read_file",
+                        Func::from(|ctx: Ctx<'_>, path: String| -> rquickjs::Result<String> {
+                            let meta = regular_file_meta(&ctx, "read_file", &path)?;
+                            // 全量进内存:超限直接报错,大文件走 read_b64_chunk 分块
+                            if meta.len() > FILE_READ_MAX {
+                                return Err(rquickjs::Exception::throw_message(
+                                    &ctx,
+                                    &format!(
+                                        "read_file {path}: 文件 {} 字节超过 {} 字节上限,请用 read_b64_chunk 分块",
+                                        meta.len(),
+                                        FILE_READ_MAX
+                                    ),
+                                ));
+                            }
+                            let data = std::fs::read(&path).map_err(|e| {
+                                rquickjs::Exception::throw_message(
+                                    &ctx,
+                                    &format!("read_file {path}: {e}"),
+                                )
+                            })?;
+                            Ok(String::from_utf8_lossy(&data).into_owned())
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    globals.set(
+                        "read_b64_chunk",
+                        Func::from(
+                            |ctx: Ctx<'_>,
+                             path: String,
+                             index: u64,
+                             chunk_bytes: u64|
+                             -> rquickjs::Result<String> {
+                                // 契约:chunk_bytes 须为 ≥3 的 3 的倍数且 ≤1MiB——调用方按同一值
+                                // 算总块数,静默对齐会造成块数错位;除末块外无 padding,
+                                // 全部块拼接后 base64 -d 才正确。上限见 FILE_CHUNK_MAX。
+                                if chunk_bytes < 3
+                                    || !chunk_bytes.is_multiple_of(3)
+                                    || chunk_bytes > FILE_CHUNK_MAX
+                                {
+                                    return Err(rquickjs::Exception::throw_message(
+                                        &ctx,
+                                        &format!(
+                                            "read_b64_chunk {path}: chunk_bytes 须为 ≥3 的 3 的倍数且 ≤{FILE_CHUNK_MAX} 字节,传了 {chunk_bytes}"
+                                        ),
+                                    ));
+                                }
+                                regular_file_meta(&ctx, "read_b64_chunk", &path)?;
+                                let offset = match index.checked_mul(chunk_bytes) {
+                                    Some(o) => o,
+                                    None => return Ok(String::new()),
+                                };
+                                let io_err =
+                                    |e: std::io::Error| {
+                                        rquickjs::Exception::throw_message(
+                                            &ctx,
+                                            &format!("read_b64_chunk {path}: {e}"),
+                                        )
+                                    };
+                                use std::io::{Read, Seek, SeekFrom};
+                                let mut f = std::fs::File::open(&path).map_err(io_err)?;
+                                f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
+                                let mut buf = vec![0u8; chunk_bytes as usize];
+                                let mut total = 0usize;
+                                while total < buf.len() {
+                                    match f.read(&mut buf[total..]) {
+                                        Ok(0) => break,
+                                        Ok(n) => total += n,
+                                        Err(e) => return Err(io_err(e)),
+                                    }
+                                }
+                                if total == 0 {
+                                    return Ok(String::new()); // 越界(EOF):空串
+                                }
+                                buf.truncate(total);
+                                use base64::Engine as _;
+                                Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
+                            },
+                        ),
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
 
                 // 注入运行时参数 args(运行收集的值):globalThis.args = { name: value, ... }。
@@ -1026,5 +1178,192 @@ mod tests {
         let logs4 = sink4.logs();
         assert!(logs4.len() < 8, "总量超 16KiB 应丢最旧: 剩 {} 条", logs4.len());
         assert!(logs4[0].starts_with("(前 "));
+    }
+
+    /// 测试临时文件:唯一名 + 用完自动删。
+    struct TempFile(String);
+    impl TempFile {
+        fn new(content: &[u8]) -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "ss-script-test-{}-{}.bin",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(&path, content).unwrap();
+            Self(path.to_string_lossy().into_owned())
+        }
+        fn path(&self) -> &str {
+            &self.0
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// file_stat/file_md5:存在时 exists/size 正确、md5 对已知向量;缺失时 stat 返
+    /// exists:false 不抛、md5 抛错;目录不算 exists。
+    #[tokio::test]
+    async fn file_stat_md5() {
+        let f = TempFile::new(b"abc");
+        let dir = std::env::temp_dir();
+        let code = format!(
+            r#"const s = JSON.parse(file_stat({p}));
+const d = JSON.parse(file_stat({dir}));
+const out = [s.exists, s.size, d.exists, file_md5({p})];
+throw new Error(JSON.stringify(out));"#,
+            p = json_str(f.path()),
+            dir = json_str(&dir.to_string_lossy()),
+        );
+        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(
+            matches!(&r, Err(ScriptError::Script(m)) if m.contains(r#"[true,3,false,"900150983cd24fb0d6963f7d28e17f72"]"#)),
+            "stat/md5 应为 [true,3,false,md5(abc)]: {:?}",
+            r
+        );
+
+        // 缺失文件:file_stat 不抛(exists:false),file_md5 抛
+        let missing = std::env::temp_dir().join("ss-script-test-no-such-file");
+        let code = format!(
+            r#"const s = JSON.parse(file_stat({p}));
+if (!s.exists) {{ file_md5({p}); }}"#,
+            p = json_str(&missing.to_string_lossy()),
+        );
+        let r2 = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(
+            matches!(&r2, Err(ScriptError::Script(m)) if m.contains("file_md5")),
+            "缺失文件 file_md5 应 throw 含函数名: {:?}",
+            r2
+        );
+    }
+
+    /// read_file:全量 UTF-8(lossy)往返。
+    #[tokio::test]
+    async fn read_file_roundtrip() {
+        let f = TempFile::new("你好 serial-studio €".as_bytes());
+        let code = format!(r#"throw new Error(read_file({p}));"#, p = json_str(f.path()));
+        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(
+            matches!(&r, Err(ScriptError::Script(m)) if m == "你好 serial-studio €"),
+            "read_file 内容往返: {:?}",
+            r
+        );
+    }
+
+    /// read_b64_chunk:整除/余数/越界/对齐契约/拼接还原;缺失文件与非法 chunk_bytes 抛错。
+    #[tokio::test]
+    async fn read_b64_chunk_boundaries() {
+        // 10 字节 = 3 块整 + 1 字节余:块拼接应等于整文件 base64
+        let data: Vec<u8> = (0u8..10).collect();
+        let f = TempFile::new(&data);
+        use base64::Engine as _;
+        let expected = base64::engine::general_purpose::STANDARD.encode(&data);
+        let code = format!(
+            r#"let acc = "";
+for (let i = 0; ; i++) {{
+  const c = read_b64_chunk({p}, i, 3);
+  if (c === "") break;
+  acc += c;
+}}
+if (acc !== {expected}) throw new Error("块拼接不符: " + acc);
+if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
+            p = json_str(f.path()),
+            expected = json_str(&expected),
+        );
+        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(r.is_ok(), "块拼接应还原整文件 b64: {:?}", r);
+
+        // 大块(192)跨多块 + 末块 padding;非 3 倍数抛;缺失文件抛
+        let big: Vec<u8> = (0u16..400).map(|i| i as u8).collect();
+        let fb = TempFile::new(&big);
+        let expected_big = base64::engine::general_purpose::STANDARD.encode(&big);
+        let code2 = format!(
+            r#"let acc = "";
+for (let i = 0; ; i++) {{
+  const c = read_b64_chunk({p}, i, 192);
+  if (c === "") break;
+  acc += c;
+}}
+if (acc !== {expected}) throw new Error("192 块拼接不符");
+read_b64_chunk({p}, 0, 4);"#,
+            p = json_str(fb.path()),
+            expected = json_str(&expected_big),
+        );
+        let r2 = run_script_with_timeout("COM0", &code2, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(
+            matches!(&r2, Err(ScriptError::Script(m)) if m.contains("3 的倍数")),
+            "chunk_bytes=4 应抛 '3 的倍数': {:?}",
+            r2
+        );
+
+        let missing = std::env::temp_dir().join("ss-script-test-no-such-file-b64");
+        let code3 = format!(r#"read_b64_chunk({p}, 0, 3);"#, p = json_str(&missing.to_string_lossy()));
+        let r3 = run_script_with_timeout("COM0", &code3, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        assert!(
+            matches!(&r3, Err(ScriptError::Script(m)) if m.contains("read_b64_chunk")),
+            "缺失文件应 throw 含函数名: {:?}",
+            r3
+        );
+    }
+
+    /// 文件函数防护:目录被三个读函数拒绝(非常规文件防线程卡死);
+    /// read_file 超 64MiB、read_b64_chunk 超 1MiB 块上限均 throw。
+    #[tokio::test]
+    async fn file_fn_guards() {
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let run = |code: String| async move {
+            run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await
+        };
+        // 目录(非常规文件):三个读函数都应 throw「不是常规文件」
+        for code in [
+            format!(r#"read_file({d});"#, d = json_str(&dir)),
+            format!(r#"file_md5({d});"#, d = json_str(&dir)),
+            format!(r#"read_b64_chunk({d}, 0, 3);"#, d = json_str(&dir)),
+        ] {
+            let r = run(code).await;
+            assert!(
+                matches!(&r, Err(ScriptError::Script(m)) if m.contains("不是常规文件")),
+                "目录应被文件函数拒绝: {:?}",
+                r
+            );
+        }
+
+        // read_file 大小上限:set_len 稀疏扩展到 64MiB+1(不实际写满)
+        let big = TempFile::new(b"x");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(big.path())
+            .unwrap()
+            .set_len(FILE_READ_MAX + 1)
+            .unwrap();
+        let r = run(format!(r#"read_file({p});"#, p = json_str(big.path()))).await;
+        assert!(
+            matches!(&r, Err(ScriptError::Script(m)) if m.contains("read_b64_chunk")),
+            "超限应提示改用分块: {:?}",
+            r
+        );
+
+        // read_b64_chunk 块上限:cap 之上最近的 3 倍数
+        let cap_str = FILE_CHUNK_MAX.to_string();
+        let f = TempFile::new(b"abc");
+        let oversize = (FILE_CHUNK_MAX / 3 + 1) * 3;
+        let r = run(format!(
+            r#"read_b64_chunk({p}, 0, {n});"#,
+            p = json_str(f.path()),
+            n = oversize
+        ))
+        .await;
+        assert!(
+            matches!(&r, Err(ScriptError::Script(m)) if m.contains(&cap_str)),
+            "超 1MiB 块应 throw 含上限值: {:?}",
+            r
+        );
+    }
+
+    /// JS 字符串字面量(路径等含反斜杠/引号时安全嵌入 code)。
+    fn json_str(s: &str) -> String {
+        serde_json::to_string(s).unwrap()
     }
 }

@@ -34,15 +34,16 @@ export function hexToBytes(hex: string): Uint8Array {
  * 粘贴即用,自动填入参数区)。格式:
  *   // @param <name> string default=值
  *   // @param <name> select 选项1|选项2|... default=选项
+ *   // @param <name> file default=路径
  * 返回解析出的参数数组;code 无任何 @param 行时返回 null(调用方据此不覆盖现有 params)。
  */
 export function parseParamsFromCode(code: string): ScriptParam[] | null {
   const params: ScriptParam[] = [];
   for (const line of code.split("\n")) {
-    const m = line.match(/^\s*\/\/\s*@param\s+(\w+)\s+(string|select)\s*(.*)$/);
+    const m = line.match(/^\s*\/\/\s*@param\s+(\w+)\s+(string|select|file)\s*(.*)$/);
     if (!m) continue;
     const name = m[1];
-    const type = m[2] as "string" | "select";
+    const type = m[2] as "string" | "select" | "file";
     const rest = m[3] ?? "";
     // 容错:default 提取到 ]/[ 空格停(AI 可能误生成 [default=x]);options 剥方括号
     const defaultMatch = rest.match(/\bdefault=([^\[\]\s]+)/);

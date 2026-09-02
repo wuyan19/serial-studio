@@ -433,7 +433,7 @@ export function SettingsPanel({
                     />
                     <span>允许远程执行 JS 脚本</span>
                     <span
-                      title="默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本(沙箱仅限串口原语,无文件/网络访问)。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。"
+                      title="默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本——脚本可读宿主机文件(任意路径,暂无白名单),无写入/网络访问。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。"
                       style={{ cursor: "help" }}
                     >
                       ⚠
@@ -871,10 +871,10 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }:
   );
 }
 
-/** 运行时参数收集:按脚本声明 params 渲染表单(string→输入框、select→下拉),确认回调 args。
- *  预填上次运行的值(initialValues,App 侧 localStorage 缓存)——二次运行只改要动的参数;
- *  行内 ↺ / 底部「全部重置」回到声明默认(与快捷键对话框同款交互,↺ 变淡即已是默认,
- *  扫一眼就知道哪些参数被改过)。 */
+/** 运行时参数收集:按脚本声明 params 渲染表单(string/file→输入框(file 带浏览)、
+ *  select→下拉),确认回调 args。预填上次运行的值(initialValues,App 侧 localStorage
+ *  缓存)——二次运行只改要动的参数;行内 ↺ / 底部「全部重置」回到声明默认(与快捷键
+ *  对话框同款交互,↺ 变淡即已是默认,扫一眼就知道哪些参数被改过)。 */
 export function ScriptRunParamsDialog({ scriptName, params, initialValues, onConfirm, onCancel }: {
   scriptName: string;
   params: ScriptParam[];
@@ -887,6 +887,19 @@ export function ScriptRunParamsDialog({ scriptName, params, initialValues, onCon
   const defaults = useMemo(() => prefillRunValues(params, undefined), [params]);
   const [values, setValues] = useState<Record<string, string>>(() => prefillRunValues(params, initialValues));
   const setOne = (name: string, v: string) => setValues((prev) => ({ ...prev, [name]: v }));
+  // file 参数"浏览":原生文件选择框(tauri command + rfd);Web/远程窗形态手输路径,不显示按钮
+  const [browseErr, setBrowseErr] = useState("");
+  const browseFile = async (name: string) => {
+    setBrowseErr("");
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const picked = (await invoke("pick_open_file")) as string | null;
+      if (picked) setOne(name, picked);
+    } catch (e) {
+      // rfd 取消返回 null 走上面;到这里是调用真失败(如命令未注册)——提示后仍可手输路径
+      setBrowseErr(String(e));
+    }
+  };
   useDialogKeys({ onClose: onCancel, onEnter: () => onConfirm(values) });
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
@@ -903,8 +916,17 @@ export function ScriptRunParamsDialog({ scriptName, params, initialValues, onCon
                 {(p.options ?? []).filter((o) => o).map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             ) : (
-              <input className="field" value={values[p.name] ?? ""}
-                onChange={(e) => setOne(p.name, e.target.value)} autoCapitalize="off" spellCheck={false} />
+              <>
+                <input className="field" value={values[p.name] ?? ""}
+                  onChange={(e) => setOne(p.name, e.target.value)} autoCapitalize="off" spellCheck={false} />
+                {p.type === "file" && isTauri() && (
+                  <button type="button" className="mini-btn" title="浏览文件"
+                    aria-label={`浏览选择「${p.label || p.name}」文件`}
+                    onClick={() => void browseFile(p.name)}>
+                    …
+                  </button>
+                )}
+              </>
             )}
             <button
               type="button"
@@ -918,6 +940,9 @@ export function ScriptRunParamsDialog({ scriptName, params, initialValues, onCon
             </button>
           </ConfigRow>
         ))}
+        {browseErr && (
+          <div className="dialog__sub" role="alert">浏览失败: {browseErr}(可手动输入路径)</div>
+        )}
         <div className="btn-row" style={{ justifyContent: "space-between" }}>
           <button className="btn btn--ghost" onClick={() => setValues(defaults)}>恢复默认</button>
           <div style={{ display: "flex", gap: 8 }}>

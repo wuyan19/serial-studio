@@ -554,9 +554,10 @@ function ParamEditor({ param, onChange, onRemove }: {
         <input className="field param-card__label" value={param.label ?? ""}
           onChange={(e) => onChange({ ...param, label: e.target.value || undefined })} placeholder="标签（可选）" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         <select className="field param-card__type" value={param.type}
-          onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" })}>
+          onChange={(e) => onChange({ ...param, type: e.target.value as "string" | "select" | "file" })}>
           <option value="string">string</option>
           <option value="select">select</option>
+          <option value="file">file</option>
         </select>
         {isSelect && options.length > 0 ? (
           <select className="field param-card__default" value={param.default ?? ""}
