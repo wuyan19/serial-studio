@@ -23,7 +23,6 @@ use std::sync::Mutex;
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// 定位 scripts.json 所在目录:公开 API 内直接调用 [`crate::config::config_dir`]。
-
 fn file_at(dir: &Path) -> PathBuf {
     dir.join("scripts.json")
 }

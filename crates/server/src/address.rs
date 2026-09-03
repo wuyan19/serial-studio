@@ -263,14 +263,9 @@ impl Inner {
         // 后续重建走 spawn_blocking——不阻塞 tokio worker。
         this.rebuild();
         tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let t = Arc::clone(&this);
-                        let _ = tokio::task::spawn_blocking(move || t.rebuild()).await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
+            while let Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) = rx.recv().await {
+                let t = Arc::clone(&this);
+                let _ = tokio::task::spawn_blocking(move || t.rebuild()).await;
             }
         });
     }

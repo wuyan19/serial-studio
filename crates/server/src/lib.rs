@@ -262,6 +262,7 @@ pub fn set_alias_and_notify(
 /// 别名合法性校验(set_alias 唯一写入口的闸门):
 /// - 含 `::` 会污染复合键首段切分(别名只按裸名整串匹配,含分隔符即成不可达死名字);
 /// - 与真实枚举串口名冲突会让寻址产生歧义(Windows 串口名大小写不敏感,一并比对)。
+///
 /// 注:此校验只管本机写入的别名;远端设备的别名归远端校验——跨机同名冲突由
 /// AddressResolver 的"真实名恒优先于别名"在解析侧兜底。
 pub fn validate_alias(alias: &Option<String>) -> Result<(), String> {

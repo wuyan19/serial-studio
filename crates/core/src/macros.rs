@@ -164,7 +164,7 @@ pub fn encode_send(
     let mut bytes = match format {
         "hex" => {
             let cleaned: String = data.replace(" ", "").replace("0x", "").replace(",", "");
-            if cleaned.len() % 2 != 0 {
+            if !cleaned.len().is_multiple_of(2) {
                 return Err("odd length".into());
             }
             (0..cleaned.len())

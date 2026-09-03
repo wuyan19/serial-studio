@@ -705,7 +705,7 @@ mod tests {
     impl Read for FakePort {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             if self.disconnect {
-                Err(io::Error::new(io::ErrorKind::Other, "device removed"))
+                Err(io::Error::other("device removed"))
             } else {
                 Err(io::Error::from(io::ErrorKind::TimedOut))
             }

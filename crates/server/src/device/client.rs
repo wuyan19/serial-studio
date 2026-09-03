@@ -49,6 +49,7 @@ type WsSink = SplitSink<WsStream, Message>;
 ///   误配在途 open(close 的 Ok 只匹配 close 自己的 req,无 pending 即丢弃);
 /// - 旧版远端(回执无 req):回退端口匹配;写回执连 port 都没有时按 FIFO
 ///   配对最老在途回执(命令单通道保序,旧版同步写完才回,顺序即配对)。
+///
 /// Result 的 Ok 载荷 = 服务端实际打开的远端线名(Acquired.resolved;别名解析后
 /// 可能不同于请求串——open_blocking 据此以真名登记 IO,帧分发才不 miss)。
 pub(crate) enum PendingReply {
@@ -650,17 +651,12 @@ impl DeviceClient {
                 match port {
                     Some(port) => {
                         let port = normalize_wire(&port);
-                        self.route_write(
-                            req,
-                            &port,
-                            Err(io::Error::new(io::ErrorKind::Other, message.clone())),
-                        );
+                        self.route_write(req, &port, Err(io::Error::other(message.clone())));
                         self.route_result(req, &port, Err(message));
                     }
-                    None => self.route_legacy_err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("远端错误(无端口路由): {message}"),
-                    )),
+                    None => self.route_legacy_err(io::Error::other(format!(
+                        "远端错误(无端口路由): {message}"
+                    ))),
                 }
             }
             // 端口级断链传播:远端硬件拔出(USB)或远端的下级断开经其 hub 转报——
@@ -691,8 +687,8 @@ impl DeviceClient {
             ServerMsg::Opened { .. }
             | ServerMsg::Closed { .. }
             | ServerMsg::Holders { .. }
-            | ServerMsg::MetaChanged { .. }
-            | ServerMsg::ScriptsChanged { .. } => {
+            | ServerMsg::MetaChanged
+            | ServerMsg::ScriptsChanged => {
                 let _ = self.inner.cmd_tx.send(DeviceCommand::RefreshList);
             }
             _ => {}
@@ -705,7 +701,7 @@ impl DeviceClient {
             return;
         };
         // 线名入站归一:旧版远端回帧带 local:: 前缀,归一后与本侧登记键一致
-        let port = normalize_wire(&port);
+        let port = normalize_wire(port);
         let mut ports = self.inner.ports.lock().unwrap();
         if let Some(idx) = ports.iter().position(|(p, _)| p == &port) {
             if let Some(io) = ports[idx].1.upgrade() {
@@ -820,6 +816,8 @@ fn normalize_wire(wire: &str) -> String {
 
 /// writer 里处理一条命令:挂回执(回执由 reader 收到 Acquired/Ok/Error 时路由)+ 发 JSON。
 /// Open/Write/SetAlias 各取一个 req id 同时写进 pending 与出站消息——回执按 req 精确配对。
+// tungstenite::Error 是第三方类型(136B),Box 化徒增解引用摩擦
+#[allow(clippy::result_large_err)]
 async fn handle_command(
     sink: &Arc<tokio::sync::Mutex<WsSink>>,
     inner: &Arc<DeviceInner>,
@@ -891,6 +889,7 @@ async fn handle_command(
 }
 
 /// 发送 JSON(5s 超时防背压/半开卡死 writer;超时按 ConnectionClosed 视为断连)。
+#[allow(clippy::result_large_err)]
 async fn sink_send_json(
     sink: &Arc<tokio::sync::Mutex<WsSink>>,
     msg: &ClientMsg,

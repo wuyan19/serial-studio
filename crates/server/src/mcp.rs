@@ -747,7 +747,7 @@ fn error_text(text: String) -> Value {
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let cleaned: String = hex.replace(" ", "").replace("0x", "").replace(",", "");
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err("odd length".into());
     }
     (0..cleaned.len())
@@ -1261,7 +1261,7 @@ mod tests {
 
         // list → 不广播(只读)
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#;
-        handle_request(&req, &make_state_with_script_bus(tx.clone())).await;
+        handle_request(req, &make_state_with_script_bus(tx.clone())).await;
         assert!(rx.try_recv().is_err(), "list 不应触发 script_bus");
 
         // get → 不广播(只读,同 list)

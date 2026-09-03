@@ -51,6 +51,6 @@ impl PortIo for SerialPortIo {
         self.0
             .try_clone()
             .map(|p| Box::new(SerialPortIo(p)) as Box<dyn PortIo>)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(io::Error::other)
     }
 }

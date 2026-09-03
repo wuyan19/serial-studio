@@ -608,6 +608,8 @@ async fn run_macro(
 
 /// 运行 JS 脚本(本地主权路径,不查 enable_scripting——那是远程 WS/MCP 的闸门)。
 /// state.manager 是 Arc<SerialManager>,run_script 正好收 Arc,直接 move。
+// Tauri command 参数逐个注入,无法聚 struct
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn run_script(
     app: tauri::AppHandle,
@@ -1030,7 +1032,7 @@ fn attach_parent_console() -> bool {
         let name = b"CONOUT$\0";
         let out = CreateFileA(
             name.as_ptr(),
-            (GENERIC_READ | GENERIC_WRITE) as u32,
+            GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             OPEN_EXISTING,

@@ -65,6 +65,8 @@ pub struct PortHandle {
     pub physical: Option<PhysicalLayer>,
 }
 
+// 8 参为端口任务管线的一次性装配,聚 struct 只为压参数量得不偿失
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     port_name: String,
     port: Box<dyn PortIo>,

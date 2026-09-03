@@ -289,7 +289,7 @@ async fn handle_client_msg(
 
     match msg {
         ClientMsg::List => {
-            let ports = crate::list_ports_with_meta(&state).await;
+            let ports = crate::list_ports_with_meta(state).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
         ClientMsg::Open { port, config, req } => {
