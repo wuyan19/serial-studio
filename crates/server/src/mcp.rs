@@ -78,7 +78,7 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "serial_list",
-                "description": "列出系统所有串口及其打开状态与别名。无需指定端口，用于发现可用串口或确认某端口是否已打开。",
+                "description": "列出系统所有串口及其打开状态、别名与所属设备昵称。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -86,12 +86,12 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_send",
-                "description": "发送数据到串口并可选等待设备响应。text 模式 auto_newline 默认 true，自动追加换行。timeout_ms>0 时等待并返回响应（首字节等到超时，250ms 静默期收尾）；该读取是破坏性的（清空缓冲），勿再用 grep/read 接力取同一响应。",
+                "description": "发送数据到串口并可选等待设备响应。timeout_ms>0 时等待并返回响应：首字节最多等到超时，其后 250ms 无新数据即收尾。该读取是破坏性的（清空缓冲），勿再用 grep/read 接力取同一响应。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "data": { "type": "string", "description": "要发送的数据" },
-                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "data 的编码：text 为文本，hex 为十六进制" },
                         "auto_newline": { "type": "boolean", "default": true, "description": "text 模式是否追加换行" },
                         "timeout_ms": { "type": "integer", "default": 0, "description": "发送后等待响应的超时（毫秒），0 不等待" }
@@ -101,11 +101,11 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_read",
-                "description": "读取串口接收缓冲区数据（破坏性，读后清空）。空时按 timeout 等待。",
+                "description": "读取串口接收缓冲区数据（破坏性，读后清空）。空时按 timeout_ms 等待。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "输出编码：text 为文本，hex 为十六进制" },
                         "timeout_ms": { "type": "integer", "default": 100, "description": "缓冲区空时等待超时（毫秒）" }
                     }
@@ -113,7 +113,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_status",
-                "description": "获取指定串口的配置信息。",
+                "description": "获取已打开串口的配置：波特率、数据位、校验、停止位、流控、换行符、占用数与别名。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -123,11 +123,11 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_grep",
-                "description": "在接收缓冲区中搜索匹配模式（非破坏、可反复；返回全部匹配行）。text 模式为行正则，hex 模式按字节序列。",
+                "description": "在接收缓冲区中搜索匹配模式（非破坏、可反复；返回全部匹配）。text 模式为行正则，hex 模式按字节序列。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" },
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
                         "pattern": { "type": "string", "description": "搜索模式" },
                         "format": { "type": "string", "enum": ["text", "hex"], "default": "text", "description": "pattern 的编码：text 为文本（正则），hex 为十六进制字节序列" },
                         "timeout_ms": { "type": "integer", "default": 1000, "description": "等待匹配的超时（毫秒）" }
@@ -147,51 +147,51 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_debug_script",
-                "description": "在串口上临时执行一段 JS 脚本(QuickJS),用于调试验证——调通后可经 serial_save_script 落库,再用 serial_run_script 按名复用。脚本内可用全局 async 函数 send(data,[port])/expect(pattern,ms,[port])/clear([port])/sleep(ms),同步 log(message) 输出调试日志(日志随本工具响应返回,最多最近 200 条/16 KiB,超限丢最旧),以及同步文件函数 file_stat(path)/file_md5(path)/read_file(path)/read_b64_chunk(path,index,chunk_bytes)(读宿主机文件,详见 serial_script_guide);[port] 缺省=脚本运行端口,可指定其它已打开端口(支持完整键/端口别名/设备昵称作用域)以跨多串口。受 enable_scripting 开关限制,默认关闭;运行上限 5 分钟,超时被中止。调用前先获取 serial_script_guide prompt 了解可用函数与约束。",
+                "description": "在串口上临时执行一段 JS 脚本（QuickJS）做调试验证，调通后可经 serial_save_script 落库、serial_run_script 按名复用。脚本内可用 send/expect/clear/sleep（均可带 [port] 跨串口，缺省为脚本运行端口）、同步 log（日志随本工具响应返回）及只读宿主机文件的 file_stat/file_md5/read_file/read_b64_chunk；签名与约束详见 serial_script_guide prompt，调用前先获取。受 enable_scripting 开关限制，默认关闭；运行上限 5 分钟，超时中止。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "port": { "type": "string", "description": "串口寻址同 serial_send" },
-                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await,如 await send(\"AT\"))" },
-                        "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string。可选", "additionalProperties": { "type": "string" } }
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
+                        "code": { "type": "string", "description": "JS 源码（顶层可直接 await，如 await send(\"AT\")）" },
+                        "args": { "type": "object", "description": "运行时参数（注入脚本 args.<name>），键值均 string", "additionalProperties": { "type": "string" } }
                     },
                     "required": ["code"]
                 }
             },
             {
                 "name": "serial_run_script",
-                "description": "按 name 执行脚本库(scripts.json)中已保存的脚本(先用 serial_list_scripts 查看、serial_save_script 保存、serial_get_script 取原文)。执行路径与 serial_debug_script 相同(含 5 分钟运行上限;默认关闭,须 enable_scripting 开启):脚本内 log(message) 的调试日志随本工具响应返回;params 声明的 default 会自动填充(显式传入的 args 优先,键值均 string)。",
+                "description": "按 name 执行脚本库（scripts.json）中已保存的脚本。执行路径与约束同 serial_debug_script（enable_scripting 闸门、5 分钟运行上限）；脚本内 log 的调试日志随本工具响应返回。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "脚本库中的脚本名(serial_list_scripts 可查)" },
-                        "port": { "type": "string", "description": "串口寻址同 serial_send" },
-                        "args": { "type": "object", "description": "运行时参数(注入脚本 args.<name>),键值均 string,未传的键用脚本声明的 default 填充。可选", "additionalProperties": { "type": "string" } }
+                        "name": { "type": "string", "description": "脚本库中的脚本名（serial_list_scripts 可查）" },
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
+                        "args": { "type": "object", "description": "运行时参数（注入脚本 args.<name>），键值均 string，未传的键用脚本声明的 default 填充", "additionalProperties": { "type": "string" } }
                     },
                     "required": ["name"]
                 }
             },
             {
                 "name": "serial_save_script",
-                "description": "保存(或覆盖)一个 JS 脚本到 serial-studio 脚本库(scripts.json),供日后在 UI 或 MCP 复用(保存后可用 serial_run_script 按名执行)。这是**数据管理而非执行代码**,不受 enable_scripting 开关限制。name 是脚本唯一标识,已存在则覆盖。脚本内容仍需先用 serial_debug_script 调试验证。",
+                "description": "保存（或覆盖）一个 JS 脚本到脚本库（scripts.json），供日后经 serial_run_script 按名执行或在 UI 复用。name 是唯一存取键，已存在则覆盖。数据管理而非执行代码，不受 enable_scripting 限制。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "脚本唯一名(存取键,如 \"init-modem\")" },
-                        "code": { "type": "string", "description": "JS 源码(顶层可直接 await)" },
-                        "description": { "type": "string", "description": "用途说明(可选)" },
-                        "group": { "type": "string", "description": "分组名(可选,UI 按组折叠)" },
+                        "name": { "type": "string", "description": "脚本唯一名（存取键，如 \"init-modem\"）" },
+                        "code": { "type": "string", "description": "JS 源码（顶层可直接 await）" },
+                        "description": { "type": "string", "description": "用途说明（可选）" },
+                        "group": { "type": "string", "description": "分组名（可选，UI 按组折叠）" },
                         "params": {
                             "type": "array",
-                            "description": "声明的运行时参数(可选),运行时收集值注入脚本 args.<name>",
+                            "description": "声明的运行时参数（可选），运行时收集值注入脚本 args.<name>",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "name": { "type": "string", "description": "args.<name> 取值键名" },
-                                    "label": { "type": "string", "description": "UI 显示标签;缺省用 name" },
-                                    "type": { "type": "string", "enum": ["string", "select", "file"], "description": "参数类型;file 表示值为宿主机文件路径(UI 采集带文件选择按钮,脚本内配合 read_b64_chunk/file_md5 等文件函数使用)" },
-                                    "default": { "type": "string", "description": "缺省值(可选)" },
-                                    "options": { "type": "array", "items": { "type": "string" }, "description": "select 的可选项;string 留空" }
+                                    "label": { "type": "string", "description": "UI 显示标签；缺省用 name" },
+                                    "type": { "type": "string", "enum": ["string", "select", "file"], "description": "参数类型；file 表示值为宿主机文件路径（配合脚本内 read_b64_chunk/file_md5 等文件函数）" },
+                                    "default": { "type": "string", "description": "缺省值（可选）" },
+                                    "options": { "type": "array", "items": { "type": "string" }, "description": "select 的可选项；string 类型留空" }
                                 },
                                 "required": ["name", "type"]
                             }
@@ -202,18 +202,18 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_get_script",
-                "description": "按 name 读取脚本库(scripts.json)中一个脚本的完整定义(description/group/params/code 全文)。serial_list_scripts 只回元数据不含 code;要查看已有脚本的实现、或在 serial_save_script 覆盖前取原文改写,用本工具。数据管理,不受 enable_scripting 限制。",
+                "description": "按 name 读取脚本库（scripts.json）中一个脚本的完整定义（description/group/params/code 全文）；覆盖改写前先经此取原文。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "脚本库中的脚本名(serial_list_scripts 可查)" }
+                        "name": { "type": "string", "description": "脚本库中的脚本名（serial_list_scripts 可查）" }
                     },
                     "required": ["name"]
                 }
             },
             {
                 "name": "serial_list_scripts",
-                "description": "列出脚本库(scripts.json)中所有脚本的元数据(name/description/group/params),**不含 code 全文**(要 code 用 serial_get_script)。用于发现已有脚本、避免重名。",
+                "description": "列出脚本库（scripts.json）中所有脚本的元数据（name/description/group/params），不含 code 全文（要 code 用 serial_get_script）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -221,7 +221,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_delete_script",
-                "description": "从脚本库删除一个脚本。无此名也不报错(幂等)。数据管理,不受 enable_scripting 限制。",
+                "description": "从脚本库删除一个脚本。无此名也不报错（幂等）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -805,7 +805,7 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 
 ## port 参数
 
-所有工具接受可选 `port` 参数。不传时，若只打开了一个串口则自动选用；打开多个时必须显式指定。
+除 `serial_list` 与脚本库管理工具外，各工具接受可选 `port` 参数。不传时，若只打开了一个串口则自动选用；打开多个时必须显式指定。
 
 ## 寻址形式
 
@@ -1206,7 +1206,10 @@ mod tests {
         assert_eq!(v["params"][0]["default"].as_str(), Some("a"));
         let code = v["code"].as_str().unwrap();
         assert!(
-            code.contains(&marker) && code.contains('\n') && code.contains('\\') && code.contains('"'),
+            code.contains(&marker)
+                && code.contains('\n')
+                && code.contains('\\')
+                && code.contains('"'),
             "get 应返回 code 原文(引号/反斜杠/换行经 serde 往返不失真): {:?}",
             code
         );
