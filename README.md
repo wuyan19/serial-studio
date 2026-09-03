@@ -111,9 +111,12 @@ Runtime config lives next to the binary:
 
 ## 🤖 MCP
 
-`POST /mcp` speaks JSON-RPC. Seven tools: `serial_list`, `serial_send`, `serial_read`,
-`serial_status`, `serial_grep`, `serial_clear`, and `serial_run_script` (JS scripting,
-gated by `enable_scripting`). The `port` argument accepts a real port name **or** an alias.
+`POST /mcp` speaks JSON-RPC. Twelve tools: 6 basic (`serial_list`, `serial_send`,
+`serial_read`, `serial_status`, `serial_grep`, `serial_clear`), 2 script execution
+(`serial_debug_script` for ad-hoc JS, `serial_run_script` to run a saved script by name —
+both gated by `enable_scripting`), and 4 script library management (`serial_save_script`,
+`serial_get_script`, `serial_list_scripts`, `serial_delete_script` — data-only, not gated).
+The `port` argument accepts a real port name **or** an alias.
 A `serial_script_guide` prompt documents the scripting API and constraints.
 
 ### Connect from Claude Code
@@ -140,12 +143,18 @@ The server binds `0.0.0.0` by default and carries **no authentication**. Anyone 
 the port can open / send to your serial ports and read their output. Bind to `127.0.0.1` in
 `settings.json`, or sit behind a firewall / VPN, for anything beyond a trusted LAN.
 
-Remote JS scripting (WS `run_script` / MCP `serial_run_script`) is gated by `enable_scripting`
+Remote JS scripting (WS `run_script` / MCP `serial_debug_script` + `serial_run_script`) is gated by `enable_scripting`
 in `settings.json`, **off by default**. When enabled, any reachable client can execute JS
 against your serial ports. The script sandbox only exposes the serial primitives
 (`send`/`expect`/`clear`/`sleep`) — there is no file, network, or process access — but it can
 still drive your devices arbitrarily and read their output. Keep it disabled on untrusted
 networks.
+
+The script library tools (`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
+`serial_delete_script`) are data management and **always accessible** regardless of
+`enable_scripting`: any reachable client can read saved script code (which may embed host
+paths, LAN addresses, or credentials in comments), overwrite, or delete it. Same trusted-LAN
+rule applies.
 
 ## 📁 Project layout
 

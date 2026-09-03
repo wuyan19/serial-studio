@@ -108,9 +108,12 @@ release 产物为 `serial-studio.exe`。
 
 ## 🤖 MCP
 
-`POST /mcp`,JSON-RPC 协议。七个工具:`serial_list`、`serial_send`、`serial_read`、
-`serial_status`、`serial_grep`、`serial_clear`,以及 `serial_run_script`(JS 脚本,
-受 `enable_scripting` 开关控制)。`port` 参数可用真实端口名 **或别名**。
+`POST /mcp`,JSON-RPC 协议。共 12 个工具:6 个基础(`serial_list`、`serial_send`、
+`serial_read`、`serial_status`、`serial_grep`、`serial_clear`),2 个脚本执行
+(`serial_debug_script` 临时执行 JS 代码、`serial_run_script` 按名执行已保存脚本
+——均受 `enable_scripting` 开关控制),4 个脚本库管理(`serial_save_script`、
+`serial_get_script`、`serial_list_scripts`、`serial_delete_script`——纯数据管理,
+不受开关限制)。`port` 参数可用真实端口名 **或别名**。
 `serial_script_guide` prompt 记录了脚本 API 与约束。
 
 ### 从 Claude Code 接入
@@ -136,6 +139,16 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 服务默认监听 `0.0.0.0` 且**无鉴权**。任何能访问到端口的人都能打开 / 发送数据到你的串口，
 并读取其输出。超出可信局域网的范围时，请在 `settings.json` 改绑 `127.0.0.1`，或置于
 防火墙 / VPN 之后。
+
+远程 JS 脚本执行（WS `run_script` / MCP `serial_debug_script`、`serial_run_script`）受
+`settings.json` 的 `enable_scripting` 开关控制，**默认关闭**。开启后任何可达客户端都能对
+串口执行 JS。沙箱只暴露串口原语（`send`/`expect`/`clear`/`sleep`）——无文件、网络、进程
+访问——但仍可任意驱动设备并读取输出。不可信网络请保持关闭。
+
+脚本库四工具（`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
+`serial_delete_script`）属数据管理，**不受 `enable_scripting` 限制、始终可访问**：任何
+可达客户端都能读取已保存脚本的 code 全文（可能含宿主机路径、内网地址、账号等注释）、
+覆盖或删除它。同样遵循可信局域网原则。
 
 ## 📁 项目结构
 

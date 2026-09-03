@@ -65,9 +65,9 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`。
 2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。
-   日志出口:UI 运行实时显示;**经 MCP 运行(`serial_run_script` / `serial_run_saved_script`)时,log 输出会随工具响应一次性返回**(无论成功/失败/超时都带,上限最近 200 条/16 KiB,超限丢最旧)。调试脚本时在关键分支 `log` 中间变量即可看到。
+   日志出口:UI 运行实时显示;**经 MCP 运行(`serial_debug_script` / `serial_run_script`)时,log 输出会随工具响应一次性返回**(无论成功/失败/超时都带,上限最近 200 条/16 KiB,超限丢最旧)。调试脚本时在关键分支 `log` 中间变量即可看到。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量会变成 `"/OK/"`——它本身能编译,但匹配的是带斜杠的字面串,永远等不到想要的 `OK`)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
-4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具(`serial_run_script` / `serial_run_saved_script`)运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,慢命令(udhcpc/ping/mkfs 等)可给 10~30s;多阶段脚本先把各步耗时加一加,别超 5 分钟总预算;循环要有退出条件。内存上限 64MiB,超出被强杀。
+4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具(`serial_debug_script` / `serial_run_script`)运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,慢命令(udhcpc/ping/mkfs 等)可给 10~30s;多阶段脚本先把各步耗时加一加,别超 5 分钟总预算;循环要有退出条件。内存上限 64MiB,超出被强杀。
 
 ## 核心模式
 
