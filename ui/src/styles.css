@@ -1743,7 +1743,8 @@ button {
 }
 /* 恢复 .dialog 内需交互/可复制区域的选择:输入类控件、CodeMirror、指南与 JSON 预览。
    阅读面整体恢复——关于正文(版本/标语/MCP 提示/仓库链接)、脚本 API 速查面板
-   (签名待复制进代码)、editor-error 报错(宏/脚本/参数收集框共用,复制搜索用)。
+   (签名待复制进代码)、editor-error 报错(宏/脚本/参数收集框共用,复制搜索用)、
+   设备详情值(地址/ID 复制失败时兜底手动选文复制)。
    这些框均经菜单/按钮单击打开,不在 73bd18b 所修"双击端口行弹框误选"的路径上。 */
 .dialog input,
 .dialog textarea,
@@ -1754,7 +1755,8 @@ button {
 .dialog .script-skill__md,
 .dialog .about,
 .dialog .script-help,
-.dialog .editor-error {
+.dialog .editor-error,
+.dialog .detail-row__value {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -2354,6 +2356,39 @@ button {
   white-space: nowrap;
   flex-shrink: 0;
   font-size: var(--fs-sm);
+}
+
+/* 只读详情行（.row 内）：值占满 + 行尾可挂复制按钮。anywhere 断行兜长值
+   （host 无格式限制、昵称无长度上限——长无空格串不横向溢出窄框） */
+.detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.detail-row__value {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* 设备详情弹窗的在线状态点（同 .sidebar__conn .dot 的语义色；.dot 无全局基类，按容器作用域定义） */
+.dialog .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--ink-faint); /* 连接中(unknown) */
+}
+.dialog .dot.on {
+  background: var(--link);
+  box-shadow: 0 0 6px var(--link);
+}
+.dialog .dot.off {
+  background: var(--danger);
 }
 
 /* fields */

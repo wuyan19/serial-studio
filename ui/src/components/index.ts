@@ -8,6 +8,7 @@ export {
   ExportMacrosDialog,
   ExportScriptsDialog,
   RemoteDialog,
+  RemoteDetailDialog,
   ScriptRunParamsDialog,
   ScriptSkillDialog,
   SerialConfigDialog,

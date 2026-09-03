@@ -67,6 +67,7 @@ import {
   newStep,
   CompositePortLabel,
   RemoteDialog,
+  RemoteDetailDialog,
   RunCards,
   ScriptEditor,
   ScriptRunParamsDialog,
@@ -237,6 +238,8 @@ export default function App() {
   );
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
+  /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
+  const [remoteDetailId, setRemoteDetailId] = useState<string | null>(null);
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
@@ -788,6 +791,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               for (const id of prev) next.add(renamed.get(id) ?? id);
               return next;
             });
+            // 详情弹窗若开着同一设备,跟随 id 替换(否则按旧 id 查找失败而静默关闭)
+            setRemoteDetailId((prev) => (prev ? renamed.get(prev) ?? prev : prev));
           }
         }
         let anyOnline = false;
@@ -1494,6 +1499,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   ];
   /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。 */
   const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
+  /** 详情弹窗设备（按 id 实时查找；设备被删 → undefined → 弹窗不渲染，自然关闭）。 */
+  const remoteDetail = remoteDetailId ? remotes.find((r) => r.id === remoteDetailId) : undefined;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
   // 活动端口拆段:devId 优先换设备昵称,查无昵称/非本表设备(web 形态级联中段)
@@ -1550,7 +1557,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     shortcutsOpen ||
     macroPaletteOpen ||
     scriptPaletteOpen ||
-    portPaletteOpen
+    portPaletteOpen ||
+    remoteDetail
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
@@ -1729,6 +1737,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
               onRenameRemote={renameRemote}
+              onShowRemoteDetail={(dev) => setRemoteDetailId(dev.id)}
               onRefresh={() => refreshPorts()}
             />
           )}
@@ -2133,6 +2142,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConfirm={addRemote}
           onCancel={() => setRemoteOpen(false)}
           existing={remotes.map((r) => `${r.host}:${r.port}`)}
+        />
+      )}
+      {remoteDetail && (
+        <RemoteDetailDialog
+          dev={remoteDetail}
+          online={devOnline[remoteDetail.id]}
+          ports={portsByDev[remoteDetail.id] ?? []}
+          onClose={() => setRemoteDetailId(null)}
         />
       )}
 

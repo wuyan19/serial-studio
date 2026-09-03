@@ -41,6 +41,7 @@ export function PortsPanel({
   onDisconnectRemote,
   onRemoveRemote,
   onRenameRemote,
+  onShowRemoteDetail,
   onRefresh,
 }: {
   portGroups: PortGroupView[];
@@ -60,6 +61,8 @@ export function PortsPanel({
   onRemoveRemote: (dev: RemoteDevice) => void;
   /** 设备卡改名(空串=清除昵称,标题回退 host:port)。仅本地桌面形态传入。 */
   onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
+  /** 右键菜单「设备详情」:打开该设备的只读详情弹窗。 */
+  onShowRemoteDetail: (dev: RemoteDevice) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -93,6 +96,8 @@ export function PortsPanel({
               extraMenuItems={
                 dev
                   ? [
+                      // 附加项首位(整菜单序:重命名设备→详情→断开/重连→删除)
+                      { label: "设备详情", onSelect: () => { if (dev) onShowRemoteDetail(dev); } },
                       // 在线可断开;离线/连接中可重连(状态相关项)
                       grp.online === true
                         ? { label: "断开设备", onSelect: () => { if (dev) onDisconnectRemote(dev); } }
