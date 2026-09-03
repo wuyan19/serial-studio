@@ -252,11 +252,7 @@ async fn version_echoes_instance_id_only_when_requested() {
     );
 
     // 设备握手形态(自报 id):应答回带本机实例 id
-    send_text(
-        &mut a,
-        r#"{"action":"version","instance_id":"inst-peer"}"#,
-    )
-    .await;
+    send_text(&mut a, r#"{"action":"version","instance_id":"inst-peer"}"#).await;
     let resp = recv_until(&mut a, "\"type\":\"version\"").await;
     assert!(
         resp.contains(r#""instance_id":"inst-ws-session""#),
@@ -397,9 +393,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
     let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
     send_text(
         &mut a,
-        &format!(
-            r#"{{"action":"open","port":"{alias}","config":{{"baud_rate":115200}}}}"#
-        ),
+        &format!(r#"{{"action":"open","port":"{alias}","config":{{"baud_rate":115200}}}}"#),
     )
     .await;
     let acquired = recv_until(&mut a, "\"type\":\"acquired\"").await;

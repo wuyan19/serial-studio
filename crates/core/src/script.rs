@@ -203,7 +203,11 @@ const FILE_READ_MAX: u64 = 64 * 1024 * 1024;
 /// 读类文件函数的常规文件预检:目录/命名管道/设备等非常规路径直接 throw——
 /// 对它们做阻塞读会卡死脚本线程(中断机制打不穿陷入 syscall 的线程)并泄漏句柄。
 /// 返回 Metadata 供大小上限检查复用(file_stat 的 exists 语义同款)。
-fn regular_file_meta(ctx: &Ctx<'_>, fn_name: &str, path: &str) -> rquickjs::Result<std::fs::Metadata> {
+fn regular_file_meta(
+    ctx: &Ctx<'_>,
+    fn_name: &str,
+    path: &str,
+) -> rquickjs::Result<std::fs::Metadata> {
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => Ok(m),
         Ok(_) => Err(rquickjs::Exception::throw_message(
@@ -937,9 +941,17 @@ mod tests {
             abort_clone.store(true, Ordering::Relaxed);
         });
         let start = Instant::now();
-        let result =
-            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort, None)
-                .await;
+        let result = run_script_with_timeout(
+            "COM0",
+            code,
+            mgr(),
+            None,
+            HashMap::new(),
+            "log-rid",
+            abort,
+            None,
+        )
+        .await;
         stopper.await.unwrap();
         assert!(
             matches!(result, Err(ScriptError::Aborted)),
@@ -964,9 +976,17 @@ mod tests {
             abort_clone.store(true, Ordering::Relaxed);
         });
         let start = Instant::now();
-        let result =
-            run_script_with_timeout("COM0", code, mgr(), None, HashMap::new(), "log-rid", abort, None)
-                .await;
+        let result = run_script_with_timeout(
+            "COM0",
+            code,
+            mgr(),
+            None,
+            HashMap::new(),
+            "log-rid",
+            abort,
+            None,
+        )
+        .await;
         stopper.await.unwrap();
         assert!(
             matches!(result, Err(ScriptError::Aborted)),
@@ -1149,13 +1169,17 @@ mod tests {
             sink.push(format!("msg-{i}"));
         }
         let logs = sink.logs();
+        assert_eq!(logs[0], "(前 10 条日志已丢弃)", "超限条数应记录丢弃计数");
         assert_eq!(
-            logs[0], "(前 10 条日志已丢弃)",
-            "超限条数应记录丢弃计数"
+            logs.len(),
+            MAX_LOG_ENTRIES + 1,
+            "应保留最新 200 条 + 1 条标记"
         );
-        assert_eq!(logs.len(), MAX_LOG_ENTRIES + 1, "应保留最新 200 条 + 1 条标记");
         assert_eq!(logs[1], "msg-10".to_string());
-        assert_eq!(logs.last().unwrap(), &format!("msg-{}", MAX_LOG_ENTRIES + 9));
+        assert_eq!(
+            logs.last().unwrap(),
+            &format!("msg-{}", MAX_LOG_ENTRIES + 9)
+        );
 
         // 单条超长:截断到 ≤4 KiB(含截断标记),不突破条目上限。
         let sink2 = ScriptLogSink::new();
@@ -1176,7 +1200,11 @@ mod tests {
             sink4.push(format!("m{i}-").to_string() + &"y".repeat(3 * 1024));
         }
         let logs4 = sink4.logs();
-        assert!(logs4.len() < 8, "总量超 16KiB 应丢最旧: 剩 {} 条", logs4.len());
+        assert!(
+            logs4.len() < 8,
+            "总量超 16KiB 应丢最旧: 剩 {} 条",
+            logs4.len()
+        );
         assert!(logs4[0].starts_with("(前 "));
     }
 
@@ -1217,7 +1245,17 @@ throw new Error(JSON.stringify(out));"#,
             p = json_str(f.path()),
             dir = json_str(&dir.to_string_lossy()),
         );
-        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let r = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(
             matches!(&r, Err(ScriptError::Script(m)) if m.contains(r#"[true,3,false,"900150983cd24fb0d6963f7d28e17f72"]"#)),
             "stat/md5 应为 [true,3,false,md5(abc)]: {:?}",
@@ -1231,7 +1269,17 @@ throw new Error(JSON.stringify(out));"#,
 if (!s.exists) {{ file_md5({p}); }}"#,
             p = json_str(&missing.to_string_lossy()),
         );
-        let r2 = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let r2 = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(
             matches!(&r2, Err(ScriptError::Script(m)) if m.contains("file_md5")),
             "缺失文件 file_md5 应 throw 含函数名: {:?}",
@@ -1243,8 +1291,21 @@ if (!s.exists) {{ file_md5({p}); }}"#,
     #[tokio::test]
     async fn read_file_roundtrip() {
         let f = TempFile::new("你好 serial-studio €".as_bytes());
-        let code = format!(r#"throw new Error(read_file({p}));"#, p = json_str(f.path()));
-        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let code = format!(
+            r#"throw new Error(read_file({p}));"#,
+            p = json_str(f.path())
+        );
+        let r = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(
             matches!(&r, Err(ScriptError::Script(m)) if m == "你好 serial-studio €"),
             "read_file 内容往返: {:?}",
@@ -1272,7 +1333,17 @@ if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
             p = json_str(f.path()),
             expected = json_str(&expected),
         );
-        let r = run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let r = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(r.is_ok(), "块拼接应还原整文件 b64: {:?}", r);
 
         // 大块(192)跨多块 + 末块 padding;非 3 倍数抛;缺失文件抛
@@ -1291,7 +1362,17 @@ read_b64_chunk({p}, 0, 4);"#,
             p = json_str(fb.path()),
             expected = json_str(&expected_big),
         );
-        let r2 = run_script_with_timeout("COM0", &code2, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let r2 = run_script_with_timeout(
+            "COM0",
+            &code2,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(
             matches!(&r2, Err(ScriptError::Script(m)) if m.contains("3 的倍数")),
             "chunk_bytes=4 应抛 '3 的倍数': {:?}",
@@ -1299,8 +1380,21 @@ read_b64_chunk({p}, 0, 4);"#,
         );
 
         let missing = std::env::temp_dir().join("ss-script-test-no-such-file-b64");
-        let code3 = format!(r#"read_b64_chunk({p}, 0, 3);"#, p = json_str(&missing.to_string_lossy()));
-        let r3 = run_script_with_timeout("COM0", &code3, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await;
+        let code3 = format!(
+            r#"read_b64_chunk({p}, 0, 3);"#,
+            p = json_str(&missing.to_string_lossy())
+        );
+        let r3 = run_script_with_timeout(
+            "COM0",
+            &code3,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+        )
+        .await;
         assert!(
             matches!(&r3, Err(ScriptError::Script(m)) if m.contains("read_b64_chunk")),
             "缺失文件应 throw 含函数名: {:?}",
@@ -1314,7 +1408,17 @@ read_b64_chunk({p}, 0, 4);"#,
     async fn file_fn_guards() {
         let dir = std::env::temp_dir().to_string_lossy().into_owned();
         let run = |code: String| async move {
-            run_script_with_timeout("COM0", &code, mgr(), Some(Duration::from_secs(5)), HashMap::new(), "log-rid", abort_flag(), None).await
+            run_script_with_timeout(
+                "COM0",
+                &code,
+                mgr(),
+                Some(Duration::from_secs(5)),
+                HashMap::new(),
+                "log-rid",
+                abort_flag(),
+                None,
+            )
+            .await
         };
         // 目录(非常规文件):三个读函数都应 throw「不是常规文件」
         for code in [

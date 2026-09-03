@@ -177,11 +177,7 @@ async fn cascade_open_write_echo() {
     let mut online = false;
     for _ in 0..100 {
         if a.manager
-            .acquire(
-                key.clone(),
-                SerialConfig::default(),
-                probe_session,
-            )
+            .acquire(key.clone(), SerialConfig::default(), probe_session)
             .await
             .is_ok()
         {
@@ -197,9 +193,7 @@ async fn cascade_open_write_echo() {
     // open 复合键(列表键形态:学习 id + 远端线名 COM7,与生产前端一致)
     send_text(
         &mut a_ws,
-        &format!(
-            r#"{{"action":"open","port":"{key}","config":{{"baud_rate":115200}}}}"#
-        ),
+        &format!(r#"{{"action":"open","port":"{key}","config":{{"baud_rate":115200}}}}"#),
     )
     .await;
     let acquired = recv_until(&mut a_ws, "\"type\":\"acquired\"").await;
@@ -213,9 +207,7 @@ async fn cascade_open_write_echo() {
     // write → B 回显 → A 的事件流出数据帧(port = A 侧 map 键,即事件口径的复合键)
     send_text(
         &mut a_ws,
-        &format!(
-            r#"{{"action":"write","port":"{key}","data":"ping","encoding":"text"}}"#
-        ),
+        &format!(r#"{{"action":"write","port":"{key}","data":"ping","encoding":"text"}}"#),
     )
     .await;
     let frame = async {
@@ -278,11 +270,7 @@ async fn cascade_device_offline_keeps_holders() {
     let mut ready = false;
     for _ in 0..100 {
         if a.manager
-            .acquire(
-                key.clone(),
-                SerialConfig::default(),
-                SessionId::next(),
-            )
+            .acquire(key.clone(), SerialConfig::default(), SessionId::next())
             .await
             .is_ok()
         {
@@ -308,11 +296,7 @@ async fn cascade_device_offline_keeps_holders() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(marked, "设备断开后端口应标 disconnected");
-    assert_eq!(
-        a.manager.holder_count(&key).await,
-        Some(1),
-        "占有权应保留"
-    );
+    assert_eq!(a.manager.holder_count(&key).await, Some(1), "占有权应保留");
 }
 
 /// 便利:经 WS list 消息取合并视图(设备桶合并入口 list_ports_with_meta 的线输出)。
@@ -533,7 +517,8 @@ async fn cascade_set_alias_routes_reply() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(online);
-    let _ = a.manager
+    let _ = a
+        .manager
         .release(&format!("{}::COM7", b.instance_id), s)
         .await;
 
@@ -1313,52 +1298,53 @@ async fn three_level_cascade_routes_end_to_end() {
         // 泵一: A → C。list/pong 本地作答;open/write/close 记录剥段结果后转发。
         let saw1 = Arc::clone(&saw);
         let down = Arc::clone(&a_sink);
-        let pump_down = async move {
-            while let Some(Ok(Message::Text(t))) = a_source.next().await {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
-                    continue;
-                };
-                match v["action"].as_str().unwrap_or("") {
-                    "list" => {
-                        let ports = serde_json::json!([{
-                            "name":"dev-c::COM7","opened":false,"holders":0,"disconnected":false
-                        }]);
-                        let _ = down.lock().await
-                            .send(Message::Text(
-                                serde_json::json!({"type":"ports","ports":ports}).to_string(),
-                            ))
-                            .await;
-                    }
-                    "ping" => {
-                        let _ = down
-                            .lock()
-                            .await
-                            .send(Message::Text(r#"{"type":"pong"}"#.into()))
-                            .await;
-                    }
-                    "version" => {
-                        // 旧版语义应答(无 instance_id)
-                        let _ = down.lock().await
+        let pump_down =
+            async move {
+                while let Some(Ok(Message::Text(t))) = a_source.next().await {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                        continue;
+                    };
+                    match v["action"].as_str().unwrap_or("") {
+                        "list" => {
+                            let ports = serde_json::json!([{
+                                "name":"dev-c::COM7","opened":false,"holders":0,"disconnected":false
+                            }]);
+                            let _ = down
+                                .lock()
+                                .await
+                                .send(Message::Text(
+                                    serde_json::json!({"type":"ports","ports":ports}).to_string(),
+                                ))
+                                .await;
+                        }
+                        "ping" => {
+                            let _ = down
+                                .lock()
+                                .await
+                                .send(Message::Text(r#"{"type":"pong"}"#.into()))
+                                .await;
+                        }
+                        "version" => {
+                            // 旧版语义应答(无 instance_id)
+                            let _ = down.lock().await
                             .send(Message::Text(
                                 r#"{"type":"version","version":"stub","enable_scripting":false}"#
                                     .into(),
                             ))
                             .await;
+                        }
+                        "open" | "write" | "close" => {
+                            let action = v["action"].as_str().unwrap_or("").to_string();
+                            let port = v["port"].as_str().unwrap_or("").to_string();
+                            saw1.lock().unwrap().push(format!("{action}:{port}"));
+                            let mut fwd = v.clone();
+                            fwd["port"] = serde_json::json!("COM7"); // 剥掉 dev-c:: 段
+                            let _ = c_sink.send(Message::Text(fwd.to_string())).await;
+                        }
+                        _ => {}
                     }
-                    "open" | "write" | "close" => {
-                        let action = v["action"].as_str().unwrap_or("").to_string();
-                        let port = v["port"].as_str().unwrap_or("").to_string();
-                        saw1.lock().unwrap().push(format!("{action}:{port}"));
-                        let mut fwd = v.clone();
-                        fwd["port"] = serde_json::json!("COM7"); // 剥掉 dev-c:: 段
-                        let _ = c_sink
-                            .send(Message::Text(fwd.to_string()))
-                            .await;
-                    }
-                    _ => {}
                 }
-            }
-        };
+            };
 
         // 泵二: C → A。文本回执把裸名线名重写为 B 侧键;二进制帧重打线名。
         let up = Arc::clone(&a_sink);
@@ -1405,7 +1391,11 @@ async fn three_level_cascade_routes_end_to_end() {
     let s = SessionId::next();
     let mut opened = false;
     for _ in 0..100 {
-        if a.manager.acquire(full_key.into(), SerialConfig::default(), s).await.is_ok() {
+        if a.manager
+            .acquire(full_key.into(), SerialConfig::default(), s)
+            .await
+            .is_ok()
+        {
             opened = true;
             break;
         }
@@ -1420,7 +1410,11 @@ async fn three_level_cascade_routes_end_to_end() {
 
     // 剥段正确性:B 看到的应是剥掉自身段的 `dev-c::COM7`
     let saw_open = saw.lock().unwrap().iter().any(|e| e == "open:dev-c::COM7");
-    assert!(saw_open, "B 应收到剥首段后的 dev-c::COM7,得到 {:?}", saw.lock().unwrap());
+    assert!(
+        saw_open,
+        "B 应收到剥首段后的 dev-c::COM7,得到 {:?}",
+        saw.lock().unwrap()
+    );
 
     // 数据回路:写 → C 回显 → B 重打线名 → A 侧以完整级联键口径发布
     let mut rx = a.manager.event_bus().subscribe();
@@ -1568,7 +1562,8 @@ async fn mutual_registration_no_ghost_with_identity() {
     let ghosts: Vec<_> = views
         .iter()
         .filter(|v| {
-            v.info.name
+            v.info
+                .name
                 .split(ss_core::PORT_KEY_SEP)
                 .skip(1) // 首段豁免(自连镜像合法;此测试无自连,防御性跳过)
                 .any(|seg| seg == "inst-a")
@@ -1615,7 +1610,9 @@ async fn duplicate_device_conflict_keeps_placeholder() {
     loop {
         let states = a.devices.device_states();
         let learned = states.iter().any(|d| d.id == "inst-b" && d.online);
-        let kept = states.iter().any(|d| (d.id == "ph1" || d.id == "ph2") && d.online);
+        let kept = states
+            .iter()
+            .any(|d| (d.id == "ph1" || d.id == "ph2") && d.online);
         if learned && kept {
             assert_eq!(
                 states.len(),

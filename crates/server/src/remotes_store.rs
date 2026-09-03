@@ -104,7 +104,11 @@ mod tests {
 
     #[test]
     fn valid_nicknames_pass() {
-        let list = vec![dev("a", Some("test")), dev("b", None), dev("c", Some("lab-1"))];
+        let list = vec![
+            dev("a", Some("test")),
+            dev("b", None),
+            dev("c", Some("lab-1")),
+        ];
         assert!(validate_nicknames(&list).is_ok());
     }
 

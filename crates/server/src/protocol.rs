@@ -350,7 +350,8 @@ mod tests {
         let open: ClientMsg =
             serde_json::from_str(r#"{"action":"open","port":"COM7","req":7}"#).unwrap();
         assert!(matches!(open, ClientMsg::Open { req: Some(7), .. }));
-        let legacy: ClientMsg = serde_json::from_str(r#"{"action":"close","port":"COM7"}"#).unwrap();
+        let legacy: ClientMsg =
+            serde_json::from_str(r#"{"action":"close","port":"COM7"}"#).unwrap();
         assert!(matches!(legacy, ClientMsg::Close { req: None, .. }));
     }
 
@@ -372,7 +373,13 @@ mod tests {
                 assert!(!s.contains("instance_id"), "None 不得出现在线格式: {s}");
                 // 旧版服务端的应答形态(无此字段)→ 反序列化为 None
                 let back: ServerMsg = serde_json::from_str(&s).unwrap();
-                assert!(matches!(back, ServerMsg::Version { instance_id: None, .. }));
+                assert!(matches!(
+                    back,
+                    ServerMsg::Version {
+                        instance_id: None,
+                        ..
+                    }
+                ));
             }
             _ => panic!("Version 应是 Text"),
         }
@@ -433,8 +440,7 @@ mod tests {
         assert_eq!(json["host"], "192.168.1.20");
         assert_eq!(json["port"], 18700);
         // 旧版形态(仅 id/online)→ default 兜底
-        let legacy: DeviceStateView =
-            serde_json::from_str(r#"{"id":"x","online":false}"#).unwrap();
+        let legacy: DeviceStateView = serde_json::from_str(r#"{"id":"x","online":false}"#).unwrap();
         assert_eq!(legacy.host, "");
         assert_eq!(legacy.port, 0);
     }

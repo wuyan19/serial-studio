@@ -624,7 +624,11 @@ impl DeviceClient {
                 let payload = resolved.unwrap_or_else(|| wire.clone());
                 self.route_result(req, &wire, Ok(payload))
             }
-            ServerMsg::Ok { message: _, port, req } => match port {
+            ServerMsg::Ok {
+                message: _,
+                port,
+                req,
+            } => match port {
                 Some(port) => {
                     let wire = normalize_wire(&port);
                     self.route_write(req, &wire, Ok(()));

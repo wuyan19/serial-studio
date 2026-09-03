@@ -130,7 +130,10 @@ pub fn split_port_key(key: &str) -> (&str, &str) {
 /// manager 所有端口入口都经此规范化,保证 map 键单一形态:
 /// `COM5`、`local::COM5` 与裸名指向同一条目,占有权不因写法分裂。
 pub fn normalize_port_key(key: &str) -> String {
-    match key.strip_prefix(LOCAL_DEVICE_ID).and_then(|r| r.strip_prefix(PORT_KEY_SEP)) {
+    match key
+        .strip_prefix(LOCAL_DEVICE_ID)
+        .and_then(|r| r.strip_prefix(PORT_KEY_SEP))
+    {
         Some(rest) => rest.to_string(),
         None => key.to_string(),
     }
@@ -243,7 +246,10 @@ mod tests {
         assert_eq!(split_port_key(&key), ("uuid1", "uuid2::COM3"));
         // 遗留级联线名(旧版远端上报 uuid2::local::COM3)只剥本机这层的 local::
         assert_eq!(normalize_port_key("local::uuid2::COM3"), "uuid2::COM3");
-        assert_eq!(normalize_port_key("uuid1::uuid2::COM3"), "uuid1::uuid2::COM3");
+        assert_eq!(
+            normalize_port_key("uuid1::uuid2::COM3"),
+            "uuid1::uuid2::COM3"
+        );
     }
 
     #[test]

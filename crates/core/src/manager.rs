@@ -869,7 +869,9 @@ mod tests {
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap();
         let res = m.acquire("COM7".into(), cfg(9600), s2).await.unwrap();
         match res {
-            AcquireResult::Attached { config, holders, .. } => {
+            AcquireResult::Attached {
+                config, holders, ..
+            } => {
                 assert_eq!(holders, 2);
                 assert_eq!(config.baud_rate, 115200, "请求的 9600 应被忽略");
             }
@@ -894,10 +896,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(SerialEvent::HoldersChanged { port, holders }) => {
-                    assert_eq!(
-                        port, "COM7",
-                        "事件端口应为 map 键(本机=裸名)"
-                    );
+                    assert_eq!(port, "COM7", "事件端口应为 map 键(本机=裸名)");
                     assert_eq!(holders, 2);
                     found = true;
                     break;

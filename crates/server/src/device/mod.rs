@@ -92,10 +92,7 @@ impl DeviceClientManager {
     }
 
     /// 读 remotes.json 构造(生产组装点)。
-    pub fn from_registry(
-        meta_bus: broadcast::Sender<()>,
-        instance_id: impl Into<String>,
-    ) -> Self {
+    pub fn from_registry(meta_bus: broadcast::Sender<()>, instance_id: impl Into<String>) -> Self {
         let m = Self::empty(meta_bus, instance_id);
         let remotes = crate::remotes_store::load();
         if !remotes.is_empty() {
@@ -400,9 +397,14 @@ mod tests {
         m.reconnect("uuid-a").unwrap();
         assert_eq!(m.nickname_of("uuid-a").as_deref(), Some("新名"));
 
-        assert!(m.adopt_device_id("uuid-a", "learned-id"), "无冲突应迁移成功");
+        assert!(
+            m.adopt_device_id("uuid-a", "learned-id"),
+            "无冲突应迁移成功"
+        );
         assert_eq!(m.nickname_of("learned-id").as_deref(), Some("新名"));
-        assert!(m.ids_by_nickname("新名").contains(&"learned-id".to_string()));
+        assert!(m
+            .ids_by_nickname("新名")
+            .contains(&"learned-id".to_string()));
     }
 
     /// 清除昵称(空)同样生效:ids_by_nickname 不再命中,回退 host:port 展示由前端兜底。

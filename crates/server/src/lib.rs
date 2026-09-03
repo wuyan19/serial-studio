@@ -269,7 +269,10 @@ pub fn validate_alias(alias: &Option<String>) -> Result<(), String> {
         return Ok(()); // None = 清除,合法
     };
     if a.contains(ss_core::PORT_KEY_SEP) {
-        return Err(format!("别名不能包含「{0}」(复合键分隔符): {a}", ss_core::PORT_KEY_SEP));
+        return Err(format!(
+            "别名不能包含「{0}」(复合键分隔符): {a}",
+            ss_core::PORT_KEY_SEP
+        ));
     }
     if ss_core::serial::list_port_names()
         .iter()
@@ -344,10 +347,14 @@ mod tests {
         // CI/容器上枚举常为空——此处只断言不含分隔符的普通值不被 :: 规则误杀。
         // (真实端口名冲突分支由 validate_alias 内 list_port_names 比对,环境相关,不做硬断言)
         assert!(validate_alias(&None).is_ok());
-        assert!(validate_alias(&Some("GPS".into())).is_ok() || {
-            // 若本机恰好存在名为 GPS 的串口则合法被拒——两种结果都视为规则生效
-            ss_core::serial::list_port_names().iter().any(|p| p == "GPS")
-        });
+        assert!(
+            validate_alias(&Some("GPS".into())).is_ok() || {
+                // 若本机恰好存在名为 GPS 的串口则合法被拒——两种结果都视为规则生效
+                ss_core::serial::list_port_names()
+                    .iter()
+                    .any(|p| p == "GPS")
+            }
+        );
     }
 
     #[test]

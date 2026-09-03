@@ -292,11 +292,7 @@ async fn handle_client_msg(
             let ports = crate::list_ports_with_meta(&state).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
-        ClientMsg::Open {
-            port,
-            config,
-            req,
-        } => {
+        ClientMsg::Open { port, config, req } => {
             // resolved 从 acquire 结果取(单一真相):acquire 内部 canon 一次,
             // 回执口径与实际 map 键恒一致。设备客户端以真名登记 IO,
             // 数据帧(map 键口径)才与登记键一致——别名后缀寻址(如 test::GPS)的 RX 通路。
@@ -647,11 +643,7 @@ async fn handle_client_msg(
                 }
             }
         }
-        ClientMsg::SetAlias {
-            port,
-            alias,
-            req,
-        } => {
+        ClientMsg::SetAlias { port, alias, req } => {
             // 远端设备的别名转发是同步阻塞 RPC(最长 10s)——包 spawn_blocking,
             // 勿占 runtime worker 线程。回执带 port+req:设备客户端精确配对在途回执
             // (漏带会等满 10s 超时假报错)。
@@ -683,7 +675,9 @@ async fn handle_client_msg(
                 }
             }
         }
-        ClientMsg::Version { instance_id: req_id } => {
+        ClientMsg::Version {
+            instance_id: req_id,
+        } => {
             // 对端自报的 instance_id 不消费——学习是单向的(仅连接发起方为对端
             // 起段名),hub 不为连入方命名。
             // 身份回带按请求闸门:仅设备握手(请求自报了 id)才回带本机实例 id;

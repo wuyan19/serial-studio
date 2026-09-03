@@ -476,7 +476,10 @@ struct CaptureTarget {
 /// 拿不到完整路径,同步版直接回 PathBuf)。选即建/truncate:可写性当场验证,覆盖确认
 /// 交给原生对话框。返回 None=用户取消。
 #[tauri::command]
-async fn capture_begin(state: tauri::State<'_, CaptureFiles>, default_name: String) -> Result<Option<CaptureTarget>, String> {
+async fn capture_begin(
+    state: tauri::State<'_, CaptureFiles>,
+    default_name: String,
+) -> Result<Option<CaptureTarget>, String> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
         rfd::FileDialog::new()
             .set_file_name(&default_name)
@@ -489,11 +492,12 @@ async fn capture_begin(state: tauri::State<'_, CaptureFiles>, default_name: Stri
         return Ok(None);
     };
     let file = std::fs::File::create(&path).map_err(|e| format!("创建记录文件失败: {e}"))?;
-    let id = state
-        .1
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        + 1;
-    state.0.lock().unwrap().insert(id, std::io::BufWriter::new(file));
+    let id = state.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    state
+        .0
+        .lock()
+        .unwrap()
+        .insert(id, std::io::BufWriter::new(file));
     Ok(Some(CaptureTarget {
         id,
         path: path.display().to_string(),
@@ -504,7 +508,11 @@ async fn capture_begin(state: tauri::State<'_, CaptureFiles>, default_name: Stri
 /// 标准);经 try_clone 复制句柄写、BufWriter 留在表内(capture_end 才摘),同 id 并发写由
 /// 前端单飞保证。写后即 flush:进程退出最多丢当前未满批(~500ms),不依赖退出钩子。
 #[tauri::command]
-async fn capture_write(state: tauri::State<'_, CaptureFiles>, id: u64, data: Vec<u8>) -> Result<(), String> {
+async fn capture_write(
+    state: tauri::State<'_, CaptureFiles>,
+    id: u64,
+    data: Vec<u8>,
+) -> Result<(), String> {
     let file = {
         let files = state.0.lock().unwrap();
         files
@@ -516,7 +524,8 @@ async fn capture_write(state: tauri::State<'_, CaptureFiles>, id: u64, data: Vec
     };
     tauri::async_runtime::spawn_blocking(move || {
         let mut f = file;
-        f.write_all(&data).map_err(|e| format!("写入记录失败: {e}"))?;
+        f.write_all(&data)
+            .map_err(|e| format!("写入记录失败: {e}"))?;
         f.flush().map_err(|e| format!("刷盘记录失败: {e}"))
     })
     .await
@@ -537,7 +546,8 @@ async fn capture_end(
         .remove(&id)
         .ok_or_else(|| "记录会话不存在或已结束".to_string())?;
     if let Some(data) = data {
-        w.write_all(&data).map_err(|e| format!("写入记录失败: {e}"))?;
+        w.write_all(&data)
+            .map_err(|e| format!("写入记录失败: {e}"))?;
     }
     w.flush().map_err(|e| format!("收尾刷盘失败: {e}"))
 }
