@@ -134,6 +134,18 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 }
 ```
 
+## 🔌 开发板接入（自定义设备端）
+
+不跑完整 serial-studio 也能把开发板串口接进来：任意 Linux 板子上跑一个小程序实现
+「远程设备协议」的设备端子集，hub 侧 UI 注册设备地址后，端口即以 `昵称::端口名`
+出现在 Web UI / 脚本 / MCP 工具里——AI agent 经 MCP 直达板子串口。
+
+- 协议契约：[docs/device-protocol.md](docs/device-protocol.md)（握手 / 消息集 / 二进制数据帧布局）
+- 参考实现：[examples/ss-board-bridge.c](examples/ss-board-bridge.c)——单文件 C、纯 libc，
+  `musl-gcc -O2 -static` 一条命令出几十 KB 静态二进制，任何架构通用。
+- 预编译：Release 页附带 x86_64 / aarch64 / armv7 / riscv64 / mips / mipsel 静态二进制
+  （含 sha256 清单），scp 到板子即可用，无需编译。
+
 ## 🔒 安全提示
 
 服务默认监听 `0.0.0.0` 且**无鉴权**。任何能访问到端口的人都能打开 / 发送数据到你的串口，

@@ -137,6 +137,19 @@ Other MCP clients (Claude Desktop, etc.): add an HTTP MCP server pointing at the
 }
 ```
 
+## 🔌 Board integration (custom device side)
+
+You don't need the full serial-studio on the board: implement the device-side subset of the
+remote-device protocol with a tiny program, register the board's address in the hub UI, and its
+UARTs show up as `nickname::port` everywhere — Web UI, scripts and MCP tools (agents reach the
+board straight through MCP).
+
+- Protocol contract: [docs/device-protocol.md](docs/device-protocol.md) (handshake / messages / binary data frames)
+- Reference implementation: [examples/ss-board-bridge.c](examples/ss-board-bridge.c) — single-file C,
+  libc only, `musl-gcc -O2 -static` produces a small static binary for any architecture.
+- Prebuilt: static binaries for x86_64 / aarch64 / armv7 / riscv64 / mips / mipsel
+  (plus a sha256 manifest) are attached to every Release — scp one to the board and run.
+
 ## 🔒 Security note
 
 The server binds `0.0.0.0` by default and carries **no authentication**. Anyone who can reach
