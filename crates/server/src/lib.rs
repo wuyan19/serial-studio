@@ -187,8 +187,11 @@ pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str, self_id: &str) -> O
 ///    所在机器),键 = compose(devId, 远端线名)。**多级条目透传**,环检测与深度
 ///    上限见 [`passthrough_port_key`]——否则自连/互注册时列表每轮上报自我复制
 ///    (回声环,4→8→12…);多级级联的口(`devB::devC::COM3`)归直连设备分组平铺;
-/// 3. 本地占有权快照覆盖 opened/holders/disconnected——**本地为唯一真相**
+/// 3. 本地占有权快照覆盖 opened/disconnected——**本地为唯一真相**
 ///    (远端 WS 断后其缓存是陈旧的,红标以本地 drainer 为准)。
+///    holders **不**覆盖:远端设备端口的权威占用数在远端 hub(本地值只计本机附着
+///    会话,覆盖会把 hub 的真实人数盖小——PC3 远程开 PC1 端口时显示 1 而非 3);
+///    设备离线后 holders 停留在最后一次缓存值,红标已表明状态不可信,无需兜底。
 pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     let meta = port_meta_store::load();
     let mut views: Vec<PortView> = state
@@ -218,7 +221,7 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             });
         }
     }
-    // 本地占有权覆盖远端桶的运行时状态
+    // 本地占有权覆盖远端桶的运行时状态(见函数头注释第 3 条)
     let snap: HashMap<String, ss_core::PortInfo> = state
         .manager
         .snapshot_open_states()
@@ -226,14 +229,20 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         .into_iter()
         .map(|p| (p.name.clone(), p))
         .collect();
+    apply_local_override(&mut views, &snap);
+    views
+}
+
+/// opened/disconnected 以本地快照为唯一真相(远端 WS 断后缓存陈旧,红标以本地
+/// drainer 为准);holders 保留远端桶缓存值(权威占用数在远端 hub,见
+/// [`list_ports_with_meta`] 头注释)。抽成纯函数供回归测试直测覆盖语义。
+fn apply_local_override(views: &mut [PortView], snap: &HashMap<String, ss_core::PortInfo>) {
     for v in views.iter_mut() {
         if let Some(info) = snap.get(&v.info.name) {
             v.info.opened = info.opened;
-            v.info.holders = info.holders;
             v.info.disconnected = info.disconnected;
         }
     }
-    views
 }
 
 /// 设置端口别名并广播元数据变更：写 ports.json 后向 meta_bus 发一次通知，
@@ -382,6 +391,64 @@ mod tests {
         assert_eq!(obj["holders"], 2);
         assert_eq!(obj["disconnected"], false);
         assert_eq!(obj["alias"], "GPS");
+    }
+
+    /// 回归(PC3 远程显示 1 而非 3):远端设备端口的 holders 必须保留远端桶缓存值
+    /// (hub 权威计数),本地快照只覆盖 opened/disconnected——本地 holders 只计本机
+    /// 附着会话,一旦覆盖,PC3 自己开 PC1 的口会把 3 盖成 1。
+    #[test]
+    fn local_override_keeps_remote_holders() {
+        let mut views = vec![PortView {
+            // 远端桶条目:hub 上报 opened/holders=3(PC1 窗口 + PC2 web + PC3 设备连接)
+            info: ss_core::PortInfo {
+                name: "uuid-pc1::COM3".into(),
+                opened: true,
+                holders: 3,
+                disconnected: false,
+            },
+            alias: None,
+        }];
+        // 本地快照(PC3 自己的 manager map):同复合键,opened/holders 只反映本机 1 个窗口会话
+        let snap: HashMap<String, ss_core::PortInfo> = HashMap::from([(
+            "uuid-pc1::COM3".into(),
+            ss_core::PortInfo {
+                name: "uuid-pc1::COM3".into(),
+                opened: true,
+                holders: 1,
+                disconnected: false,
+            },
+        )]);
+        apply_local_override(&mut views, &snap);
+        let v = &views[0];
+        assert_eq!(v.info.holders, 3, "holders 不得被本地值覆盖");
+        assert!(v.info.opened, "opened 仍以本地快照为准");
+
+        // 断连兜底仍生效:本地 drainer 红标覆盖远端缓存里的 disconnected=false
+        let mut views2 = vec![PortView {
+            info: ss_core::PortInfo {
+                name: "uuid-pc1::COM3".into(),
+                opened: true,
+                holders: 3,
+                disconnected: false,
+            },
+            alias: None,
+        }];
+        let snap2: HashMap<String, ss_core::PortInfo> = HashMap::from([(
+            "uuid-pc1::COM3".into(),
+            ss_core::PortInfo {
+                name: "uuid-pc1::COM3".into(),
+                opened: false,
+                holders: 1,
+                disconnected: true,
+            },
+        )]);
+        apply_local_override(&mut views2, &snap2);
+        assert!(views2[0].info.disconnected, "disconnected 以本地为唯一真相");
+        assert!(!views2[0].info.opened);
+        assert_eq!(
+            views2[0].info.holders, 3,
+            "断连后 holders 保留最后一次远端值"
+        );
     }
 
     #[test]
