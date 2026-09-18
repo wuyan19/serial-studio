@@ -101,6 +101,45 @@ jobs:
           cp target/release/serial-studio.exe target/release/serial-studio-portable-x64.exe
           gh release upload --clobber "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" target/release/serial-studio-portable-x64.exe
 
+  # 开发板桥预编译(极客零编译即用):单文件 C 纯 libc,6 架构全静态 musl(各约 65KB)。
+  # needs: release——等 tauri-action 的 draft release 确定存在后再 upload(与 updater-manifests 同模式)。
+  # x86_64 产物顺带在 runner 上跑协议冒烟(.github/scripts/board_bridge_smoke.py):
+  # PTY 模拟串口 + 手写 WS 客户端全链路验证(握手/列表/acquired/写/RX 数据帧/关闭/重连),
+  # 所有应答过 json.loads——防 0.13.x 曾发生的 sb_fmt 固定缓冲截断类 bug 回归。
+  board-bridge:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v3
+        with:
+          zig-version: 0.13.0 # 与本地验证过的版本一致
+
+      - name: Cross-compile static binaries (6 targets)
+        run: |
+          set -e
+          mkdir -p dist
+          zig cc -target x86_64-linux-musl    -O2 -static -s -o dist/ss-board-bridge-x86_64  examples/ss-board-bridge.c
+          zig cc -target aarch64-linux-musl   -O2 -static -s -o dist/ss-board-bridge-aarch64 examples/ss-board-bridge.c
+          zig cc -target arm-linux-musleabihf -O2 -static -s -o dist/ss-board-bridge-armv7    examples/ss-board-bridge.c
+          zig cc -target riscv64-linux-musl   -O2 -static -s -o dist/ss-board-bridge-riscv64  examples/ss-board-bridge.c
+          zig cc -target mips-linux-musl      -O2 -static -s -o dist/ss-board-bridge-mips     examples/ss-board-bridge.c
+          zig cc -target mipsel-linux-musl    -O2 -static -s -o dist/ss-board-bridge-mipsel   examples/ss-board-bridge.c
+          ls -la dist
+
+      - name: Protocol smoke test (x86_64 binary, PTY as serial)
+        run: python3 .github/scripts/board_bridge_smoke.py dist/ss-board-bridge-x86_64
+
+      - name: Checksums + upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          ( cd dist && sha256sum ss-board-bridge-* > ../ss-board-bridge.sha256 )
+          gh release upload "$TAG" dist/ss-board-bridge-* ss-board-bridge.sha256 --clobber
+
   # tauri-action 生成的 latest.json 有两类下载地址问题:
   # 1) updaterJsonPreferNsisLazyDownload 使 url 指向 api.github.com 资产端点——
   #    匿名限流(60 次/h/IP)返回 403 Forbidden,且国内直连 api.github.com 不通;
