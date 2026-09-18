@@ -559,6 +559,9 @@ async fn handle_client_msg(
                     &run_id,
                     abort,
                     None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
+                    // 落盘策略唯一在 script_logs(开关开才 Some);远程 GUI 无服务端目录入口,
+                    // 路径不进 WS 协议,仅供服务端侧排查时按目录定位
+                    crate::script_logs::log_file_for(&port, Some(&name)),
                 )
                 .await;
                 script_runs.lock().unwrap().remove(&run_id_for_cleanup);

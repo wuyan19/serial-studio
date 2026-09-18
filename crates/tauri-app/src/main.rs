@@ -123,6 +123,14 @@ async fn save_settings(
     Ok(())
 }
 
+/// 打开脚本日志目录(不存在则先创建):系统文件管理器,经 tauri-plugin-opener。
+#[tauri::command]
+async fn open_script_log_dir() -> Result<(), String> {
+    let dir = ss_server::script_logs::dir().ok_or("无法定位配置目录")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// 应用配置：写 settings.json + 重启服务使新监听地址/端口生效。
 /// 串口连接和宏保留（AppState 跨重启共享）。
 #[tauri::command]
@@ -645,6 +653,8 @@ async fn run_script(
             &run_id,
             abort,
             None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
+            // 落盘策略唯一在 script_logs(开关开才 Some);日志文件经设置页「打开目录」查看
+            ss_server::script_logs::log_file_for(&port, Some(&name)),
         )
         .await;
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);
@@ -951,6 +961,7 @@ fn run_gui() {
             get_settings,
             save_settings,
             apply_settings,
+            open_script_log_dir,
             service_status,
             load_macros,
             save_macros,

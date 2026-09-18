@@ -144,6 +144,8 @@ export interface SrvSettings {
   telnet_port: number;
   /** 是否允许远程(WS/MCP)执行脚本。远程客户端经 version 握手拿到。 */
   enable_scripting: boolean;
+  /** 脚本 log() 输出自动落盘到 配置目录/script-logs/。每次运行时读,改动立即生效。 */
+  script_log_to_disk: boolean;
 }
 
 // ===== 快捷键（可改键；唯一真相源在 shortcuts.ts） =====

@@ -22,3 +22,6 @@ rquickjs = { version = "0.12.2", features = ["futures"] }
 # 脚本文件函数:read_b64_chunk 编码 / file_md5 校验(流式)
 base64 = "0.22"
 md-5 = "0.10"
+
+# 脚本日志落盘:行时间戳/文件头时间格式化
+chrono = { workspace = true }

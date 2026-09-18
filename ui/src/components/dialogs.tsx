@@ -366,6 +366,18 @@ export function SettingsPanel({
     setSrv(srvSettings);
   }, [srvSettings]);
 
+  /** 打开脚本日志目录(后端不存在则先建);失败静默,不打断设置页。 */
+  const openLogDir = () => {
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("open_script_log_dir");
+      } catch {
+        /* ignore */
+      }
+    })();
+  };
+
   /** 应用：本地模式存服务设置并打「已应用」标；远程客户端模式应用连接。按钮和回车都走这里。 */
   const apply = () => {
     if (!showServer) {
@@ -433,12 +445,36 @@ export function SettingsPanel({
                     />
                     <span>允许远程执行 JS 脚本</span>
                     <span
-                      title="默认关闭:服务器无认证,开启后任何能连到端口的客户端可执行脚本——脚本可读宿主机文件(任意路径,暂无白名单),无写入/网络访问。暴露到非信任网络前,务必绑定 127.0.0.1 或加防火墙/VPN。"
+                      title="服务器无认证，开启后任何已连接的客户端都可执行脚本（可读写本机文件）。"
                       style={{ cursor: "help" }}
                     >
                       ⚠
                     </span>
                   </label>
+                </ConfigRow>
+                <ConfigRow label="脚本日志">
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={srv.script_log_to_disk}
+                      onChange={(e) => setSrv({ ...srv, script_log_to_disk: e.target.checked })}
+                    />
+                    <span>log 输出自动落盘</span>
+                    <span
+                      title="脚本的运行日志（log函数的输出）自动落盘到 script-logs 目录。"
+                      style={{ cursor: "help" }}
+                    >
+                      ⚠
+                    </span>
+                  </label>
+                  {/* 常驻行尾小按钮:直达日志目录,不依赖开关状态(后端不存在则先建) */}
+                  <button
+                    className="btn btn--ghost"
+                    style={{ marginLeft: "auto", padding: "3px 10px", fontSize: 12, flexShrink: 0 }}
+                    onClick={openLogDir}
+                  >
+                    打开目录
+                  </button>
                 </ConfigRow>
                 <div className="btn-row">
                   {saved && <span className="btn--save-pulse">已应用</span>}

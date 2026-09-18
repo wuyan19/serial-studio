@@ -9,7 +9,7 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(引擎会
 
 产出目标:一段**自包含、可直接粘贴运行**的 JS,加一两句运行说明。
 
-## 全局 API(4 个 async 函数 + log + 4 个文件函数 + 标准 JS)
+## 全局 API(4 个 async 函数 + log + 6 个文件函数 + 标准 JS)
 
 脚本运行在沙箱:除 `Math`/`Date`/`JSON`/正则/字符串等标准 JS 外,**只有**下面注入的函数,没有 `fetch`/`require`/`fs`/`process`/`setTimeout`/`console`。
 
@@ -24,8 +24,10 @@ Serial Studio 脚本用 **JavaScript** 写,嵌入 QuickJS 引擎执行(引擎会
 | `file_md5(path)` | 宿主机文件 md5(流式,大文件内存常数级) | 32 位 hex;缺失 throw |
 | `read_file(path)` | 全量读为文本(UTF-8 lossy) | 文本;缺失 throw;**上限 64MiB,超限 throw(大文件用 read_b64_chunk)** |
 | `read_b64_chunk(path, index, chunk_bytes)` | 读第 `index` 块(`offset=index×chunk_bytes`)的 base64 | 块的 base64;**越界返回空串 = EOF**;缺失/参数非法 throw |
+| `write_file(path, content)` | 写文本文件(UTF-8),**存在则截断覆盖**,父目录自动创建 | 写入字节数;目标为目录/管道/设备、IO 失败、**超 64MiB** throw |
+| `append_file(path, content)` | 追加文本到文件(UTF-8),不存在则创建,父目录自动创建 | 写入字节数;错误语义同 write_file |
 
-文件函数都是同步函数,只读宿主机文件(无写/删;路径暂无白名单,可读任意位置——远程执行场景注意此边界)。`read_b64_chunk` 的 `chunk_bytes` **须为 ≥3 的 3 的倍数且 ≤1MiB**(如 192 → 256 字符):调用方按同一值算总块数,除末块外无 `=` 填充,全部块顺序拼接后 `base64 -d` 即原文——串口上传就靠它,内存峰值一块。
+文件函数都是同步函数,读写宿主机文件(**无删除**;路径暂无白名单,可读写任意位置——远程执行场景注意此边界)。`read_b64_chunk` 的 `chunk_bytes` **须为 ≥3 的 3 的倍数且 ≤1MiB**(如 192 → 256 字符):调用方按同一值算总块数,除末块外无 `=` 填充,全部块顺序拼接后 `base64 -d` 即原文——串口上传就靠它,内存峰值一块。`write_file` 的覆盖写**非原子**(磁盘满可能留半截文件),重要数据建议用 `append_file` 累积,或覆盖前先 `read_file` 备份旧值。
 
 `[port]` 缺省 = 当前活动端口;传端口寻址则操作该口(**须已打开**,脚本无 open 原语),因此一个脚本能跨多口:在 A 口查数据、B 口下发。指定端口未打开时 `send`/`clear` 会 throw(如 "send 失败(端口 X)"),`expect` 返回空串——按各函数语义判空/try。
 
@@ -66,6 +68,7 @@ for (let i = 0; i < Number(args.count); i++) { await sleep(100); }
 1. **每次 `expect` 后都判空。** 超时不报错、返回 `""`。
 2. **调试/输出用 `log`,中止报错用 `throw`,严禁 `console.*`。** `log(s)` 输出日志且不中断脚本(循环里随便用);`throw new Error("…")` 中止脚本并显示消息(配合第 1 条:没等到就 throw)。沙箱无 console,写了即报 ReferenceError。
    日志出口:UI 运行实时显示;**经 MCP 运行(`serial_debug_script` / `serial_run_script`)时,log 输出会随工具响应一次性返回**(无论成功/失败/超时都带,上限最近 200 条/16 KiB,超限丢最旧)。调试脚本时在关键分支 `log` 中间变量即可看到。
+   落盘出口:服务端开启「脚本日志自动落盘」(设置里的 script_log_to_disk)后,log 输出同时追加写入配置目录 `script-logs/` 下的 `<时间戳>-<端口>[-<脚本名>].log`(每条 log 带一行 `[时:分:秒.毫秒]` 前缀,log 内容含换行时后续行无前缀;不自动清理)。MCP 响应末尾会给出本次文件路径——**超 16 KiB 上限被截的日志可用 `read_file(该路径)` 读回全量**。脚本自己要落盘数据(采集结果、CSV 等)则直接用 `append_file`/`write_file`,不依赖该开关。
 3. **`expect` 的 pattern 是正则字符串,不是字面量。** 写 `expect("OK")`、`expect("\\d+")`,**不要** `expect(/OK/)`(字面量会变成 `"/OK/"`——它本身能编译,但匹配的是带斜杠的字面串,永远等不到想要的 `OK`)。Rust `regex` 语法:字符类、`+`/`*`/`?`/`|`/`^`/`$`/`\d`/`\w` 等;别用反向引用。
 4. **脚本可长跑,但要留出口。** 界面手动运行无时长上限;经 MCP 工具(`serial_debug_script` / `serial_run_script`)运行上限 5 分钟(超时被中止,MCP 暂无手动停止)。运行时可被秒级中止;`expect` 的 timeout 常用 500~3000ms,慢命令(udhcpc/ping/mkfs 等)可给 10~30s;多阶段脚本先把各步耗时加一加,别超 5 分钟总预算;循环要有退出条件。内存上限 64MiB,超出被强杀。
 

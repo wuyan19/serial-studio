@@ -147,7 +147,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_debug_script",
-                "description": "在串口上临时执行一段 JS 脚本（QuickJS）做调试验证，调通后可经 serial_save_script 落库、serial_run_script 按名复用。脚本内可用 send/expect/clear/sleep（均可带 [port] 跨串口，缺省为脚本运行端口）、同步 log（日志随本工具响应返回）及只读宿主机文件的 file_stat/file_md5/read_file/read_b64_chunk；签名与约束详见 serial_script_guide prompt，调用前先获取。受 enable_scripting 开关限制，默认关闭；运行上限 5 分钟，超时中止。",
+                "description": "在串口上临时执行一段 JS 脚本（QuickJS）做调试验证，调通后可经 serial_save_script 落库、serial_run_script 按名复用。脚本内可用 send/expect/clear/sleep（均可带 [port] 跨串口，缺省为脚本运行端口）、同步 log（日志随本工具响应返回；服务端开启日志自动落盘时同时写入磁盘并在响应末尾给出文件路径）及读写宿主机文件的 file_stat/file_md5/read_file/read_b64_chunk/write_file/append_file；签名与约束详见 serial_script_guide prompt，调用前先获取。受 enable_scripting 开关限制，默认关闭；运行上限 5 分钟，超时中止。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -160,7 +160,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "serial_run_script",
-                "description": "按 name 执行脚本库（scripts.json）中已保存的脚本。执行路径与约束同 serial_debug_script（enable_scripting 闸门、5 分钟运行上限）；脚本内 log 的调试日志随本工具响应返回。",
+                "description": "按 name 执行脚本库（scripts.json）中已保存的脚本。执行路径与约束同 serial_debug_script（enable_scripting 闸门、5 分钟运行上限）；脚本内 log 的调试日志随本工具响应返回，服务端开启日志自动落盘时同时写入磁盘并在响应末尾给出文件路径。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -519,7 +519,7 @@ async fn tool_serial_debug_script(args: Value, state: &AppState) -> Value {
         params: Vec::new(),
         code: code.to_string(),
     };
-    execute_script(state, &args, script, run_args).await
+    execute_script(state, &args, script, run_args, None).await
 }
 
 /// 执行脚本库(scripts.json)中已保存的脚本(serial_run_script):按 name 取出后走与
@@ -542,17 +542,19 @@ async fn tool_serial_run_script(args: Value, state: &AppState) -> Value {
     // name 查找先于 execute_script 内的闸门:属只读元数据访问(list 工具本可见),无害;
     // 执行能力仍统一由闸门拦截。
     let run_args = merge_run_args(&script.params, args.get("args"));
-    execute_script(state, &args, script, run_args).await
+    execute_script(state, &args, script, run_args, Some(&name)).await
 }
 
 /// 脚本执行统一路径(enable_scripting 闸门 → resolve_port → 端口预检 → 并发上限 →
 /// run_script → 日志随响应返回)。serial_debug_script 与 serial_run_script 共用,
 /// 执行 JS 的工具必经此路——闸门语义单一真相,新增执行类工具不会漏拦。
+/// `script_name` 用于落盘日志文件命名(debug 临时执行为 None)。
 async fn execute_script(
     state: &AppState,
     args: &Value,
     script: ss_core::Script,
     run_args: std::collections::HashMap<String, String>,
+    script_name: Option<&str>,
 ) -> Value {
     let manager = &state.manager;
     // 远程 MCP 路径强制闸门:服务器无认证,脚本执行须显式开启
@@ -575,16 +577,33 @@ async fn execute_script(
         Ok(p) => p,
         Err(_) => return error_text("脚本执行并发已满,稍后再试".into()),
     };
-    let ss_core::ScriptRunOutcome { result, logs } =
-        ss_core::run_script(&port, &script, manager.clone(), run_args).await;
+    // 落盘策略唯一在 script_logs(开关开才 Some)。MCP 响应内日志有 200 条/16KiB 上限,
+    // 落盘是找回超限日志的手段——outcome 带回实际写过的路径,拼进响应供 read_file 读回。
+    let log_file = crate::script_logs::log_file_for(&port, script_name);
+    let ss_core::ScriptRunOutcome {
+        result,
+        logs,
+        log_file,
+    } = ss_core::run_script(&port, &script, manager.clone(), run_args, log_file).await;
     // 日志随结果返回(MCP 无实时推送出口):成功/失败/超时均拼上 log() 收集的输出,AI 才能调试脚本。
     // 空日志省略该段,避免噪音。
-    match result {
-        Ok(()) => ok_text(with_logs("脚本执行完成", &logs)),
-        Err(e) => error_text(with_logs(
-            &format!("脚本失败: {}", e.display_message()),
-            &logs,
-        )),
+    let (mut text, ok) = match result {
+        Ok(()) => (with_logs("脚本执行完成", &logs), true),
+        Err(ref e) => (
+            with_logs(&format!("脚本失败: {}", e.display_message()), &logs),
+            false,
+        ),
+    };
+    if let Some(p) = log_file {
+        text.push_str(&format!(
+            "\n完整日志已落盘: {}(超响应上限被截的日志可用 read_file 读回)",
+            p.display()
+        ));
+    }
+    if ok {
+        ok_text(text)
+    } else {
+        error_text(text)
     }
 }
 

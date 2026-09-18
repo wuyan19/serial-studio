@@ -11,6 +11,7 @@ mod mcp;
 pub mod port_meta_store;
 pub mod protocol;
 pub mod remotes_store;
+pub mod script_logs;
 pub mod scripts_store;
 pub mod settings;
 pub mod supervisor;

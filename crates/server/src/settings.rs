@@ -19,6 +19,13 @@ pub struct Settings {
     /// 远程能跑脚本 = 潜在 RCE 面,须显式开启。本地 Tauri 不受此开关限制。
     #[serde(default = "default_enable_scripting")]
     pub enable_scripting: bool,
+    /// 脚本 log() 输出自动落盘。开启后每次脚本运行把 log 输出追加写入
+    /// `<配置目录>/script-logs/` 下的日志文件(路径决策见 script_logs::log_file_for),
+    /// MCP 响应末尾会给出本次文件路径——MCP 响应内日志有 200 条/16KiB 上限,
+    /// 落盘是找回超限日志的手段。每次脚本运行时读取,改动立即生效,无需重启
+    /// (与 ws_host/port 的重启生效语义不同)。默认 false:文件不自动清理,由用户显式开启、自管。
+    #[serde(default)]
+    pub script_log_to_disk: bool,
     /// 本实例全局身份(段名=实例 id 的根基)。**生成一次、落盘、永不变**——身份的
     /// 全部价值在于把不同时刻/不同视角的记录(对端缓存里的路径链、授权、路径优选)
     /// 对上号,记忆比会话长,身份就必须比会话长。经 [`instance_id`] 取用(缺失时
@@ -47,6 +54,7 @@ impl Default for Settings {
             ws_port: default_ws_port(),
             telnet_port: default_telnet_port(),
             enable_scripting: default_enable_scripting(),
+            script_log_to_disk: false,
             instance_id: None,
         }
     }
@@ -88,10 +96,14 @@ pub fn load() -> Settings {
     }
 }
 
-/// 写 settings.json。
+/// 写 settings.json。temp+rename 原子替换:并发 load() 不会读到写一半的损坏 JSON
+/// (script_log_to_disk 每次脚本运行都 load,读坏会静默落默认值);temp 与目标同目录
+/// 保证 rename 同卷原子;进程崩溃最多残留一个 settings.json.tmp,不影响后续加载。
 pub fn save(s: &Settings) -> Result<(), String> {
     let p = settings_path().ok_or("无法定位配置目录")?;
     let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    std::fs::write(&p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写入 {:?} 失败: {}", tmp, e))?;
+    std::fs::rename(&tmp, &p).map_err(|e| format!("落盘 {:?} 失败: {}", p, e))?;
     Ok(())
 }

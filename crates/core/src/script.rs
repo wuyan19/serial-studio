@@ -11,8 +11,14 @@
 //!
 //! 暴露的全局 async 函数:send / expect / clear / sleep(以及同步函数 log,输出脚本日志)。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
 //!
-//! 同步文件函数:read_file(全量文本,上限 64MiB)/ read_b64_chunk(按块 base64 随机访问,块须
-//! ≥3、3 的倍数且 ≤1MiB,越界返空串)/ file_stat(exists/size JSON)/ file_md5(流式 hex)。
+//! 同步文件函数——读:read_file(全量文本,上限 64MiB)/ read_b64_chunk(按块 base64 随机访问,块须
+//! ≥3、3 的倍数且 ≤1MiB,越界返空串)/ file_stat(exists/size JSON)/ file_md5(流式 hex);
+//! 写:write_file(截断覆盖)/ append_file(追加),均自动创建父目录、上限 64MiB。
+//! 路径无白名单(读写对称;无删除。远程执行场景注意此边界)。
+//!
+//! 日志落盘:调用方传 `log_file`(Some = 本 run 的日志文件路径,策略在 server 侧 script_logs,
+//! core 不感知配置目录/设置)时,log() 输出同步追加写入该文件,失败只 warn 不中断脚本;
+//! [`ScriptRunOutcome::log_file`] 仅在实际写过时为 Some(供 MCP 响应给调用方路径)。
 //!
 //! v1 限制(后续完善):
 //! - 串口原语失败用 tracing 记录、不抛 JS 异常(rquickjs `Async` 闭包的 `Ctx<'js>` 生命周期短于
@@ -153,6 +159,10 @@ pub struct ScriptRunOutcome {
     pub result: Result<(), ScriptError>,
     /// 脚本 log() 输出(可能为空;超限已截断,见 [`ScriptLogSink`])。
     pub logs: Vec<String>,
+    /// 自动落盘的日志文件路径——仅实际写过时 Some。策略与路径生成在 server 侧
+    /// script_logs(core 只收路径,不感知配置目录/设置);零 log() 或全写失败为 None,
+    /// 调用方不给用户展示路径。
+    pub log_file: Option<std::path::PathBuf>,
 }
 
 /// 一个脚本参数定义(string / select / file)。运行时收集值注入 QuickJS 的 `args.<name>`。
@@ -197,8 +207,11 @@ pub struct Script {
 /// 文件函数上限。`read_b64_chunk` 的块即单次内存峰值,封顶防脚本传超大值在 Rust 侧
 /// 直接分配(QuickJS 的 64MiB 堆限制管不到这里,极端值触发 alloc_error 会 abort 全进程);
 /// `read_file` 全量进内存,与 SKILL.md "小文件" 契约一致设 64MiB。
+/// 写侧与读对称:content 先经 QuickJS 堆(64MiB 上限)再到 Rust String,此上限主要是
+/// 纵深防御(JS 16 位串转 UTF-8 可膨胀 ~2 倍)并文档化语义——JS 层无法构造超限内容先触发它。
 const FILE_CHUNK_MAX: u64 = 1024 * 1024;
 const FILE_READ_MAX: u64 = 64 * 1024 * 1024;
+const FILE_WRITE_MAX: usize = 64 * 1024 * 1024;
 
 /// 读类文件函数的常规文件预检:目录/命名管道/设备等非常规路径直接 throw——
 /// 对它们做阻塞读会卡死脚本线程(中断机制打不穿陷入 syscall 的线程)并泄漏句柄。
@@ -221,6 +234,94 @@ fn regular_file_meta(
     }
 }
 
+/// 写类文件函数的目标预检:已存在且非常规文件(目录/FIFO/设备)直接 throw——与
+/// [`regular_file_meta`] 同理(打开 FIFO 写端无读者会挂死脚本线程,中断打不穿 syscall);
+/// 路径不存在则放行(本次新建)。
+fn writable_target(ctx: &Ctx<'_>, fn_name: &str, path: &str) -> rquickjs::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => Ok(()),
+        Ok(_) => Err(rquickjs::Exception::throw_message(
+            ctx,
+            &format!("{fn_name} {path}: 不是常规文件(目录/设备/管道不支持)"),
+        )),
+        Err(_) => Ok(()),
+    }
+}
+
+/// write_file(截断覆盖)/ append_file(追加)共用实现:父目录自动创建,便于脚本把
+/// 日志/采集数据写到自选目录树。覆盖写非原子(磁盘满可能留半截文件)——日志/采集
+/// 场景可接受,SKILL.md 已文档化,不值得为此引入同目录临时文件+rename 的复杂度。
+fn write_to_disk(
+    ctx: &Ctx<'_>,
+    fn_name: &str,
+    path: &str,
+    content: &str,
+    append: bool,
+) -> rquickjs::Result<()> {
+    if content.len() > FILE_WRITE_MAX {
+        return Err(rquickjs::Exception::throw_message(
+            ctx,
+            &format!(
+                "{fn_name} {path}: 内容 {} 字节超过 {FILE_WRITE_MAX} 字节上限",
+                content.len()
+            ),
+        ));
+    }
+    writable_target(ctx, fn_name, path)?;
+    use std::io::Write as _;
+    let io_err = |e: std::io::Error| {
+        rquickjs::Exception::throw_message(ctx, &format!("{fn_name} {path}: {e}"))
+    };
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(io_err)?;
+        }
+    }
+    if append {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(io_err)?
+            .write_all(content.as_bytes())
+            .map_err(io_err)?;
+    } else {
+        std::fs::write(path, content).map_err(io_err)?;
+    }
+    Ok(())
+}
+
+/// log() 输出落盘一行(调用方传 log_file Some 时每次 log 触发)。每次调用 append 打开、
+/// 不持长句柄——脚本线程被超时/abort 杀掉时无句柄泄漏,多 run 撞名同文件时 OS 级
+/// append 天然不互踩。空文件先写头行(标识端口与开始时刻);时间戳为本地时间。
+/// 失败仅首次 warn(warn_once 按 run 隔离,磁盘满等持续失败不刷屏),绝不中断脚本——
+/// 日志是诊断通道,与 sink/publish 同语义。
+fn append_log_line(path: &std::path::Path, port: &str, message: &str, warn_once: &AtomicBool) {
+    let now = chrono::Local::now();
+    let header = format!(
+        "# script log | port={port} | start={}\n",
+        now.format("%Y-%m-%d %H:%M:%S")
+    );
+    let line = format!("[{}] {message}\n", now.format("%H:%M:%S%.3f"));
+    let res = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| {
+            use std::io::Write as _;
+            // 头行只写一次:以"打开时文件为空"为准——新建与历史空文件都覆盖到。
+            if f.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                f.write_all(header.as_bytes())?;
+            }
+            f.write_all(line.as_bytes())
+        });
+    if let Err(e) = res {
+        if !warn_once.swap(true, Ordering::Relaxed) {
+            tracing::warn!("脚本日志落盘失败(本次运行内不再提示): {e}");
+        }
+    }
+}
+
 /// 执行一段 JS 脚本(MCP 路径:默认 300s 超时,不暴露停止)。`args` 为运行时参数值,注入 `args.<name>`。
 ///
 /// MCP 是同步请求/响应,客户端无法中途喊停,且无限 JSON-RPC 调用有 DoS 风险,故保留超时兜底;
@@ -231,6 +332,7 @@ pub async fn run_script(
     script: &Script,
     manager: Arc<SerialManager>,
     args: HashMap<String, String>,
+    log_file: Option<std::path::PathBuf>,
 ) -> ScriptRunOutcome {
     let abort = Arc::new(AtomicBool::new(false));
     // MCP 是同步 JSON-RPC,无实时日志出口;run_id="" → publish 的 ScriptLog 无订阅者被丢(见 event_to_msg 不转发)。
@@ -245,14 +347,22 @@ pub async fn run_script(
         "",
         abort,
         Some(sink.clone()),
+        log_file.clone(),
     )
     .await;
     // 读取时序:Ok/失败/panic 路径经 oneshot happens-before,所有 push 已完成,快照完备;
     // 外层兜底超时(脚本线程卡死)路径线程可能仍在 push——Mutex 下读取安全,只是快照可能
     // 不完整,晚到的 push 写进没人再读的 sink,无副作用。
+    // exists() 判"实际写过":同 happens-before 保证判定可靠(兜底超时下可能漏判晚到写入,
+    // 只是不展示路径,无副作用)。
+    let log_file = match log_file {
+        Some(p) if p.exists() => Some(p),
+        _ => None,
+    };
     ScriptRunOutcome {
         result,
         logs: sink.logs(),
+        log_file,
     }
 }
 
@@ -276,6 +386,9 @@ pub async fn run_script_with_timeout(
     run_id: &str, // 本次运行标识:脚本 log() 输出按此路由到前端(WS/Tauri);MCP 入口传 ""
     abort: Arc<AtomicBool>,
     log_sink: Option<ScriptLogSink>, // Some 时 log() 双写:publish(前端)+ sink(MCP 随结果返回);None = 仅现状
+    // Some 时 log() 第三写:追加落盘该文件(策略/命名在 server 侧 script_logs,core 不感知配置)。
+    // 见 append_log_line:失败只 warn 不中断。
+    log_file: Option<std::path::PathBuf>,
 ) -> Result<(), ScriptError> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
@@ -301,6 +414,7 @@ pub async fn run_script_with_timeout(
                 run_id,
                 abort_for_thread,
                 log_sink,
+                log_file,
             ))
         });
         let result = match std::panic::catch_unwind(run) {
@@ -356,6 +470,7 @@ async fn run_script_inner(
     run_id: String, // 脚本 log() 按此路由到前端(WS/Tauri);MCP 传 ""
     abort: Arc<AtomicBool>,
     log_sink: Option<ScriptLogSink>,
+    log_file: Option<std::path::PathBuf>,
 ) -> Result<(), ScriptError> {
     let deadline = timeout.as_ref().map(|t| Instant::now() + *t);
 
@@ -500,17 +615,23 @@ async fn run_script_inner(
                 // log(message):脚本日志输出(不中断脚本,区别 throw)。同步 publish ScriptLog →
                 // EventBus → 前端(按 run_id 路由)。必须同步:若用 Async 包装,JS 不 await 则 future 不执行→丢失。
                 // MCP 路径 run_id="" 且 server 不订阅 EventBus → 额外双写 sink(先 sink 后 publish,
-                // 两把锁无嵌套),随 ScriptRunOutcome 返回。
+                // 两把锁无嵌套),随 ScriptRunOutcome 返回;log_file Some 时第三写追加落盘(见 append_log_line)。
                 {
                     let mgr = manager.clone();
                     let rid = run_id.clone();
                     let dp = port.clone();
                     let sink = log_sink.clone();
+                    let lfile = log_file.clone();
+                    // 落盘失败 warn 一次性(磁盘满等持续失败不刷屏),按 run 隔离。
+                    let lwarn = Arc::new(AtomicBool::new(false));
                     globals.set(
                         "log",
                         Func::from(move |message: String| {
                             if let Some(s) = sink.as_ref() {
                                 s.push(message.clone());
+                            }
+                            if let Some(lf) = lfile.as_ref() {
+                                append_log_line(lf, &dp, &message, &lwarn);
                             }
                             mgr.event_bus().publish(SerialEvent::ScriptLog {
                                 run_id: rid.clone(),
@@ -644,6 +765,29 @@ async fn run_script_inner(
                         ),
                     )
                     .map_err(|e| e.to_string())?;
+
+                    // 写函数返回写入字节数(UTF-8;与 read_file 的 lossy 读对称,脚本可自校验)。
+                    globals.set(
+                        "write_file",
+                        Func::from(
+                            |ctx: Ctx<'_>, path: String, content: String| -> rquickjs::Result<usize> {
+                                write_to_disk(&ctx, "write_file", &path, &content, false)?;
+                                Ok(content.len())
+                            },
+                        ),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    globals.set(
+                        "append_file",
+                        Func::from(
+                            |ctx: Ctx<'_>, path: String, content: String| -> rquickjs::Result<usize> {
+                                write_to_disk(&ctx, "append_file", &path, &content, true)?;
+                                Ok(content.len())
+                            },
+                        ),
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
 
                 // 注入运行时参数 args(运行收集的值):globalThis.args = { name: value, ... }。
@@ -746,6 +890,7 @@ mod tests {
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -770,6 +915,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -825,6 +971,7 @@ mod tests {
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         match result {
@@ -847,6 +994,7 @@ mod tests {
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         assert!(
@@ -863,6 +1011,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -882,6 +1031,7 @@ mod tests {
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
@@ -894,6 +1044,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -919,6 +1070,7 @@ mod tests {
             args,
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -949,6 +1101,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort,
+            None,
             None,
         )
         .await;
@@ -984,6 +1137,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort,
+            None,
             None,
         )
         .await;
@@ -1025,6 +1179,7 @@ mod tests {
                 "log-rid",
                 abort_a,
                 None,
+                None,
             ),
             run_script_with_timeout(
                 "COM0",
@@ -1034,6 +1189,7 @@ mod tests {
                 HashMap::new(),
                 "log-rid",
                 abort_b,
+                None,
                 None,
             ),
         );
@@ -1064,6 +1220,7 @@ mod tests {
             HashMap::new(),
             "rid-xyz",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -1108,7 +1265,7 @@ mod tests {
             params: vec![],
             code: r#"log("x"); log("y")"#.to_string(),
         };
-        let outcome = run_script("COM0", &script, m, HashMap::new()).await;
+        let outcome = run_script("COM0", &script, m, HashMap::new(), None).await;
         assert!(
             outcome.result.is_ok(),
             "MCP 入口 log 不应 panic/中断: {:?}",
@@ -1127,7 +1284,7 @@ mod tests {
             params: vec![],
             code: r#"log("before"); throw new Error("boom")"#.to_string(),
         };
-        let outcome = run_script("COM0", &script, m, HashMap::new()).await;
+        let outcome = run_script("COM0", &script, m, HashMap::new(), None).await;
         assert!(
             matches!(&outcome.result, Err(ScriptError::Script(msg)) if msg == "boom"),
             "应失败且消息正确: {:?}",
@@ -1151,6 +1308,7 @@ mod tests {
             "log-rid",
             abort_flag(),
             Some(sink.clone()),
+            None,
         )
         .await;
         assert!(
@@ -1231,6 +1389,26 @@ mod tests {
         }
     }
 
+    /// 测试临时目录(写函数落点;唯一名 + 整树自动删)。
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "ss-script-dir-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// file_stat/file_md5:存在时 exists/size 正确、md5 对已知向量;缺失时 stat 返
     /// exists:false 不抛、md5 抛错;目录不算 exists。
     #[tokio::test]
@@ -1253,6 +1431,7 @@ throw new Error(JSON.stringify(out));"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -1277,6 +1456,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -1303,6 +1483,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -1342,6 +1523,7 @@ if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         assert!(r.is_ok(), "块拼接应还原整文件 b64: {:?}", r);
@@ -1371,6 +1553,7 @@ read_b64_chunk({p}, 0, 4);"#,
             "log-rid",
             abort_flag(),
             None,
+            None,
         )
         .await;
         assert!(
@@ -1392,6 +1575,7 @@ read_b64_chunk({p}, 0, 4);"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            None,
             None,
         )
         .await;
@@ -1416,6 +1600,7 @@ read_b64_chunk({p}, 0, 4);"#,
                 HashMap::new(),
                 "log-rid",
                 abort_flag(),
+                None,
                 None,
             )
             .await
@@ -1464,6 +1649,128 @@ read_b64_chunk({p}, 0, 4);"#,
             "超 1MiB 块应 throw 含上限值: {:?}",
             r
         );
+    }
+
+    /// write_file/append_file:UTF-8 字节返回、内容往返、父目录自动创建、覆盖 vs 追加语义。
+    #[tokio::test]
+    async fn write_append_files() {
+        let dir = TempDir::new();
+        let f = dir.0.join("nested").join("out.log"); // 父目录不存在 → 自动建
+        let content = "你好 line1\n";
+        let code = format!(
+            r#"const n = write_file({p}, {c});
+if (n !== {n_expect}) throw new Error("write_file 应返回 UTF-8 字节数,得到 " + n);
+if (read_file({p}) !== {c}) throw new Error("write_file 内容往返不符");
+append_file({p}, "line2");
+if (read_file({p}) !== {c} + "line2") throw new Error("append 应接在尾部");
+write_file({p}, "over");
+if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
+            p = json_str(f.to_string_lossy().as_ref()),
+            c = json_str(content),
+            n_expect = content.len(),
+        );
+        let r = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+            None,
+        )
+        .await;
+        assert!(r.is_ok(), "写文件应成功: {:?}", r);
+    }
+
+    /// 写函数防护:已存在的目录目标 throw「不是常规文件」(防 FIFO/设备挂死,同读函数)。
+    /// 超上限(64MiB)不做 JS 层覆盖:content 须先过 QuickJS 堆(同为 64MiB 上限),堆限制
+    /// 先于大小检查触发,脚本层构造不出超限内容——写上限是纵深防御(见 FILE_WRITE_MAX 注释)。
+    #[tokio::test]
+    async fn write_fn_guards() {
+        let dir = TempDir::new();
+        let code = format!(
+            r#"write_file({d}, "x");"#,
+            d = json_str(dir.0.to_string_lossy().as_ref()),
+        );
+        let r = run_script_with_timeout(
+            "COM0",
+            &code,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "log-rid",
+            abort_flag(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(&r, Err(ScriptError::Script(m)) if m.contains("不是常规文件")),
+            "目录目标应被写函数拒绝: {:?}",
+            r
+        );
+    }
+
+    /// log 落盘:log_file Some 时输出含头行(port/开始时刻)+ 带时间戳前缀的行。
+    #[tokio::test]
+    async fn log_file_written_when_provided() {
+        let dir = TempDir::new();
+        let lf = dir.0.join("run.log");
+        let result = run_script_with_timeout(
+            "COM0",
+            r#"log("第一行"); await sleep(5); log("second");"#,
+            mgr(),
+            Some(Duration::from_secs(5)),
+            HashMap::new(),
+            "rid-disk",
+            abort_flag(),
+            None,
+            Some(lf.clone()),
+        )
+        .await;
+        assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
+        let text = std::fs::read_to_string(&lf).unwrap();
+        assert!(
+            text.starts_with("# script log | port=COM0 | start="),
+            "头行应含 port/开始时刻: {text}"
+        );
+        assert!(text.contains("] 第一行\n"), "行应带时间戳前缀: {text}");
+        assert!(text.contains("second"), "第二条也应落盘: {text}");
+    }
+
+    /// MCP 入口 outcome.log_file 语义:有 log 且落盘 → Some(路径);零 log → None 且不建文件。
+    #[tokio::test]
+    async fn mcp_outcome_log_file_only_when_written() {
+        let m = mgr();
+        let dir = TempDir::new();
+        let lf = dir.0.join("mcp.log");
+        let no_log = Script {
+            description: None,
+            group: None,
+            params: vec![],
+            code: "await sleep(1)".into(),
+        };
+        let out = run_script("COM0", &no_log, m.clone(), HashMap::new(), Some(lf.clone())).await;
+        assert!(out.result.is_ok());
+        assert!(out.log_file.is_none(), "零 log() 不应给路径");
+        assert!(!lf.exists(), "零 log() 不应创建文件");
+
+        let with_log = Script {
+            description: None,
+            group: None,
+            params: vec![],
+            code: r#"log("x")"#.into(),
+        };
+        let out = run_script("COM0", &with_log, m, HashMap::new(), Some(lf.clone())).await;
+        assert!(out.result.is_ok());
+        assert_eq!(
+            out.log_file.as_deref(),
+            Some(lf.as_path()),
+            "落盘后应带出路径"
+        );
+        assert!(lf.exists());
     }
 
     /// JS 字符串字面量(路径等含反斜杠/引号时安全嵌入 code)。

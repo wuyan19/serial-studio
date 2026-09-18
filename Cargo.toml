@@ -33,6 +33,9 @@ axum = { version = "0.7", features = ["ws"] }
 # 串口
 serialport = "4.7"
 
+# 本地时间格式化（脚本日志落盘：行时间戳 + 日志文件名时间戳）
+chrono = "0.4"
+
 # 字节
 bytes = "1.7"
 
