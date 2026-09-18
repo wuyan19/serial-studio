@@ -112,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: mlugg/setup-zig@v3
+      - uses: mlugg/setup-zig@v2
         with:
           zig-version: 0.13.0 # 与本地验证过的版本一致
 
