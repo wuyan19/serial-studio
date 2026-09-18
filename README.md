@@ -147,8 +147,9 @@ board straight through MCP).
 - Protocol contract: [docs/device-protocol.md](docs/device-protocol.md) (handshake / messages / binary data frames)
 - Reference implementation: [examples/ss-board-bridge.c](examples/ss-board-bridge.c) — single-file C,
   libc only, `musl-gcc -O2 -static` produces a small static binary for any architecture.
-- Prebuilt: static binaries for x86_64 / aarch64 / armv7 / riscv64 / mips / mipsel
-  (plus a sha256 manifest) are attached to every Release — scp one to the board and run.
+- Prebuilt: static binaries for x86_64 / aarch64 / armv7 / riscv64 (plus a sha256 manifest)
+  are attached to every Release — scp one to the board and run. For mips/mipsel, compile
+  from source with a single musl-gcc command (see the protocol doc).
 
 ## 🔒 Security note
 

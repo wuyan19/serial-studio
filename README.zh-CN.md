@@ -143,8 +143,8 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 - 协议契约：[docs/device-protocol.md](docs/device-protocol.md)（握手 / 消息集 / 二进制数据帧布局）
 - 参考实现：[examples/ss-board-bridge.c](examples/ss-board-bridge.c)——单文件 C、纯 libc，
   `musl-gcc -O2 -static` 一条命令出几十 KB 静态二进制，任何架构通用。
-- 预编译：Release 页附带 x86_64 / aarch64 / armv7 / riscv64 / mips / mipsel 静态二进制
-  （含 sha256 清单），scp 到板子即可用，无需编译。
+- 预编译：Release 页附带 x86_64 / aarch64 / armv7 / riscv64 静态二进制（含 sha256 清单），
+  scp 到板子即可用，无需编译；mips/mipsel 请源码编译（一条 musl-gcc 命令，见文档）。
 
 ## 🔒 安全提示
 

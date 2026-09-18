@@ -2,7 +2,7 @@
 
 本文面向要在**自己的硬件**上实现 Serial Studio 设备端的外部实现者——不跑完整 serial-studio，只用几十 KB 的自有程序把本机串口接入某个 Serial Studio 实例（下称 **hub**），进而获得 Web UI、脚本引擎与 **MCP 工具**的全套能力（hub 作为 AI agent 的中转）。
 
-参考实现：[`examples/ss-board-bridge.c`](../examples/ss-board-bridge.c)（单文件 C，静态编译约几十 KB，任何 Linux 开发板可用）。Release 页附带六个架构（x86_64 / aarch64 / armv7 / riscv64 / mips / mipsel）的预编译静态二进制与 sha256 清单，零编译直接部署。
+参考实现：[`examples/ss-board-bridge.c`](../examples/ss-board-bridge.c)（单文件 C，静态编译约几十 KB，任何 Linux 开发板可用）。Release 页附带 x86_64 / aarch64 / armv7 / riscv64 四个架构的预编译静态二进制与 sha256 清单，零编译直接部署；mips/mipsel 用 `musl-gcc -O2 -static` 从源码编译（CI 的 zig 工具链暂无 mips 的 musl libc）。
 
 > 协议权威定义在 [`crates/server/src/protocol.rs`](../crates/server/src/protocol.rs)；本文是对**设备端所需子集**的人话版。两侧实现都应以此为准做兼容性演进。
 
