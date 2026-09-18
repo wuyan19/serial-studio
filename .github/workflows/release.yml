@@ -97,9 +97,13 @@ jobs:
         if: matrix.platform == 'windows-latest'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash # windows runner 默认 pwsh,${TAG#v} 去 v 前缀需 bash
         run: |
-          cp target/release/serial-studio.exe target/release/serial-studio-portable-x64.exe
-          gh release upload --clobber "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" target/release/serial-studio-portable-x64.exe
+          set -e
+          VER="${TAG#v}"
+          cp target/release/serial-studio.exe "target/release/serial-studio-portable-x64_${VER}.exe"
+          gh release upload --clobber "$TAG" "target/release/serial-studio-portable-x64_${VER}.exe"
 
   # 开发板桥预编译(极客零编译即用):单文件 C 纯 libc,4 架构全静态 musl(各约 65KB)。
   # needs: release——等 tauri-action 的 draft release 确定存在后再 upload(与 updater-manifests 同模式)。
@@ -117,19 +121,26 @@ jobs:
           zig-version: 0.13.0 # 与本地验证过的版本一致
 
       - name: Cross-compile static binaries (4 targets)
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -e
           mkdir -p dist
-          zig cc -target x86_64-linux-musl    -O2 -static -s -o dist/ss-board-bridge-x86_64  examples/ss-board-bridge.c
-          zig cc -target aarch64-linux-musl   -O2 -static -s -o dist/ss-board-bridge-aarch64 examples/ss-board-bridge.c
-          zig cc -target arm-linux-musleabihf -O2 -static -s -o dist/ss-board-bridge-armv7    examples/ss-board-bridge.c
-          zig cc -target riscv64-linux-musl   -O2 -static -s -o dist/ss-board-bridge-riscv64  examples/ss-board-bridge.c
+          # 版本编译期注入(tag):板上 ./ss-board-bridge --version 可查;本地源码编译缺省 "dev"。
+          # 资产文件名带版本:传到板上后多版本共存可辨。
+          for t in x86_64-linux-musl aarch64-linux-musl arm-linux-musleabihf riscv64-linux-musl; do
+            arch=${t%%-*}; [ "$arch" = arm ] && arch=armv7
+            zig cc -target "$t" -O2 -static -s -DBRIDGE_VERSION="\"$TAG\"" \
+              -o "dist/ss-board-bridge-$TAG-$arch" examples/ss-board-bridge.c
+          done
           # mips/mipsel 暂缺:zig 0.13 无 mips 的 musl libc("unable to provide libc"),
           # 路由器用户按 docs/device-protocol.md 源码编译(musl-gcc 一条命令);升级 zig 后重评。
           ls -la dist
 
       - name: Protocol smoke test (x86_64 binary, PTY as serial)
-        run: python3 .github/scripts/board_bridge_smoke.py dist/ss-board-bridge-x86_64
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: python3 .github/scripts/board_bridge_smoke.py "dist/ss-board-bridge-$TAG-x86_64"
 
       - name: Checksums + upload to release
         env:

@@ -40,7 +40,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define BRIDGE_VERSION "ss-board-bridge/1.0"
+/* 版本:发布 CI 经 -DBRIDGE_VERSION 注入 tag(如 "v0.13.2"),与 hub 同频演进——
+ * bridge↔hub 兼容语义见 docs/device-protocol.md;本地源码编译缺省 "dev"。 */
+#ifndef BRIDGE_VERSION
+#define BRIDGE_VERSION "dev"
+#endif
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define MAX_PORTS 16
 #define RX_CHUNK 16384
@@ -819,6 +823,7 @@ static void usage(const char *argv0) {
             "  --listen IP:PORT   listen address (default 0.0.0.0:18700)\n"
             "  --port NAME=PATH   serial port to expose; repeatable\n"
             "  --id-file PATH     persistent identity file (default /var/lib/ss-board-bridge.id)\n"
+            "  --version          print version and exit\n"
             "  -h, --help         show this help\n\n"
             "Example:\n"
             "  %s --listen 0.0.0.0:18700 --port ttyS1=/dev/ttyS1 --port gps=/dev/ttyUSB0\n",
@@ -846,6 +851,9 @@ int main(int argc, char **argv) {
             pt->cfg.parity = 'n';
             pt->cfg.stop = 1;
             pt->cfg.flow = 'n';
+        } else if (strcmp(argv[i], "--version") == 0) {
+            printf("%s\n", BRIDGE_VERSION);
+            return 0;
         } else if (strcmp(argv[i], "--id-file") == 0 && i + 1 < argc) id_file = argv[++i];
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
         else { usage(argv[0]); return 1; }
