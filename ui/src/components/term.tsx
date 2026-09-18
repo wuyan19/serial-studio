@@ -95,8 +95,8 @@ export function TermView({
       theme: termThemeFor(getTheme()),
       allowProposedApi: true,
       scrollback: 10000,
-      // 向上滚动(离开底部)后输入不再自动跳回底部：xterm 默认 scrollOnUserInput=true，
-      // 会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新。看最新输出用滚轮滚到底 / ⌘+End。
+      // 保持关闭：xterm 默认会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新，属误触。
+      // "输入回底"改由 onData 显式触发(见下方 onData)，只在真正产生待发送数据时滚底。
       scrollOnUserInput: false,
       minimumContrastRatio: 4.5, // WCAG AA：兜底所有 ANSI 着色文本对比度（提纯前景之外的第二道闸）
       rightClickSelectsWord: true, // PuTTY 式右键选词（选中即复制配合，双通道取词）
@@ -147,9 +147,10 @@ export function TermView({
       if (text) void copyText(text);
     });
     const disposable = term.onData((data) => {
-      // 发命令(回车)后回到底部看回显：scrollOnUserInput=false 已停用"任意输入跳底"(连 Ctrl 也误触)，
-      // 这里只对回车显式滚底；Ctrl 等修饰键单独按不再误触。滚到底后回显到达会自然跟随。
-      if (data.includes("\r")) term.scrollToBottom();
+      // 任何输入(字符/回车/退格/控制序列)都回到底部：onData 只在真正产生待发送数据时触发，
+      // 单独修饰键不会到这里，故在此滚底不会重现 scrollOnUserInput=true 的"按 Ctrl 误跳"。
+      // 滚到底后设备回显到达会自然跟随。
+      term.scrollToBottom();
       onWrite(port, data);
     });
     const timer = setTimeout(() => {
@@ -238,7 +239,10 @@ export function TermView({
         label: "粘贴",
         onSelect: () => {
           void readClipboardText().then((text) => {
-            if (text) onWrite(port, text);
+            if (!text) return;
+            // 粘贴等价键盘输入但不经 onData(Ctrl+V 原生粘贴才走 onData)，回底需单独补
+            termRef.current?.scrollToBottom();
+            onWrite(port, text);
           });
         },
       },
