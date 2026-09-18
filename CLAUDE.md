@@ -43,6 +43,12 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 
 推 `v*` tag 触发 `.github/workflows/release.yml`(4 矩阵:mac aarch64/x64、ubuntu、windows),tauri-action 建 **DRAFT** release(正文仅占位)。绿后**先写 release note**:`gh release edit <tag> --notes-file <file>`,按主题(✨新功能 / 🔧改进 / 🐛修复)组织 `v<上版本>..v<本版本>` 的改动写给用户看,而非罗列 commit;再 `gh release edit <tag> --draft=false` 发布。**坑**:`git push --follow-tags` 只推 annotated tag,lightweight tag(`git tag v0.x.y` 不带 `-a`/`-m`)会被静默跳过、CI 不触发。必须 `git tag -a v0.x.y -m "v0.x.y"` 且显式 `git push origin v0.x.y`。发布是 outward 动作,需用户明确授权后再执行。
 
+### 提交纪律
+
+- **禁用 `git add -A` / `git add .`**——会把计划外文件(编辑器交换文件、临时草稿)混进提交,v0.13.x 连踩两次(.swp、release note 草稿入库)。只 `git add <显式路径>`;拿不准就先 `git status --short` 逐个核对。
+- commit 前扫一眼 `git diff --cached --stat`:出现与本次工作无关的文件 = add 出了问题,先撤(`git restore --staged <path>`)再查原因。
+- 新增临时文件(草稿/日志/测试产物)要么进 .gitignore,要么用完即删,不留给下一次 `add` 时误踩。
+
 ## 架构
 
 ### 控制面 / 数据面分离(最核心的设计原则)
