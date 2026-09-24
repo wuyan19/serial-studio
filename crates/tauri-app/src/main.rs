@@ -14,6 +14,8 @@
 //! 热重启：改监听配置 → invoke apply_settings → Supervisor.stop()+start()，
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
+mod tray;
+
 use clap::Parser;
 use ss_core::SessionId;
 use ss_server::create_state;
@@ -642,6 +644,10 @@ async fn run_script(
     );
     let script_runs = state.script_runs.clone();
     let run_id_for_cleanup = run_id.clone();
+    // 通知判定要拿到发起窗口的可见态：窗口隐藏(驻留托盘)/最小化时推系统通知，
+    // 可见时运行卡已展示结果、不再打扰。win 与 app 一起 move 进 spawn。
+    let win = window.clone();
+    let app_for_notify = app.clone();
     tokio::spawn(async move {
         // None 超时 = 无总时长上限(长跑复现);停止靠 abort + sleep 分段轮询。
         let result = ss_core::run_script_with_timeout(
@@ -670,6 +676,27 @@ async fn run_script(
             "script-result",
             serde_json::json!({ "run_id": run_id, "name": name, "success": success, "message": message }),
         );
+        // 系统通知：仅窗口不可见时（见上方 win 注释）。失败仅 warn——通知是增值通道，
+        // 系统/msix 权限拒收不应影响脚本结果流（script-result 事件已送达前端）。
+        if !tray::window_shown(&win) {
+            let title = if success {
+                "脚本完成"
+            } else if message == "已停止" {
+                "脚本已停止"
+            } else {
+                "脚本失败"
+            };
+            use tauri_plugin_notification::NotificationExt;
+            if let Err(e) = app_for_notify
+                .notification()
+                .builder()
+                .title(title)
+                .body(format!("{name}：{message}"))
+                .show()
+            {
+                tracing::warn!("脚本结束通知发送失败: {e}");
+            }
+        }
     });
     Ok(())
 }
@@ -859,7 +886,17 @@ fn run_gui() {
         .plugin(tauri_plugin_opener::init())
         // 右键菜单"粘贴"读剪贴板走插件(WebView 的 navigator.clipboard.readText 会弹权限窗)
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 脚本结束系统通知(Rust 侧调用,前端无感;仅窗口隐藏/最小化时推送,见 run_script)
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
+            // 关闭主窗口 = 隐藏到托盘（串口连接/脚本继续跑）。托盘未就绪时退回默认关闭。
+            // 远程窗口（label != main）不受影响，照常关闭。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && tray::intercept_close(window.app_handle()) {
+                    api.prevent_close();
+                    return;
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 let app = window.app_handle();
                 let label = window.label().to_string();
@@ -930,6 +967,11 @@ fn run_gui() {
             app.manage(SessionRegistry::default());
             app.manage(PortChannels::default());
 
+            // 系统托盘（就绪后"关闭主窗口"变为隐藏驻留，见 tray.rs）。
+            // Active 必须先 manage：intercept_close 查它判拦截。
+            app.manage(tray::Active::default());
+            tray::setup(app.handle());
+
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
             spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone());
 
@@ -990,8 +1032,28 @@ fn run_gui() {
             capture_end,
             show_system_menu,
         ])
-        .run(tauri::generate_context!())
-        .expect("Tauri 应用启动失败");
+        // build+run(闭包) 而非 run(context)：需要处理 RunEvent——Reopen(macOS Dock 点击)
+        // 在窗口隐藏(驻留托盘)时把主窗口带回来；其余事件走默认行为。
+        .build(tauri::generate_context!())
+        .expect("Tauri 应用启动失败")
+        .run(|app, event| {
+            // macOS：Dock 图标点击（applicationShouldHandleReopen）在窗口隐藏(驻留托盘)时
+            // 带回主窗口。Reopen 变体仅 macOS 存在，其余平台此闭包无待处理事件。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    tray::show_main_window(app);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
+            }
+        });
 }
 
 #[cfg(unix)]

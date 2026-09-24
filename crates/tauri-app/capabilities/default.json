@@ -16,6 +16,7 @@
     "process:default",
     "os:default",
     "opener:default",
-    "clipboard-manager:allow-read-text"
+    "clipboard-manager:allow-read-text",
+    "notification:default"
   ]
 }

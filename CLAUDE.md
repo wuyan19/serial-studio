@@ -64,7 +64,7 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 |---|---|
 | `ss-core` (`crates/core`) | 多串口管理引擎。端口占有权、RX 缓冲区、宏执行、**PortIo 抽象**(本地串口实现)。**纯运行时——不依赖 axum/clap/tauri,不碰持久化、UI 与网络**(远程端口实现 `RemotePortIo` 在 server 层),以此保持可测试性。新增此类依赖是回归。 |
 | `ss-server` (`crates/server`) | axum WS/MCP/Telnet + 内嵌 SPA(`rust-embed` 打包 `ui/dist`)+ **远程设备连接层 `device/`**(DeviceClientManager)。lib + headless bin 双形态,被 Tauri 壳与独立 `ss-server` 共用——"一份后端,两种宿主"。持久化 stores(settings/port_meta/macros/scripts/remotes)在此层。 |
-| `serial-studio` (`crates/tauri-app`) | Tauri 壳=控制面。`ServiceSupervisor` 管数据面启停。本地模式下 Tauri IPC 与 axum WS 是同一 core 域的两个出口。 |
+| `serial-studio` (`crates/tauri-app`) | Tauri 壳=控制面。`ServiceSupervisor` 管数据面启停。本地模式下 Tauri IPC 与 axum WS 是同一 core 域的两个出口。系统托盘(`tray.rs`):关闭主窗口=隐藏驻留(托盘就绪才拦截,菜单「退出」才真退);脚本结束且窗口不可见时推系统通知(tauri-plugin-notification,Rust 侧调用)。 |
 
 ### PortIo 与端口复合键(远程串口的根基)
 
