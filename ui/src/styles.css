@@ -1572,7 +1572,7 @@ button {
   background: var(--ink-faint);
 }
 .recbar[data-state="recording"] .recbar__dot {
-  background: var(--danger);
+  background: var(--link);
   animation: recbar-pulse 1.2s ease-in-out infinite;
 }
 .recbar[data-state="paused"] .recbar__dot,

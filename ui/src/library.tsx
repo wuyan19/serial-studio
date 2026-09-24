@@ -138,7 +138,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     ui.confirm({
       title: "放弃未保存的修改",
       icon: <IconAlert />,
-      message: `「${editorInitial.name || "未命名"}」的修改尚未保存，关闭后将丢失。`,
+      message: `修改尚未保存，关闭后将丢失。`,
       confirmText: "放弃修改",
       tone: "danger",
       onConfirm: () => setEditing(null),

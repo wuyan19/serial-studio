@@ -159,7 +159,7 @@ export function SerialConfigDialog({
             <option value="hardware">Hardware (RTS/CTS)</option>
           </select>
         </ConfigRow>
-        <ConfigRow label="换行符">
+        <ConfigRow label="自动换行符">
           <select value={config.line_ending} onChange={(e) => onChange({ ...config, line_ending: e.target.value })} className="field-select">
             <option value="crlf">CRLF (\r\n) — Windows/AT</option>
             <option value="lf">LF (\n) — Linux/Unix</option>
@@ -226,7 +226,7 @@ export function ExportMacrosDialog({
         <h3 className="dialog__title">
           <IconExport /> EXPORT MACROS
         </h3>
-        <div className="dialog__sub">勾选要导出的宏，导出为单个 JSON（可再导入）</div>
+        <div className="dialog__sub">勾选要导出的宏（可再导入）</div>
         <div className="export-list">
           <label className="export-list__all">
             <input type="checkbox" checked={all} onChange={toggleAll} />
@@ -302,7 +302,7 @@ export function ExportScriptsDialog({
         <h3 className="dialog__title">
           <IconExport /> EXPORT SCRIPTS
         </h3>
-        <div className="dialog__sub">勾选要导出的脚本，导出为单个 JSON（可再导入）</div>
+        <div className="dialog__sub">勾选要导出的脚本（可再导入）</div>
         <div className="export-list">
           <label className="export-list__all">
             <input type="checkbox" checked={all} onChange={toggleAll} />
