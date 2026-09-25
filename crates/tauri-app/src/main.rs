@@ -588,12 +588,15 @@ async fn run_macro(
     let manager = state.manager.clone();
     let app = app.clone();
     // 注册停止信号(复用 script_runs 表,owner=Window):关窗时一并 abort 防 orphan;stop_macro set flag 退出。
+    // paused 为占位 flag:宏不感知暂停(pause/resume 对宏 run_id 是 no-op,kind 区分后 warn)。
     let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.script_runs.lock().unwrap().insert(
         run_id.clone(),
         ss_server::ScriptRun {
             abort: abort.clone(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             owner: ss_server::ScriptOwner::Window(window.label().to_string()),
+            kind: ss_server::ScriptKind::Macro,
         },
     );
     let script_runs = state.script_runs.clone();
@@ -633,13 +636,17 @@ async fn run_script(
 ) -> Result<(), String> {
     let manager = state.manager.clone();
     let app = app.clone();
-    // 注册停止信号(归属本窗口,关窗时一并 abort 防 orphan)+ stop_script set flag → sleep 分段轮询退出。
+    // 注册停止/暂停信号(归属本窗口,关窗时一并 abort 防 orphan):stop_script set abort →
+    // sleep 分段轮询退出;pause/resume_script set/clear paused → 字节码边界冻结/继续。
     let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.script_runs.lock().unwrap().insert(
         run_id.clone(),
         ss_server::ScriptRun {
             abort: abort.clone(),
+            paused: paused.clone(),
             owner: ss_server::ScriptOwner::Window(window.label().to_string()),
+            kind: ss_server::ScriptKind::Script,
         },
     );
     let script_runs = state.script_runs.clone();
@@ -658,6 +665,7 @@ async fn run_script(
             args,
             &run_id,
             abort,
+            paused,
             None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
             // 落盘策略唯一在 script_logs(开关开才 Some);日志文件经设置页「打开目录」查看
             ss_server::script_logs::log_file_for(&port, Some(&name)),
@@ -713,6 +721,50 @@ async fn stop_script(state: tauri::State<'_, AppState>, run_id: String) -> Resul
     match flag {
         Some(f) => f.store(true, std::sync::atomic::Ordering::Relaxed),
         None => tracing::warn!("stop_script: run_id {} 未找到(已结束?)", run_id),
+    }
+    Ok(())
+}
+
+/// 暂停运行中的脚本:set 对应 run_id 的 paused flag,脚本线程冻结于字节码边界
+/// (core interrupt handler 循环 + sleep 分段),不杀执行环境、脚本状态不丢;
+/// 暂停中 stop_script/关窗清理仍生效(暂停循环每轮先查停止)。宏 run_id 为 no-op(warn)。
+#[tauri::command]
+async fn pause_script(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let run = state
+        .script_runs
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|r| (r.paused.clone(), r.kind));
+    match run {
+        Some((f, ss_server::ScriptKind::Script)) => {
+            f.store(true, std::sync::atomic::Ordering::Relaxed)
+        }
+        Some((_, ss_server::ScriptKind::Macro)) => {
+            tracing::warn!("pause_script: run_id {} 是宏,宏不支持暂停", run_id)
+        }
+        None => tracing::warn!("pause_script: run_id {} 未找到(已结束?)", run_id),
+    }
+    Ok(())
+}
+
+/// 继续已暂停的脚本:clear 对应 run_id 的 paused flag,从暂停点原处继续。
+#[tauri::command]
+async fn resume_script(state: tauri::State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let run = state
+        .script_runs
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|r| (r.paused.clone(), r.kind));
+    match run {
+        Some((f, ss_server::ScriptKind::Script)) => {
+            f.store(false, std::sync::atomic::Ordering::Relaxed)
+        }
+        Some((_, ss_server::ScriptKind::Macro)) => {
+            tracing::warn!("resume_script: run_id {} 是宏,宏不支持暂停", run_id)
+        }
+        None => tracing::warn!("resume_script: run_id {} 未找到(已结束?)", run_id),
     }
     Ok(())
 }
@@ -1024,6 +1076,8 @@ fn run_gui() {
             run_macro,
             run_script,
             stop_script,
+            pause_script,
+            resume_script,
             stop_macro,
             save_json_file,
             pick_open_file,

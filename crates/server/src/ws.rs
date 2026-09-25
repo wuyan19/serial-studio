@@ -451,12 +451,15 @@ async fn handle_client_msg(
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
             // 注册停止信号(复用 script_runs 表):StopMacro 时 set flag,宏经 Delay 分段/Expect select! 退出。
+            // paused 为占位 flag:宏不感知暂停(Pause/Resume 对宏 run_id 是 no-op,kind 区分后 warn)。
             let abort = Arc::new(AtomicBool::new(false));
             state.script_runs.lock().unwrap().insert(
                 run_id.clone(),
                 crate::ScriptRun {
                     abort: abort.clone(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     owner: crate::ScriptOwner::Session(session),
+                    kind: crate::ScriptKind::Macro,
                 },
             );
             let script_runs = state.script_runs.clone();
@@ -527,13 +530,16 @@ async fn handle_client_msg(
             };
             // 不预检端口:未开则脚本内 send 返 Some(fail) → JS 包装层 throw "send 失败(端口 X): …",
             // 脚本中断回明确错误(不再静默坑用户)。见 core/script.rs send 闭包 + JS 包装层。
-            // 注册停止信号:StopScript 时 set flag,脚本 sleep 分段轮询命中即抛异常退出。
+            // 注册停止/暂停信号:StopScript 时 set abort;PauseScript/ResumeScript set/clear paused。
             let abort = Arc::new(AtomicBool::new(false));
+            let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
             state.script_runs.lock().unwrap().insert(
                 run_id.clone(),
                 crate::ScriptRun {
                     abort: abort.clone(),
+                    paused: paused.clone(),
                     owner: crate::ScriptOwner::Session(session),
+                    kind: crate::ScriptKind::Script,
                 },
             );
             let manager = state.manager.clone();
@@ -558,6 +564,7 @@ async fn handle_client_msg(
                     args,
                     &run_id,
                     abort,
+                    paused,
                     None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
                     // 落盘策略唯一在 script_logs(开关开才 Some);远程 GUI 无服务端目录入口,
                     // 路径不进 WS 协议,仅供服务端侧排查时按目录定位
@@ -598,6 +605,90 @@ async fn handle_client_msg(
                     let _ = out_tx
                         .send(to_json(ServerMsg::Ok {
                             message: "停止信号已发送".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+                None => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "脚本已结束或不存在".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+            }
+        }
+        ClientMsg::PauseScript { run_id } => {
+            // 锁内取 paused Arc + kind,锁随 block 结束立即释放,再 store/send——对齐 StopScript 写法。
+            let run = {
+                state
+                    .script_runs
+                    .lock()
+                    .unwrap()
+                    .get(&run_id)
+                    .map(|r| (r.paused.clone(), r.kind))
+            };
+            match run {
+                Some((flag, crate::ScriptKind::Script)) => {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "已暂停".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+                // 宏不感知暂停:no-op 回告即可(前端暂停按钮仅脚本卡有,此分支是协议侧防御)。
+                Some((_, crate::ScriptKind::Macro)) => {
+                    tracing::warn!("pause_script: run_id {} 是宏,宏不支持暂停", run_id);
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "宏不支持暂停".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+                None => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "脚本已结束或不存在".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+            }
+        }
+        ClientMsg::ResumeScript { run_id } => {
+            let run = {
+                state
+                    .script_runs
+                    .lock()
+                    .unwrap()
+                    .get(&run_id)
+                    .map(|r| (r.paused.clone(), r.kind))
+            };
+            match run {
+                Some((flag, crate::ScriptKind::Script)) => {
+                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "已继续".into(),
+                            port: None,
+                            req: None,
+                        }))
+                        .await;
+                }
+                Some((_, crate::ScriptKind::Macro)) => {
+                    tracing::warn!("resume_script: run_id {} 是宏,宏不支持暂停", run_id);
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Ok {
+                            message: "宏不支持暂停".into(),
                             port: None,
                             req: None,
                         }))

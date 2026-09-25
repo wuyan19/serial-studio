@@ -174,6 +174,16 @@ pub enum ClientMsg {
     StopScript {
         run_id: String,
     },
+    /// 暂停运行中的脚本(按 run_id):set 对应 paused flag,脚本线程冻结于字节码边界
+    /// (core interrupt handler 循环 + sleep 分段),恢复后从原处继续、脚本状态不丢。
+    /// 暂停中 StopScript 仍生效(暂停循环每轮先查停止)。宏 run_id 为 no-op。
+    PauseScript {
+        run_id: String,
+    },
+    /// 继续已暂停的脚本(按 run_id):clear 对应 paused flag。
+    ResumeScript {
+        run_id: String,
+    },
     /// 停止运行中的宏(按 run_id):复用 script_runs 表,set abort flag 退出。
     StopMacro {
         run_id: String,

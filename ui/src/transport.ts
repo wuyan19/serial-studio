@@ -31,6 +31,10 @@ export interface Transport {
   runScript(name: string, port: string, script: Script, args: Record<string, string>, runId: string): Promise<void>;
   /** 停止运行中的脚本(按 runId)。set abort flag,脚本经 sleep 轮询秒级退出。 */
   stopScript(runId: string): Promise<void>;
+  /** 暂停运行中的脚本(按 runId)。set paused flag,脚本线程冻结于字节码边界,脚本状态不丢。 */
+  pauseScript(runId: string): Promise<void>;
+  /** 继续已暂停的脚本(按 runId)。clear paused flag,从暂停点原处继续。 */
+  resumeScript(runId: string): Promise<void>;
   /** 停止运行中的宏(按 runId)。复用 script_runs 表,set abort flag → 宏经 Delay/Expect 退出。 */
   stopMacro(runId: string): Promise<void>;
   onData(cb: (port: string, data: Uint8Array) => void): () => void;
@@ -430,6 +434,12 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   async stopScript(runId: string) {
     await this.send(JSON.stringify({ action: "stop_script", run_id: runId }));
   }
+  async pauseScript(runId: string) {
+    await this.send(JSON.stringify({ action: "pause_script", run_id: runId }));
+  }
+  async resumeScript(runId: string) {
+    await this.send(JSON.stringify({ action: "resume_script", run_id: runId }));
+  }
   async stopMacro(runId: string) {
     await this.send(JSON.stringify({ action: "stop_macro", run_id: runId }));
   }
@@ -610,6 +620,12 @@ export class LocalTransport extends TransportEventBase implements Transport {
   }
   async stopScript(runId: string) {
     await tauriInvoke("stop_script", { runId });
+  }
+  async pauseScript(runId: string) {
+    await tauriInvoke("pause_script", { runId });
+  }
+  async resumeScript(runId: string) {
+    await tauriInvoke("resume_script", { runId });
   }
   async stopMacro(runId: string) {
     await tauriInvoke("stop_macro", { runId });

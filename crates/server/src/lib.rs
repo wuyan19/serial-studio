@@ -44,11 +44,23 @@ pub enum ScriptOwner {
     Window(String),
 }
 
-/// 一条运行中脚本:停止信号 + 归属。
+/// 一条运行中脚本:停止信号 + 暂停信号 + 归属 + 种类。
+///
+/// `paused` 传入 core(set = 脚本线程冻结于字节码边界,clear = 从原处继续);
+/// 宏不感知此 flag(Pause/Resume 对宏 run_id 是 no-op,由 `kind` 区分后 warn)。
 #[derive(Debug)]
 pub struct ScriptRun {
     pub abort: Arc<std::sync::atomic::AtomicBool>,
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
     pub owner: ScriptOwner,
+    pub kind: ScriptKind,
+}
+
+/// 注册表条目种类:Stop 通用;Pause/Resume 仅对 Script 生效(宏无暂停感知)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptKind {
+    Macro,
+    Script,
 }
 
 #[derive(Clone)]

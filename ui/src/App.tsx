@@ -1837,6 +1837,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 expandedLog={expandedLog}
                 onToggleExpand={(runId) => setExpandedLog((v) => (v === runId ? null : runId))}
                 onStop={(runId) => cmdTransport()?.stopScript(runId)}
+                onPauseToggle={(runId, nextPaused) => {
+                  // 乐观更新卡片暂停态(后端无暂停事件推送,发起端即真相);结果到达后随 done 失效。
+                  setScriptRuns((prev) => {
+                    const card = prev.get(runId);
+                    if (!card || card.status !== "running") return prev;
+                    return new Map(prev).set(runId, { ...card, paused: nextPaused });
+                  });
+                  if (nextPaused) cmdTransport()?.pauseScript(runId);
+                  else cmdTransport()?.resumeScript(runId);
+                }}
                 onDismiss={(runId) => {
                   setScriptRuns((prev) => { const n = new Map(prev); n.delete(runId); return n; });
                   if (expandedLog === runId) setExpandedLog(null);

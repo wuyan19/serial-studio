@@ -72,7 +72,8 @@ export interface ScriptResult {
   message: string;
 }
 
-/** 脚本运行卡片:贯穿 running→done(单卡片,并发各自,就地切换)。logs 为 log() 实时累积。 */
+/** 脚本运行卡片:贯穿 running→done(单卡片,并发各自,就地切换)。logs 为 log() 实时累积。
+ *  paused 为前端本地态(pause/resume 后端无推送,由本端发起即知;结果到达后随 done 失效)。 */
 export interface ScriptRunCard {
   name: string;
   devId: string;
@@ -80,6 +81,7 @@ export interface ScriptRunCard {
   success?: boolean;
   message?: string;
   logs: string[];
+  paused?: boolean;
 }
 
 /** 宏运行卡片:贯穿 running→done(宏无 log,无 logs)。 */

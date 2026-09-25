@@ -932,7 +932,8 @@ button {
   flex: none;
   opacity: 0.7;
 }
-.script-task__stop {
+.script-task__stop,
+.script-task__pause {
   flex: none;
   border: 1px solid var(--hairline);
   background: transparent;
@@ -947,6 +948,12 @@ button {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+/* 暂停/继续:非破坏性操作,hover 走链接色(与停止的红色相区分)。 */
+.script-task__pause:hover {
+  color: var(--link);
+  border-color: color-mix(in srgb, var(--link) 40%, transparent);
+  background: color-mix(in srgb, var(--link) 10%, transparent);
 }
 /* 脚本结果横幅:有日志时可点击展开/收起本次 runId 的日志历史。 */
 .macro-result--expandable {

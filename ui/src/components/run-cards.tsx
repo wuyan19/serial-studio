@@ -9,10 +9,13 @@ export interface RunCardView {
   success?: boolean;
   message?: string;
   logs?: string[];
+  /** 暂停态(仅脚本):驱动 暂停/继续 按钮文案与状态文本。 */
+  paused?: boolean;
 }
 
 /** 运行卡片列表（宏/脚本共用）：running 显示「⟳ 名称 + 停止」；done 显示结果行（✓/✗ + 关闭）。
- *  hasLogs=true（脚本）时卡片头可点开实时/完整日志，一次展开一张卡。 */
+ *  hasLogs=true（脚本）时卡片头可点开实时/完整日志，一次展开一张卡。
+ *  onPauseToggle 提供时（仅脚本面板）running 卡额外显示 暂停/继续 按钮；宏不支持暂停。 */
 export function RunCards({
   runs,
   kindLabel,
@@ -20,6 +23,7 @@ export function RunCards({
   expandedLog,
   onToggleExpand,
   onStop,
+  onPauseToggle,
   onDismiss,
 }: {
   runs: Map<string, RunCardView>;
@@ -29,6 +33,8 @@ export function RunCards({
   expandedLog: string | null;
   onToggleExpand: (runId: string) => void;
   onStop: (runId: string, devId: string) => void;
+  /** 暂停/继续切换(仅脚本面板提供)。nextPaused = 目标态(当前未暂停 → 暂停)。 */
+  onPauseToggle?: (runId: string, nextPaused: boolean) => void;
   onDismiss: (runId: string) => void;
 }) {
   return (
@@ -48,11 +54,21 @@ export function RunCards({
               <>
                 <div
                   className="script-task__head"
-                  title={`${card.name} 运行中`}
+                  title={`${card.name} ${card.paused ? "已暂停" : "运行中"}`}
                   {...expandableHeadProps(runId, card.name, hasLogs, expandedLog === runId, onToggleExpand)}
                 >
-                  <span className="script-task__name" title={card.name}>⟳ {card.name}</span>
-                  <span className="script-task__status">运行中…</span>
+                  <span className="script-task__name" title={card.name}>{card.paused ? "⏸" : "⟳"} {card.name}</span>
+                  <span className="script-task__status">{card.paused ? "已暂停" : "运行中…"}</span>
+                  {onPauseToggle && (
+                    <button
+                      className="script-task__pause"
+                      title={card.paused ? `继续${kindLabel}` : `暂停${kindLabel}（冻结于当前位置，可继续）`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPauseToggle(runId, !card.paused);
+                      }}
+                    >{card.paused ? "继续" : "暂停"}</button>
+                  )}
                   <button
                     className="script-task__stop"
                     title={`停止${kindLabel}`}

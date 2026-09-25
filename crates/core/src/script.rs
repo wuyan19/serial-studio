@@ -9,6 +9,12 @@
 //! - 内层:[`run_script_inner`] 的 `tokio::time::timeout` + QuickJS interrupt handler(在脚本线程)。
 //! - 外层:[`run_script_with_timeout`] 的 `oneshot` 超时(主线程,兜底防脚本线程卡死)。
 //!
+//! 暂停/继续(方案见 docs/script-control-research.md):`paused` flag set 后脚本线程冻结——
+//! interrupt handler 在字节码边界阻塞轮询(纯 CPU 循环),`sleep` 分段循环冻结在当前分段
+//! (await 循环,不消耗剩余时长);clear 后从原处继续,脚本状态不丢。暂停中 abort 仍生效
+//! (暂停循环每轮先查停止)。v1 边界:`expect` 不感知暂停(等当前 expect 自行结束,timeout_ms
+//! 按 wall-clock 消耗);每脚本独占 OS 线程,暂停只阻塞本线程,不影响 async worker 与其它脚本。
+//!
 //! 暴露的全局 async 函数:send / expect / clear / sleep(以及同步函数 log,输出脚本日志)。send/expect/clear 尾参为可选 `port`(缺省=脚本绑定的端口,可传其它已打开端口以跨多串口)。脚本被包成 `(async () => { ... })()` 求值。
 //!
 //! 同步文件函数——读:read_file(全量文本,上限 64MiB)/ read_b64_chunk(按块 base64 随机访问,块须
@@ -335,6 +341,8 @@ pub async fn run_script(
     log_file: Option<std::path::PathBuf>,
 ) -> ScriptRunOutcome {
     let abort = Arc::new(AtomicBool::new(false));
+    // MCP 不暴露暂停(无 pause 工具),flag 恒 false——仅为满足 core 签名。
+    let paused = Arc::new(AtomicBool::new(false));
     // MCP 是同步 JSON-RPC,无实时日志出口;run_id="" → publish 的 ScriptLog 无订阅者被丢(见 event_to_msg 不转发)。
     // 故内建 sink 收集 log() 输出,随 ScriptRunOutcome 一次性返回给 MCP 调用方拼进响应。
     let sink = ScriptLogSink::new();
@@ -346,6 +354,7 @@ pub async fn run_script(
         args,
         "",
         abort,
+        paused,
         Some(sink.clone()),
         log_file.clone(),
     )
@@ -376,6 +385,9 @@ pub async fn run_script(
 ///   + 64MiB/4MiB 内存栈上限兜底。停止经 interrupt 让线程干净退出(不泄漏)。
 /// - `abort`:外部停止信号,set 后 interrupt 在下个字节码边界抛异常,脚本退出。调用方持有克隆
 ///   以便注册到停止注册表(ws.rs / main.rs 的 `script_runs`)。
+/// - `paused`:外部暂停信号,set 后脚本线程冻结于字节码边界(`sleep` 内冻结在当前分段,不消耗
+///   剩余时长),clear 后从原处继续;暂停中 `abort` 仍生效(暂停循环每轮先查停止)。调用方同
+///   `abort` 注册到暂停注册表。MCP 入口传永不 set 的 flag。
 #[allow(clippy::too_many_arguments)] // 参数组随功能演进增长;收敛成 config struct 的收益暂不抵改动面
 pub async fn run_script_with_timeout(
     port: &str,
@@ -385,6 +397,7 @@ pub async fn run_script_with_timeout(
     args: HashMap<String, String>,
     run_id: &str, // 本次运行标识:脚本 log() 输出按此路由到前端(WS/Tauri);MCP 入口传 ""
     abort: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     log_sink: Option<ScriptLogSink>, // Some 时 log() 双写:publish(前端)+ sink(MCP 随结果返回);None = 仅现状
     // Some 时 log() 第三写:追加落盘该文件(策略/命名在 server 侧 script_logs,core 不感知配置)。
     // 见 append_log_line:失败只 warn 不中断。
@@ -413,6 +426,7 @@ pub async fn run_script_with_timeout(
                 args,
                 run_id,
                 abort_for_thread,
+                paused,
                 log_sink,
                 log_file,
             ))
@@ -469,6 +483,7 @@ async fn run_script_inner(
     args: HashMap<String, String>,
     run_id: String, // 脚本 log() 按此路由到前端(WS/Tauri);MCP 传 ""
     abort: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     log_sink: Option<ScriptLogSink>,
     log_file: Option<std::path::PathBuf>,
 ) -> Result<(), ScriptError> {
@@ -488,10 +503,20 @@ async fn run_script_inner(
         // 中断 JS 的两道闸(任一命中 → QuickJS 抛 JS 异常):
         // ① interrupt handler(字节码边界调用)——拦纯 CPU 循环,但 await 密集时不及时;
         // ② sleep 分段轮询 abort 返 Err——await 循环(采集脚本主形态)靠这道,秒级停止。
+        // 暂停 = handler 内阻塞本线程轮询(字节码边界冻结):每轮先查停止/超时(暂停中仍可停),
+        // 未暂停放行(返回 false 继续下一条字节码)。阻塞仅发生在脚本自己的 OS 线程。
         let abort_irq = abort.clone();
-        rt.set_interrupt_handler(Some(Box::new(move || {
-            abort_irq.load(Ordering::Relaxed)
+        let paused_irq = paused.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || loop {
+            if abort_irq.load(Ordering::Relaxed)
                 || deadline.map(|d| Instant::now() >= d).unwrap_or(false)
+            {
+                return true;
+            }
+            if !paused_irq.load(Ordering::Relaxed) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         })))
         .await;
         // 资源上限:interrupt 只在字节码之间触发,拦不住单条字节码内的分配/递归(无限数组、
@@ -585,12 +610,16 @@ async fn run_script_inner(
                 // sleep(ms):tokio 原语在 native async function 内可用。
                 // 分段(≤50ms)轮询 abort:命中即返 Err → rquickjs 抛 JS 异常 → 脚本及时停止。
                 // 采集脚本(while { send; expect; sleep })主 await 在此,故停止 ≤ expect_timeout + 50ms。
+                // 暂停分支:冻结在当前分段(不消耗剩余时长,恢复后睡完剩余部分)——暂停在 sleep 内
+                // 即时生效,不必等当前 sleep 走完;每轮先查停止(暂停中仍可停)。
                 {
                     let abort_sleep = abort.clone();
+                    let paused_sleep = paused.clone();
                     globals.set(
                         "sleep",
                         Func::from(Async(move |ms: u64| {
                             let abort_sleep = abort_sleep.clone();
+                            let paused_sleep = paused_sleep.clone();
                             async move {
                                 let mut remaining = Duration::from_millis(ms);
                                 let chunk = Duration::from_millis(50);
@@ -601,6 +630,10 @@ async fn run_script_inner(
                                     }
                                     if remaining == Duration::ZERO {
                                         break;
+                                    }
+                                    if paused_sleep.load(Ordering::Relaxed) {
+                                        tokio::time::sleep(chunk).await;
+                                        continue;
                                     }
                                     let step = remaining.min(chunk);
                                     tokio::time::sleep(step).await;
@@ -869,6 +902,22 @@ mod tests {
         Arc::new(AtomicBool::new(false))
     }
 
+    /// 测试用暂停 flag(永不 set,除非测试主动 store)。
+    fn paused_flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    /// 排空订阅里的 ScriptLog 事件并计数(暂停冻结断言用:两次采样差为 0 = 无推进)。
+    fn drain_script_logs(rx: &mut tokio::sync::broadcast::Receiver<SerialEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, SerialEvent::ScriptLog { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// (a) JS 的 await 能驱动 tokio 原语(tokio::time::sleep)且控制流正常、不挂死。
     #[tokio::test]
     async fn await_chain_drives_tokio_primitives() {
@@ -889,6 +938,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -915,6 +965,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -970,6 +1021,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -993,6 +1045,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1011,6 +1064,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1030,6 +1084,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1044,6 +1099,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1070,6 +1126,7 @@ mod tests {
             args,
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1101,6 +1158,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort,
+            paused_flag(),
             None,
             None,
         )
@@ -1137,6 +1195,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort,
+            paused_flag(),
             None,
             None,
         )
@@ -1178,6 +1237,7 @@ mod tests {
                 HashMap::new(),
                 "log-rid",
                 abort_a,
+                paused_flag(),
                 None,
                 None,
             ),
@@ -1189,6 +1249,7 @@ mod tests {
                 HashMap::new(),
                 "log-rid",
                 abort_b,
+                paused_flag(),
                 None,
                 None,
             ),
@@ -1206,6 +1267,223 @@ mod tests {
         );
     }
 
+    /// 暂停/继续(sleep 分支路径,采集脚本主形态):暂停期间 log 停止增长(脚本冻结),
+    /// 恢复后从暂停点继续,最终跑完且 10 条 log 不丢不重。
+    #[tokio::test]
+    async fn pause_freezes_and_resume_completes() {
+        let m = mgr();
+        let mut rx = m.event_bus().subscribe();
+        let code = r#"
+            for (let i = 0; i < 10; i++) { log("t" + i); await sleep(30); }
+        "#;
+        let paused = paused_flag();
+        let paused_ctrl = paused.clone();
+        // 独立订阅采样:暂停生效有 ≤50ms 响应延迟(sleep 分段边界),先等建立期过完再排空零星
+        // 尾随,隔 250ms 再采样必须为 0。恢复放在断言前——断言失败也不把脚本冻死(否则测试
+        // 挂死而非干净失败)。
+        let mut sample_rx = m.event_bus().subscribe();
+        let ctrl = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            paused_ctrl.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drain_script_logs(&mut sample_rx); // 丢弃冻结建立期(≤50ms)的尾随输出
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let grew = drain_script_logs(&mut sample_rx);
+            paused_ctrl.store(false, Ordering::Relaxed);
+            assert_eq!(grew, 0, "暂停期间 log 不应增长(实测新增 {grew} 条)");
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_script_with_timeout(
+                "COM0",
+                code,
+                m,
+                None,
+                HashMap::new(),
+                "rid-pause",
+                abort_flag(),
+                paused,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("脚本应在恢复后及时完成(10s 兜底,防冻结挂死)");
+        ctrl.await.unwrap();
+        assert!(result.is_ok(), "恢复后脚本应从暂停点继续跑完: {:?}", result);
+        let mut logs = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            if let SerialEvent::ScriptLog { message, .. } = evt {
+                logs.push(message);
+            }
+        }
+        assert_eq!(logs.len(), 10, "10 条 log 应全到(不丢不重): {logs:?}");
+    }
+
+    /// 暂停中停止(sleep 分支路径):await 循环冻结在 sleep 分段,abort 命中分段循环顶 → Aborted。
+    #[tokio::test]
+    async fn abort_while_paused_await_loop() {
+        let abort = abort_flag();
+        let paused = paused_flag();
+        let abort_stop = abort.clone();
+        let paused_ctrl = paused.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            paused_ctrl.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            abort_stop.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_script_with_timeout(
+                "COM0",
+                r#"while (true) { await sleep(20); }"#,
+                mgr(),
+                None,
+                HashMap::new(),
+                "log-rid",
+                abort,
+                paused,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("暂停中停止应及时退出(10s 兜底,防挂死)");
+        stopper.await.unwrap();
+        assert!(
+            matches!(result, Err(ScriptError::Aborted)),
+            "暂停中停止应返回 Aborted: {:?}",
+            result
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "应及时退出而非挂死,实际 {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// 纯 CPU 循环的暂停(interrupt handler 路径,区别 sleep 分支):暂停期间 log 停止增长
+    /// (handler 在字节码边界阻塞本线程),且暂停中 abort 仍生效(handler 暂停循环每轮先查停止)。
+    #[tokio::test]
+    async fn pause_freezes_pure_cpu_loop_and_abort_still_works() {
+        let m = mgr();
+        let code = r#"let n = 0; while (true) { n++; if (n % 2000000 === 0) log("x"); }"#;
+        let abort = abort_flag();
+        let paused = paused_flag();
+        let abort_stop = abort.clone();
+        let paused_ctrl = paused.clone();
+        let mut sample_rx = m.event_bus().subscribe();
+        let ctrl = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            paused_ctrl.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drain_script_logs(&mut sample_rx); // 冻结建立期的尾随输出
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let grew = drain_script_logs(&mut sample_rx);
+            // 先停止再断言:断言失败也不让 CPU 循环裸转到测试超时。
+            abort_stop.store(true, Ordering::Relaxed);
+            assert_eq!(
+                grew, 0,
+                "暂停期间纯 CPU 循环的 log 不应增长(实测新增 {grew} 条)"
+            );
+        });
+        let start = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_script_with_timeout(
+                "COM0",
+                code,
+                m,
+                None,
+                HashMap::new(),
+                "log-rid",
+                abort,
+                paused,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("暂停中停止应及时退出(10s 兜底,防挂死)");
+        ctrl.await.unwrap();
+        assert!(
+            matches!(result, Err(ScriptError::Aborted)),
+            "暂停中停止应返回 Aborted: {:?}",
+            result
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "应及时退出而非挂死,实际 {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// 暂停隔离:暂停 A 期间 B 照常推进并完成(paused flag 按脚本隔离);A 恢复后也完成。
+    #[tokio::test]
+    async fn pause_isolated_between_scripts() {
+        // A: 20 轮 sleep(30) ≈ 600ms,中途暂停 300ms → 总 ≈ 900ms;B: 10 轮 sleep(20) ≈ 200ms。
+        let code_a = r#"for (let i = 0; i < 20; i++) { await sleep(30); }"#;
+        let code_b = r#"for (let i = 0; i < 10; i++) { await sleep(20); }"#;
+        let paused_a = paused_flag();
+        let paused_ctrl = paused_a.clone();
+        let ctrl = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            paused_ctrl.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            paused_ctrl.store(false, Ordering::Relaxed);
+        });
+        // B 独立任务计时:若被 A 的暂停误冻结,B 会拖到 A 之后才完(B 自身耗时 >> 500ms)。
+        let b_task = tokio::spawn(async move {
+            let t0 = Instant::now();
+            let r = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_script_with_timeout(
+                    "COM0",
+                    code_b,
+                    mgr(),
+                    None,
+                    HashMap::new(),
+                    "log-rid",
+                    abort_flag(),
+                    paused_flag(),
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("B 不受 A 暂停影响,应照常完成(10s 兜底)");
+            (r, t0.elapsed())
+        });
+        let ra = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_script_with_timeout(
+                "COM0",
+                code_a,
+                mgr(),
+                None,
+                HashMap::new(),
+                "log-rid",
+                abort_flag(),
+                paused_a,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("A 恢复后应继续完成(10s 兜底,防冻结挂死)");
+        ctrl.await.unwrap();
+        let (rb, b_elapsed) = b_task.await.unwrap();
+        assert!(ra.is_ok(), "A 恢复后应跑完: {:?}", ra);
+        assert!(rb.is_ok(), "B 不受 A 暂停影响,应跑完: {:?}", rb);
+        assert!(
+            b_elapsed < Duration::from_millis(500),
+            "B 应在 A 暂停期间照常完成(≈200ms),实际 {:?}",
+            b_elapsed
+        );
+    }
+
     /// log(msg) 经 EventBus 发 ScriptLog(按 run_id/port 路由);脚本正常完成不中断(区别 throw)。
     #[tokio::test]
     async fn log_publishes_event() {
@@ -1220,6 +1498,7 @@ mod tests {
             HashMap::new(),
             "rid-xyz",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1307,6 +1586,7 @@ mod tests {
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             Some(sink.clone()),
             None,
         )
@@ -1431,6 +1711,7 @@ throw new Error(JSON.stringify(out));"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1456,6 +1737,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1483,6 +1765,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1522,6 +1805,7 @@ if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1552,6 +1836,7 @@ read_b64_chunk({p}, 0, 4);"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1575,6 +1860,7 @@ read_b64_chunk({p}, 0, 4);"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1600,6 +1886,7 @@ read_b64_chunk({p}, 0, 4);"#,
                 HashMap::new(),
                 "log-rid",
                 abort_flag(),
+                paused_flag(),
                 None,
                 None,
             )
@@ -1677,6 +1964,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1702,6 +1990,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             HashMap::new(),
             "log-rid",
             abort_flag(),
+            paused_flag(),
             None,
             None,
         )
@@ -1726,6 +2015,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             HashMap::new(),
             "rid-disk",
             abort_flag(),
+            paused_flag(),
             None,
             Some(lf.clone()),
         )
