@@ -15,6 +15,7 @@ import {
   IconTrash,
 } from "../icons";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
+import { sshEndpointLabel } from "./dialogs";
 
 /** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡）。 */
 export interface PortGroupView {
@@ -140,7 +141,8 @@ export function PortsPanel({
                   // 条目键首段已是桶 devId(本地合并视图的完整 pid)则直通;
                   // 远程 transport 的远端侧键则加桶前缀。幂等。
                   const pid = bucketPidOf(grp.devId, p.name);
-                  const shown = displayPortName(p.name); // 展示剥设备前缀,只留串口名
+                  // 展示剥设备前缀,只留串口名;SSH 卡显示端点友好名(悬停见原键名)
+                  const shown = isSsh ? sshEndpointLabel(p.name) : displayPortName(p.name);
                   const isActive = pid === activePort;
                   const editingThis = aliasEditPort === pid;
                   // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
@@ -164,9 +166,8 @@ export function PortsPanel({
                           }
                         }}
                       >
-                        {/* SSH shell 行连接中:圆点呼吸(不同于 opened 常亮) */}
                         <span className={`port-item__dot${p.opened ? " open" : ""}${isSsh && grp.connecting ? " busy" : ""}`} />
-                        <span className="port-item__name">
+                        <span className="port-item__name" title={isSsh ? p.name : undefined}>
                           {editingThis ? (
                             <InlineAliasInput
                               initial={p.alias ?? ""}

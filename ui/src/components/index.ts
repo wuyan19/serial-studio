@@ -16,6 +16,7 @@ export {
   ShortcutsDialog,
   SshManagerDialog,
   sshAuthLabel,
+  sshEndpointLabel,
 } from "./dialogs";
 export { MacroPalette, PortPalette, ScriptPalette } from "./palettes";
 export { MacroEditor, ScriptEditor, newStep, validateMacro } from "./editors";

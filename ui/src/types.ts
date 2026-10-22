@@ -146,8 +146,14 @@ export type SshAuth =
   | { type: "agent" }
   | { type: "password"; password: string };
 
+/** SSH 设备端点：设备上一个可打开的会话目标（复合键 `${deviceId}::${name}` 的端口段）。
+ *  设备=连接身份与生命周期（认证/连接/测试）；端点=连上之后打开什么。
+ *  v1 仅 shell（交互终端），由系统默认生成、暂不可编辑；
+ *  规划中：exec(命令通道) / serial(远端 /dev/ttyUSB* 直连，可枚举)。 */
+export type SshEndpoint = { name: string; type: "shell" };
+
 /** SSH 设备：远程主机的终端会话提供方（像串口一样打开的"端口"来源）。
- *  每台设备一张卡，卡内固定端点 shell（复合键 `${id}::shell`）。
+ *  每台设备一张卡，卡内端点各占一行。
  *  当前为 UI 预览版：localStorage 持久化、连接为前端模拟；
  *  后端接入后注册表迁至 server 侧（凭据不落前端），本类型形态不变。 */
 export interface SshHost {
@@ -159,6 +165,8 @@ export interface SshHost {
   /** 可选昵称；空则 UI 回退 user@host。 */
   nickname?: string;
   auth: SshAuth;
+  /** 端点列表（至少含 shell；加载时归一化兜底，见 lib.ts::loadSshHosts）。 */
+  endpoints: SshEndpoint[];
 }
 
 export interface SrvSettings {

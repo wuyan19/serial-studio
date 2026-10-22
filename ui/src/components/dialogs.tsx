@@ -2,7 +2,7 @@
 脚本指南、添加远程设备、远程设备详情、脚本运行参数收集、通用确认弹窗。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost } from "../types";
-import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
+import { BAUD_RATES, copyText, defaultSshEndpoints, displayPortName, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug, IconSsh } from "../icons";
@@ -1005,6 +1005,11 @@ export function sshAuthLabel(auth: SshAuth): string {
   return auth.type === "key" ? "密钥" : auth.type === "agent" ? "Agent" : "密码";
 }
 
+/** 端点友好名（按端点名映射；v1 只有 shell）。展示用，键本身不变。 */
+export function sshEndpointLabel(name: string): string {
+  return name === "shell" ? "终端" : name;
+}
+
 /** SSH 管理弹窗：列表视图（设备表）⇄ 表单视图（添加/编辑）在同一个弹窗内切换，
  *  不做模态叠模态。Esc 语义随视图走：列表 = 关闭弹窗，表单 = 返回列表。
  *  数据与状态全部由 App 注入（hosts/连接态/测试态），本组件只管视图编排与表单校验。 */
@@ -1068,7 +1073,7 @@ export function SshManagerDialog({
           </div>
           {hosts.length === 0 ? (
             <p className="dialog__hint ssh-table__empty">
-              暂无 SSH 设备。点右上「＋ 添加」创建——添加后设备卡出现在串口列表，点 shell 行即连。
+              暂无 SSH 设备。点右上「＋ 添加」创建——添加后设备卡出现在串口列表，点「终端」行即连。
             </p>
           ) : (
             <div className="ssh-table">
@@ -1092,29 +1097,41 @@ export function SshManagerDialog({
                           ? "✓ 可达（预览）"
                           : "未连接";
                 return (
-                  <div key={h.id} className="ssh-table__row">
-                    <span className="ssh-table__dev" title={`${h.username}@${h.host}:${h.port}`}>
-                      <span className="ssh-table__name">{h.nickname?.trim() || `${h.username}@${h.host}`}</span>
-                      <span className="ssh-table__addr">
-                        {h.username}@{h.host}:{h.port}
+                  <div key={h.id} className="ssh-table__item">
+                    <div className="ssh-table__row">
+                      <span className="ssh-table__dev" title={`${h.username}@${h.host}:${h.port}`}>
+                        <span className="ssh-table__name">{h.nickname?.trim() || `${h.username}@${h.host}`}</span>
+                        <span className="ssh-table__addr">
+                          {h.username}@{h.host}:{h.port}
+                        </span>
                       </span>
-                    </span>
-                    <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                    <span className={`ssh-table__status${st === "active" ? " ok" : ""}`}>{status}</span>
-                    <span className="ssh-table__actions">
-                      <button className="mini-btn" onClick={() => onConnect(h)}>
-                        {st === "active" ? "断开" : "连接"}
-                      </button>
-                      <button className="mini-btn" onClick={() => setForm({ mode: "edit", host: h })}>
-                        编辑
-                      </button>
-                      <button className="mini-btn" onClick={() => onTest(h)} disabled={tst === "testing"}>
-                        测试
-                      </button>
-                      <button className="mini-btn mini-btn--danger" onClick={() => onDelete(h)}>
-                        删除
-                      </button>
-                    </span>
+                      <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
+                      <span className={`ssh-table__status${st === "active" ? " ok" : ""}`}>{status}</span>
+                      <span className="ssh-table__actions">
+                        <button className="mini-btn" onClick={() => onConnect(h)}>
+                          {st === "active" ? "断开" : "连接"}
+                        </button>
+                        <button className="mini-btn" onClick={() => setForm({ mode: "edit", host: h })}>
+                          编辑
+                        </button>
+                        <button className="mini-btn" onClick={() => onTest(h)} disabled={tst === "testing"}>
+                          测试
+                        </button>
+                        <button className="mini-btn mini-btn--danger" onClick={() => onDelete(h)}>
+                          删除
+                        </button>
+                      </span>
+                    </div>
+                    {/* 端点展示行（设备=连到谁，端点=连上之后打开什么；v1 只读） */}
+                    <div className="ssh-table__endpoints">
+                      <span className="ssh-table__ep-label">端点</span>
+                      {h.endpoints.map((ep) => (
+                        <span key={ep.name} className="ssh-table__ep" title={ep.name}>
+                          {sshEndpointLabel(ep.name)}
+                          <span className="ssh-table__ep-raw">({ep.name})</span>
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 );
               })}
@@ -1194,6 +1211,8 @@ function SshHostForm({
       username: username.trim(),
       nickname: nickname.trim() || undefined,
       auth,
+      // 端点不随设备表单编辑（v1 只读）；编辑保留原值，新建给默认
+      endpoints: initial?.endpoints ?? defaultSshEndpoints(),
     });
   };
   useDialogKeys({ onClose: onBack, onEnter: save });
@@ -1299,6 +1318,7 @@ function SshHostForm({
             <p className="dialog__hint">密码将以明文保存（预览：浏览器本地；正式版：服务器侧配置目录），请确保该目录访问受控。</p>
           </>
         )}
+        <p className="dialog__hint">端点：默认创建「终端 (shell)」；命令通道、远端串口等端点类型后续支持。</p>
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
             已存在同地址设备 {host.trim()}:{port}，无需重复添加。

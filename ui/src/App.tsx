@@ -31,6 +31,7 @@ import {
   loadConfig,
   loadScriptArgs,
   loadSshHosts,
+  defaultSshEndpoints,
   mergeChunks,
   parsePortId,
   persistMacros,
@@ -1597,14 +1598,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     })),
     ...sshHosts.map((h) => {
       const st = sshStates.get(h.id);
+      // 端点驱动端口行（v1 恒为 shell；加载/保存路径已归一化，兜底防手工改库)
+      const eps = h.endpoints?.length ? h.endpoints : defaultSshEndpoints();
       return {
         devId: h.id,
         label: h.nickname?.trim() || `${h.username}@${h.host}`,
         detail: `${h.username}@${h.host}:${h.port}`,
         kind: "ssh" as const,
         connecting: st === "connecting",
-        // shell 行状态即会话状态：opened=活跃（圆点亮 + holders 1），connecting 由卡级标志驱动呼吸
-        ports: [{ name: "shell", opened: st === "active", holders: st === "active" ? 1 : 0 }],
+        // 端点行状态即会话状态：opened=活跃（圆点亮 + holders 1），connecting 由卡级标志驱动呼吸
+        ports: eps.map((ep) => ({ name: ep.name, opened: st === "active", holders: st === "active" ? 1 : 0 })),
       };
     }),
   ];

@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig, SshHost } from "./types";
+import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig, SshEndpoint, SshHost } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -427,12 +427,22 @@ export async function persistRemotes(remotes: RemoteDevice[]) {
 
 const SSH_HOSTS_KEY = "serial-studio-ssh-hosts";
 
+/** 新设备的默认端点（v1 固定 shell 终端；未来按需扩展 exec / serial）。 */
+export function defaultSshEndpoints(): SshEndpoint[] {
+  return [{ name: "shell", type: "shell" }];
+}
+
 export function loadSshHosts(): SshHost[] {
   try {
     const raw = localStorage.getItem(SSH_HOSTS_KEY);
     if (!raw) return [];
     const v = JSON.parse(raw);
-    return Array.isArray(v) ? v : [];
+    if (!Array.isArray(v)) return [];
+    // 归一化：早期预览数据无 endpoints 字段——补默认，避免存储格式二次迁移
+    return (v as SshHost[]).map((h) => ({
+      ...h,
+      endpoints: Array.isArray(h.endpoints) && h.endpoints.length > 0 ? h.endpoints : defaultSshEndpoints(),
+    }));
   } catch {
     return [];
   }
