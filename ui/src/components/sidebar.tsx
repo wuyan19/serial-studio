@@ -16,12 +16,19 @@ import {
 } from "../icons";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
 
-/** 端口分组卡（App 派生：本地卡 + 远程设备卡）。 */
+/** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡）。 */
 export interface PortGroupView {
   devId: string;
   label: string;
   online?: boolean;
   ports: PortInfo[];
+  /** SSH 设备卡：带 "SSH" 徽标、无在线点（lazy 连接，状态在 shell 行）、
+   *  隐藏别名/强关按钮，右键菜单为 SSH 动作（编辑/测试/删除）。 */
+  kind?: "ssh";
+  /** ssh shell 行连接中（圆点呼吸动画）。 */
+  connecting?: boolean;
+  /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
+  detail?: string;
 }
 
 /** 端口面板：设备分组卡 + 端口行（点开/附加/重连、别名 inline 编辑、强制关闭）。 */
@@ -42,6 +49,7 @@ export function PortsPanel({
   onRemoveRemote,
   onRenameRemote,
   onShowRemoteDetail,
+  onSshAction,
   onRefresh,
 }: {
   portGroups: PortGroupView[];
@@ -63,6 +71,8 @@ export function PortsPanel({
   onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
   /** 右键菜单「设备详情」:打开该设备的只读详情弹窗。 */
   onShowRemoteDetail: (dev: RemoteDevice) => void;
+  /** SSH 设备卡菜单动作（edit=打开管理弹窗编辑 / test=测试连接 / delete=删除）。 */
+  onSshAction: (devId: string, action: "edit" | "test" | "delete") => void;
   onRefresh: () => void;
 }) {
   return (
@@ -74,7 +84,8 @@ export function PortsPanel({
         </button>
       </div>
       {portGroups.map((grp) => {
-        const dev = grp.devId === "local" ? null : remotes.find((r) => r.id === grp.devId);
+        const isSsh = grp.kind === "ssh";
+        const dev = !isSsh && grp.devId !== "local" ? remotes.find((r) => r.id === grp.devId) : null;
         // 设备卡重命名仅本地桌面形态(remotes.json 持久化;web/远程窗口 connConfig 派生不落盘)
         const canRename = dev !== null && getMode() === "local";
         return (
@@ -84,15 +95,17 @@ export function PortsPanel({
               count={grp.ports.length}
               collapsed={portCollapsed.has(grp.devId)}
               onToggle={() => onTogglePortGroup(grp.devId)}
-              // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
-              title={dev ? `${dev.host}:${dev.port}` : undefined}
               // 三态:在线=绿 / 离线=红 / 连接中(unknown)=无修饰类,落 .dot 默认灰
               leading={<span className={`dot ${grp.online === true ? "on" : grp.online === false ? "off" : ""}`} />}
+              // SSH 卡:lazy 连接无在线态,leading 落默认灰点;徽标是与远程 ss 设备卡的视觉区分
+              badge={isSsh ? "SSH" : undefined}
+              // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
+              title={dev ? `${dev.host}:${dev.port}` : grp.detail}
               onRename={canRename ? (n) => { if (dev) onRenameRemote(dev, n); } : undefined}
               renameLabel="重命名设备"
               renameInitial={dev?.nickname ?? ""}
               renamePlaceholder="设备昵称(留空显示地址)"
-              menuHidden={!dev}
+              menuHidden={!dev && !isSsh}
               extraMenuItems={
                 dev
                   ? [
@@ -104,7 +117,13 @@ export function PortsPanel({
                         : { label: "重连设备", onSelect: () => { if (dev) onReconnectRemote(dev); } },
                       { label: "删除设备", danger: true, onSelect: () => { if (dev) onRemoveRemote(dev); } },
                     ]
-                  : undefined
+                  : isSsh
+                    ? [
+                        { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
+                        { label: "测试连接", onSelect: () => onSshAction(grp.devId, "test") },
+                        { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
+                      ]
+                    : undefined
               }
             />
             {!portCollapsed.has(grp.devId) &&
@@ -126,7 +145,8 @@ export function PortsPanel({
                   const editingThis = aliasEditPort === pid;
                   // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
                   // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
-                  const canForce = getMode() === "local" && p.opened;
+                  // SSH 卡无此语义(会话即本卡 shell 行),同样隐藏。
+                  const canForce = !isSsh && getMode() === "local" && p.opened;
                   return (
                     <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
                       <div
@@ -144,7 +164,8 @@ export function PortsPanel({
                           }
                         }}
                       >
-                        <span className={`port-item__dot${p.opened ? " open" : ""}`} />
+                        {/* SSH shell 行连接中:圆点呼吸(不同于 opened 常亮) */}
+                        <span className={`port-item__dot${p.opened ? " open" : ""}${isSsh && grp.connecting ? " busy" : ""}`} />
                         <span className="port-item__name">
                           {editingThis ? (
                             <InlineAliasInput
@@ -159,15 +180,17 @@ export function PortsPanel({
                         </span>
                         {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
                       </div>
-                      <button
-                        className="port-item__edit"
-                        title={`设置 ${shown} 别名`}
-                        aria-label={`设置 ${shown} 别名`}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => onSetAliasEdit(pid)}
-                      >
-                        <IconEdit />
-                      </button>
+                      {!isSsh && (
+                        <button
+                          className="port-item__edit"
+                          title={`设置 ${shown} 别名`}
+                          aria-label={`设置 ${shown} 别名`}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => onSetAliasEdit(pid)}
+                        >
+                          <IconEdit />
+                        </button>
+                      )}
                       {canForce && (
                         <button
                           className="port-item__force"

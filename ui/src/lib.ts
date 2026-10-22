@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
+import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig, SshHost } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -423,11 +423,33 @@ export async function persistRemotes(remotes: RemoteDevice[]) {
   }
 }
 
+// ===== SSH 设备（UI 预览：localStorage 持久化；后端接入后换 server 侧注册表，本对函数整体替换） =====
+
+const SSH_HOSTS_KEY = "serial-studio-ssh-hosts";
+
+export function loadSshHosts(): SshHost[] {
+  try {
+    const raw = localStorage.getItem(SSH_HOSTS_KEY);
+    if (!raw) return [];
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+export function persistSshHosts(hosts: SshHost[]) {
+  try {
+    localStorage.setItem(SSH_HOSTS_KEY, JSON.stringify(hosts));
+  } catch {
+    /* 配额/隐私模式：静默，会话内仍可用 */
+  }
+}
+
 /** 校验设备昵称（镜像 remotes_store::validate_nicknames 规则，前端先拦——
  * persistRemotes 对后端拒绝是静默的，不能靠后端兜底造成前后端状态漂移）。
  * 返回 null = 合法；否则为错误提示。空串 = 清除昵称（合法，标题回退 host:port）。 */
-export function validateRemoteNickname(nickname: string, others: RemoteDevice[]): string | null {
-  const nick = nickname.trim();
+export function validateRemoteNickname(nickname: string, others: RemoteDevice[]): string | null {  const nick = nickname.trim();
   if (!nick) return null; // 空 = 清除昵称
   if (nick.includes("::")) return "设备昵称不能包含「::」（复合键分隔符）";
   if (nick === "local") return "设备昵称不能为「local」（系统保留字）";

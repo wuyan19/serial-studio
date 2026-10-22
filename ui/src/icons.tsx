@@ -89,6 +89,17 @@ export function IconGlobe({ className }: IconProps) {
   );
 }
 
+/** SSH 设备 —— 终端提示符方框(>_ ,形制参照 Lucide terminal-square)。 */
+export function IconSsh({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M7 9.5l3 2.5-3 2.5" />
+      <path d="M12.5 15H17" />
+    </Svg>
+  );
+}
+
 /** Manage / settings (sliders). */
 export function IconSliders({ className }: IconProps) {
   return (

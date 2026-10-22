@@ -252,6 +252,7 @@ export function GroupHead({
   renameInitial,
   renamePlaceholder = "分组名",
   title,
+  badge,
 }: {
   name: string;
   count: number;
@@ -274,6 +275,8 @@ export function GroupHead({
   renamePlaceholder?: string;
   /** 组名悬停提示（串口设备卡兜底显示 host:port——设了昵称后地址无处可看）。 */
   title?: string;
+  /** 组名尾随徽标（SSH 设备卡的 "SSH" 标记——与远程 ss 设备卡的视觉区分）。 */
+  badge?: string;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -348,6 +351,7 @@ export function GroupHead({
       ) : (
         <span className="macro-group__name">{name}</span>
       )}
+      {badge && <span className="group-badge">{badge}</span>}
       <span className="macro-group__count">{count}</span>
       {menuOpen && (
         <div

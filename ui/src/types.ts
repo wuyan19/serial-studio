@@ -140,6 +140,27 @@ export interface RemoteDevice {
   nickname?: string;
 }
 
+/** SSH 设备认证方式。密码以明文随注册表保存；UI 永不回显已存密码（编辑留空 = 不变）。 */
+export type SshAuth =
+  | { type: "key"; keyPath: string }
+  | { type: "agent" }
+  | { type: "password"; password: string };
+
+/** SSH 设备：远程主机的终端会话提供方（像串口一样打开的"端口"来源）。
+ *  每台设备一张卡，卡内固定端点 shell（复合键 `${id}::shell`）。
+ *  当前为 UI 预览版：localStorage 持久化、连接为前端模拟；
+ *  后端接入后注册表迁至 server 侧（凭据不落前端），本类型形态不变。 */
+export interface SshHost {
+  /** 稳定主键（UUID），作为 devId 用于端口复合键。 */
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  /** 可选昵称；空则 UI 回退 user@host。 */
+  nickname?: string;
+  auth: SshAuth;
+}
+
 export interface SrvSettings {
   ws_host: string;
   ws_port: number;

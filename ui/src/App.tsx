@@ -15,6 +15,7 @@ import type {
   MacroRunCard,
   SerialConfig,
   SrvSettings,
+  SshHost,
   TermInstance,
 } from "./types";
 import { leafGroupIds } from "./pane-tree";
@@ -29,10 +30,12 @@ import {
   isTauri,
   loadConfig,
   loadScriptArgs,
+  loadSshHosts,
   mergeChunks,
   parsePortId,
   persistMacros,
   persistRemotes,
+  persistSshHosts,
   validateRemoteNickname,
   persistScriptArgs,
   persistScripts,
@@ -76,10 +79,11 @@ import {
   SerialConfigDialog,
   SettingsPanel,
   ShortcutsDialog,
+  SshManagerDialog,
   TermView,
   validateMacro,
 } from "./components";
-import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow } from "./components/sidebar";
+import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
 import { TitleBar } from "./components/titlebar";
 import {
   IconAlert,
@@ -96,6 +100,7 @@ import {
   IconTrash,
   IconShirt,
   IconCheck,
+  IconSsh,
 } from "./icons";
 import { getTheme, setTheme, subscribe, toggleTheme, THEMES, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
@@ -240,6 +245,15 @@ export default function App() {
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
   const [remoteDetailId, setRemoteDetailId] = useState<string | null>(null);
+  // ===== SSH 设备（UI 预览：localStorage 注册表 + 前端模拟连接；后端接入后换 server 侧） =====
+  const [sshHosts, setSshHosts] = useState<SshHost[]>(loadSshHosts);
+  const [sshManagerOpen, setSshManagerOpen] = useState(false);
+  /** 管理弹窗打开时的编辑种子（侧栏卡「编辑设备」直达表单）；null = 列表视图。 */
+  const [sshEditSeed, setSshEditSeed] = useState<string | null>(null);
+  /** 设备连接态（模拟）：connecting=连接中（shell 行圆点呼吸），active=会话活跃（圆点亮）。 */
+  const [sshStates, setSshStates] = useState<Map<string, "connecting" | "active">>(new Map());
+  /** 测试连接结果（模拟）：testing=测试中，ok=可达。 */
+  const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok">>(new Map());
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
@@ -1283,6 +1297,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
   const triggerPort = (pid: PortId) => {
+    // SSH 设备 shell 行：预览模拟连接，不走串口 open 流程（无配置框、无后端）
+    const sshHost = sshHosts.find((h) => h.id === parsePortId(pid).devId);
+    if (sshHost) {
+      connectSsh(sshHost);
+      return;
+    }
     if (disconnectedPorts.has(pid)) {
       void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
       return;
@@ -1401,6 +1421,84 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   };
 
+  // ===== SSH 设备动作（UI 预览：连接/测试均为前端模拟；后端接入后替换 connectSsh/testSsh 实现） =====
+
+  const openSshManager = (editSeed: string | null = null) => {
+    setSshEditSeed(editSeed);
+    setSshManagerOpen(true);
+  };
+
+  /** 保存（添加/编辑）SSH 设备：新建生成 UUID；持久化在 updater 外调（同 addRemote 纪律）。 */
+  const commitSshHost = (host: SshHost, isNew: boolean) => {
+    const next = isNew
+      ? [...sshHosts, { ...host, id: crypto.randomUUID() }]
+      : sshHosts.map((h) => (h.id === host.id ? host : h));
+    setSshHosts(next);
+    persistSshHosts(next);
+  };
+
+  /** 删除 SSH 设备（确认弹窗拦截），并清其连接/测试态。 */
+  const deleteSshHost = (host: SshHost) => {
+    setConfirmState({
+      title: "删除 SSH 设备",
+      icon: <IconTrash />,
+      message: `删除 SSH 设备「${host.nickname?.trim() || `${host.username}@${host.host}`}」？`,
+      confirmText: "删除",
+      tone: "danger",
+      onConfirm: () => {
+        const next = sshHosts.filter((h) => h.id !== host.id);
+        setSshHosts(next);
+        persistSshHosts(next); // updater 外持久化(同 addRemote)
+        setSshStates((prev) => {
+          const n = new Map(prev);
+          n.delete(host.id);
+          return n;
+        });
+        setSshTests((prev) => {
+          const n = new Map(prev);
+          n.delete(host.id);
+          return n;
+        });
+        setConfirmState(null);
+      },
+    });
+  };
+
+  /** 连接模拟：connecting → 900ms 后置 active；active 态再触发 = 断开回未连接。 */
+  const connectSsh = (host: SshHost) => {
+    const st = sshStates.get(host.id);
+    if (st === "connecting") return;
+    if (st === "active") {
+      setSshStates((prev) => {
+        const n = new Map(prev);
+        n.delete(host.id);
+        return n;
+      });
+      return;
+    }
+    setSshStates((prev) => new Map(prev).set(host.id, "connecting"));
+    window.setTimeout(() => {
+      setSshStates((prev) => new Map(prev).set(host.id, "active"));
+    }, 900);
+  };
+
+  /** 测试连接模拟：testing → 800ms 后 ok（管理表显示「✓ 可达（预览）」）。 */
+  const testSsh = (host: SshHost) => {
+    setSshTests((prev) => new Map(prev).set(host.id, "testing"));
+    window.setTimeout(() => {
+      setSshTests((prev) => new Map(prev).set(host.id, "ok"));
+    }, 800);
+  };
+
+  /** 侧栏 SSH 卡菜单动作分发。 */
+  const onSshAction = (devId: string, action: "edit" | "test" | "delete") => {
+    const host = sshHosts.find((h) => h.id === devId);
+    if (!host) return;
+    if (action === "edit") openSshManager(host.id);
+    else if (action === "test") testSsh(host);
+    else deleteSshHost(host);
+  };
+
   /** 手动重连。桌面:后端删旧连接建新(device_connect);远程窗口/Web:前端重建 transport。 */
   const reconnectRemote = (dev: RemoteDevice) => {
     if (isLocal) {
@@ -1487,8 +1585,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const macroFailed = [...macroRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && macroUnseen.has(rid));
   const scriptRunning = [...scriptRuns.values()].some((c) => c.status === "running");
   const scriptFailed = [...scriptRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && scriptUnseen.has(rid));
-  /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）。每卡带 devId/label/online/ports。 */
-  const portGroups: { devId: string; label: string; online?: boolean; ports: PortInfo[] }[] = [
+  /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）+ SSH 设备卡（预览）。
+   *  每卡带 devId/label/online/ports；SSH 卡 kind="ssh"（lazy 连接——无 online，状态在 shell 行）。 */
+  const portGroups: PortGroupView[] = [
     ...(isLocal ? [{ devId: "local", label: "本地", online: devOnline["local"], ports: portsByDev["local"] ?? [] }] : []),
     ...remotes.map((d) => ({
       devId: d.id,
@@ -1496,9 +1595,24 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       online: devOnline[d.id],
       ports: portsByDev[d.id] ?? [],
     })),
+    ...sshHosts.map((h) => {
+      const st = sshStates.get(h.id);
+      return {
+        devId: h.id,
+        label: h.nickname?.trim() || `${h.username}@${h.host}`,
+        detail: `${h.username}@${h.host}:${h.port}`,
+        kind: "ssh" as const,
+        connecting: st === "connecting",
+        // shell 行状态即会话状态：opened=活跃（圆点亮 + holders 1），connecting 由卡级标志驱动呼吸
+        ports: [{ name: "shell", opened: st === "active", holders: st === "active" ? 1 : 0 }],
+      };
+    }),
   ];
-  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。 */
-  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
+  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。
+   *  SSH 卡不进面板（预览：shell 会话无后端，选中也无法打开）。 */
+  const allPorts: (PortInfo & { pid: PortId })[] = portGroups
+    .filter((g) => g.kind !== "ssh")
+    .flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
   /** 详情弹窗设备（按 id 实时查找；设备被删 → undefined → 弹窗不渲染，自然关闭）。 */
   const remoteDetail = remoteDetailId ? remotes.find((r) => r.id === remoteDetailId) : undefined;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
@@ -1558,7 +1672,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     macroPaletteOpen ||
     scriptPaletteOpen ||
     portPaletteOpen ||
-    remoteDetail
+    remoteDetail ||
+    sshManagerOpen
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
@@ -1653,6 +1768,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         )}
         <div className="activity-bar__spacer" />
         {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
+        {/* SSH 设备管理：不限定桌面形态（设计上注册表在 server 侧，Web 形态也能管理；预览为 localStorage） */}
+        <ActivityIcon icon={<IconSsh className="act-icon__svg" />} title="SSH 设备" active={sshManagerOpen} onClick={() => openSshManager()} />
         <div className="manage">
           <ActivityIcon
             icon={<IconShirt className="act-icon__svg" />}
@@ -1738,6 +1855,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onRemoveRemote={removeRemote}
               onRenameRemote={renameRemote}
               onShowRemoteDetail={(dev) => setRemoteDetailId(dev.id)}
+              onSshAction={onSshAction}
               onRefresh={() => refreshPorts()}
             />
           )}
@@ -2160,6 +2278,19 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           online={devOnline[remoteDetail.id]}
           ports={portsByDev[remoteDetail.id] ?? []}
           onClose={() => setRemoteDetailId(null)}
+        />
+      )}
+      {sshManagerOpen && (
+        <SshManagerDialog
+          hosts={sshHosts}
+          stateOf={(id) => sshStates.get(id)}
+          testOf={(id) => sshTests.get(id)}
+          onCommit={commitSshHost}
+          onDelete={deleteSshHost}
+          onConnect={connectSsh}
+          onTest={testSsh}
+          onClose={() => setSshManagerOpen(false)}
+          seedEditId={sshEditSeed}
         />
       )}
 
