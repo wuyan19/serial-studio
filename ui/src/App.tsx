@@ -1491,12 +1491,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }, 800);
   };
 
-  /** 侧栏 SSH 卡菜单动作分发。 */
-  const onSshAction = (devId: string, action: "edit" | "test" | "delete") => {
+  /** 侧栏 SSH 卡菜单动作分发（连接不开菜单——点「终端」行即连）。 */
+  const onSshAction = (devId: string, action: "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
     if (action === "edit") openSshManager(host.id);
-    else if (action === "test") testSsh(host);
     else deleteSshHost(host);
   };
 
@@ -2286,11 +2285,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       {sshManagerOpen && (
         <SshManagerDialog
           hosts={sshHosts}
-          stateOf={(id) => sshStates.get(id)}
           testOf={(id) => sshTests.get(id)}
           onCommit={commitSshHost}
           onDelete={deleteSshHost}
-          onConnect={connectSsh}
           onTest={testSsh}
           onClose={() => setSshManagerOpen(false)}
           seedEditId={sshEditSeed}

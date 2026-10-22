@@ -1010,29 +1010,24 @@ export function sshEndpointLabel(name: string): string {
   return name === "shell" ? "终端" : name;
 }
 
-/** SSH 管理弹窗：列表视图（设备表）⇄ 表单视图（添加/编辑）在同一个弹窗内切换，
- *  不做模态叠模态。Esc 语义随视图走：列表 = 关闭弹窗，表单 = 返回列表。
- *  数据与状态全部由 App 注入（hosts/连接态/测试态），本组件只管视图编排与表单校验。 */
+/** SSH 管理弹窗：设备 CRUD + 测试连接（列表视图）⇄ 表单视图（添加/编辑）单弹窗切换。
+ *  只管设备，不提供连接——连接（开终端会话）是 PORTS 面板的事。
+ *  Esc 语义随视图走：列表 = 关闭弹窗，表单 = 返回列表。 */
 export function SshManagerDialog({
   hosts,
-  stateOf,
   testOf,
   onCommit,
   onDelete,
-  onConnect,
   onTest,
   onClose,
   seedEditId,
 }: {
   hosts: SshHost[];
-  /** 设备连接态（预览模拟）：connecting=连接中 / active=会话活跃 / undefined=未连接。 */
-  stateOf: (id: string) => "connecting" | "active" | undefined;
   /** 测试连接结果（预览模拟）：testing=测试中 / ok=可达 / undefined=未测。 */
   testOf: (id: string) => "testing" | "ok" | undefined;
   /** 保存设备（isNew 区分添加/编辑；新建时 id 为空串，App 负责生成 UUID）。 */
   onCommit: (host: SshHost, isNew: boolean) => void;
   onDelete: (host: SshHost) => void;
-  onConnect: (host: SshHost) => void;
   onTest: (host: SshHost) => void;
   onClose: () => void;
   /** 打开时直达某设备的编辑视图（侧栏卡「编辑设备」入口）；null = 列表视图。 */
@@ -1072,30 +1067,18 @@ export function SshManagerDialog({
             </button>
           </div>
           {hosts.length === 0 ? (
-            <p className="dialog__hint ssh-table__empty">
-              暂无 SSH 设备。点右上「＋ 添加」创建——添加后设备卡出现在串口列表，点「终端」行即连。
-            </p>
+            <p className="dialog__hint ssh-table__empty">暂无 SSH 设备，点「＋ 添加」创建。</p>
           ) : (
             <div className="ssh-table">
               <div className="ssh-table__row ssh-table__head">
                 <span>设备</span>
                 <span>认证</span>
-                <span>状态</span>
+                <span>测试</span>
                 <span>操作</span>
               </div>
               {hosts.map((h) => {
-                const st = stateOf(h.id);
                 const tst = testOf(h.id);
-                const status =
-                  st === "connecting"
-                    ? "连接中…"
-                    : st === "active"
-                      ? "● 活跃"
-                      : tst === "testing"
-                        ? "测试中…"
-                        : tst === "ok"
-                          ? "✓ 可达（预览）"
-                          : "未连接";
+                const testText = tst === "testing" ? "测试中…" : tst === "ok" ? "✓ 可达（预览）" : "—";
                 return (
                   <div key={h.id} className="ssh-table__item">
                     <div className="ssh-table__row">
@@ -1106,11 +1089,8 @@ export function SshManagerDialog({
                         </span>
                       </span>
                       <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                      <span className={`ssh-table__status${st === "active" ? " ok" : ""}`}>{status}</span>
+                      <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}`}>{testText}</span>
                       <span className="ssh-table__actions">
-                        <button className="mini-btn" onClick={() => onConnect(h)}>
-                          {st === "active" ? "断开" : "连接"}
-                        </button>
                         <button className="mini-btn" onClick={() => setForm({ mode: "edit", host: h })}>
                           编辑
                         </button>
@@ -1137,7 +1117,6 @@ export function SshManagerDialog({
               })}
             </div>
           )}
-          <p className="dialog__hint">SSH 设备由所连接服务的网络发起连接；密码以明文保存在其配置目录。</p>
           <div className="btn-row">
             <button className="btn btn--primary" onClick={onClose}>
               关闭
@@ -1231,7 +1210,7 @@ function SshHostForm({
         <h3 className="dialog__title">
           <IconSsh /> {isEdit ? "编辑 SSH 设备" : "添加 SSH 设备"}
         </h3>
-        <div className="dialog__sub">{isEdit ? "修改连接参数或认证方式" : "连接远程设备的 SSH 终端，像串口一样打开"}</div>
+        <div className="dialog__sub">远程主机的 SSH 终端</div>
         <ConfigRow label="主机">
           <input
             autoFocus
@@ -1315,10 +1294,9 @@ function SshHostForm({
                 autoComplete="new-password"
               />
             </ConfigRow>
-            <p className="dialog__hint">密码将以明文保存（预览：浏览器本地；正式版：服务器侧配置目录），请确保该目录访问受控。</p>
+            <p className="dialog__hint">密码以明文保存，请确保存储位置受控。</p>
           </>
         )}
-        <p className="dialog__hint">端点：默认创建「终端 (shell)」；命令通道、远端串口等端点类型后续支持。</p>
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
             已存在同地址设备 {host.trim()}:{port}，无需重复添加。

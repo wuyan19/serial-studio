@@ -72,8 +72,8 @@ export function PortsPanel({
   onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
   /** 右键菜单「设备详情」:打开该设备的只读详情弹窗。 */
   onShowRemoteDetail: (dev: RemoteDevice) => void;
-  /** SSH 设备卡菜单动作（edit=打开管理弹窗编辑 / test=测试连接 / delete=删除）。 */
-  onSshAction: (devId: string, action: "edit" | "test" | "delete") => void;
+  /** SSH 设备卡菜单动作（edit=打开管理弹窗编辑 / delete=删除）。连接是 shell 行的事，不进菜单。 */
+  onSshAction: (devId: string, action: "edit" | "delete") => void;
   onRefresh: () => void;
 }) {
   return (
@@ -121,7 +121,6 @@ export function PortsPanel({
                   : isSsh
                     ? [
                         { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
-                        { label: "测试连接", onSelect: () => onSshAction(grp.devId, "test") },
                         { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
                       ]
                     : undefined
