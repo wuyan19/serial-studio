@@ -148,7 +148,8 @@ async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecke
 
 /// 设备测试连接(管理弹窗「测试」):建连 + host key 校验 + 认证,随即断开。
 /// 不经过会话池(不创建/复用 SshSession)——测试是只读探测,不留连接。
-pub(crate) async fn test_connection(record: SshHostRecord) -> Result<(), String> {
+/// pub:tauri-app 的 ssh_test 命令(本地 IPC 出口)同样调用。
+pub async fn test_connection(record: SshHostRecord) -> Result<(), String> {
     let handle = connect_and_auth(&record).await?;
     let _ = handle
         .disconnect(russh::Disconnect::ByApplication, "test ok", "Serial Studio")

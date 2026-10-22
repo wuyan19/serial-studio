@@ -429,11 +429,75 @@ async fn set_port_alias(
         .map_err(|e| format!("join 错误: {}", e))?
 }
 
+// ===== SSH 设备管理面（与 WS ssh_* action 同一数据面，本地 IPC 出口） =====
+
+/// SSH 注册表全量。
+#[tauri::command]
+async fn ssh_list(state: tauri::State<'_, AppState>) -> Result<Vec<ss_server::ssh::SshHostRecord>, String> {
+    Ok(state.ssh.registry_snapshot())
+}
+
+/// SSH 注册表全量覆盖：先落盘（失败不动内存）再同步会话池，广播列表刷新。
+#[tauri::command]
+async fn ssh_save(
+    state: tauri::State<'_, AppState>,
+    hosts: Vec<ss_server::ssh::SshHostRecord>,
+) -> Result<(), String> {
+    ss_server::ssh::store::save(&hosts)?;
+    state.ssh.update_registry(hosts);
+    let _ = state.meta_bus.send(());
+    Ok(())
+}
+
+/// SSH 设备测试连接（建连+认证+即拆，不进会话池）。结果 (ok, 失败原因)。
+#[tauri::command]
+async fn ssh_test(
+    state: tauri::State<'_, AppState>,
+    host_id: String,
+) -> Result<(bool, String), String> {
+    let rec = state
+        .ssh
+        .registry_snapshot()
+        .into_iter()
+        .find(|r| r.id == host_id)
+        .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
+    match ss_server::ssh::session::test_connection(rec).await {
+        Ok(()) => Ok((true, String::new())),
+        Err(e) => Ok((false, e)),
+    }
+}
+
+/// 分配下一个空闲 SSH 实例名（shell / shell@N，最小空闲；以 manager 占有权快照为唯一依据）。
+#[tauri::command]
+async fn ssh_next_instance(
+    state: tauri::State<'_, AppState>,
+    host_id: String,
+    base: String,
+) -> Result<String, String> {
+    let occupied: Vec<String> = state
+        .manager
+        .snapshot_open_states()
+        .await
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    Ok(ss_server::ssh::next_instance_key(&host_id, &base, &occupied))
+}
+
+/// PTY 尺寸变更（xterm fit → window_change）。SSH 实例消费；其它端口静默成功。
+#[tauri::command]
+async fn resize_port(state: tauri::State<'_, AppState>, port: String, cols: u32, rows: u32) -> Result<(), String> {
+    let (dev, rest) = ss_core::split_port_key(&port);
+    if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
+        state.ssh.resize_blocking(dev, rest, cols, rows);
+    }
+    Ok(())
+}
+
 /// 弹出原生保存对话框让用户选位置，写 JSON 文本。桌面端导出用（Web 走浏览器 blob 下载）。
 /// 返回 true=已保存，false=用户取消（不报错）。
 #[tauri::command]
-async fn save_json_file(default_name: String, content: String) -> Result<bool, String> {
-    let file = rfd::AsyncFileDialog::new()
+async fn save_json_file(default_name: String, content: String) -> Result<bool, String> {    let file = rfd::AsyncFileDialog::new()
         .set_file_name(&default_name)
         .add_filter("JSON", &["json"])
         .save_file()
@@ -1072,6 +1136,11 @@ fn run_gui() {
             close_port_stream,
             force_close_port,
             set_port_alias,
+            ssh_list,
+            ssh_save,
+            ssh_test,
+            ssh_next_instance,
+            resize_port,
             write_port,
             run_macro,
             run_script,

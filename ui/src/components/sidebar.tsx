@@ -25,8 +25,6 @@ export interface PortGroupView {
   /** SSH 设备卡：带 "SSH" 徽标、无在线点（lazy 连接，状态在 shell 行）、
    *  隐藏别名/强关按钮，右键菜单为 SSH 动作（编辑/测试/删除）。 */
   kind?: "ssh";
-  /** ssh shell 行连接中（圆点呼吸动画）。 */
-  connecting?: boolean;
   /** SSH 端点名白名单：铅笔别名只对端点定义行开放（实例行 shell@N 不挂铅笔）。 */
   aliasableNames?: string[];
   /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
@@ -168,8 +166,7 @@ export function PortsPanel({
                           }
                         }}
                       >
-                        {/* SSH shell 行连接中:圆点呼吸(不同于 opened 常亮) */}
-                        <span className={`port-item__dot${p.opened ? " open" : ""}${isSsh && grp.connecting ? " busy" : ""}`} />
+                        <span className={`port-item__dot${p.opened ? " open" : ""}`} />
                         <span className="port-item__name">
                           {editingThis ? (
                             <InlineAliasInput

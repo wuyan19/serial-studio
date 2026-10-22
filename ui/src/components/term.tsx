@@ -31,6 +31,7 @@ export function TermView({
   targetContainer,
   onWrite,
   onReady,
+  onResize,
   disconnected,
   onReconnect,
   recbar,
@@ -44,6 +45,8 @@ export function TermView({
   targetContainer: HTMLElement | null;
   onWrite: (port: string, data: string) => void;
   onReady: (inst: TermInstance | null) => void;
+  /** fit 后尺寸上报（SSH PTY window_change；后端对非 SSH 端口静默）。 */
+  onResize?: (port: string, cols: number, rows: number) => void;
   /** 该端口是否处于设备断开态(单键 R 重连仅此态触发)。 */
   disconnected?: boolean;
   /** 单键 R 重连回调(TermView 在断开态拦截 R)。 */
@@ -66,6 +69,16 @@ export function TermView({
   const onReconnectRef = useRef(onReconnect);
   useEffect(() => { disconnectedRef.current = disconnected ?? false; }, [disconnected]);
   useEffect(() => { onReconnectRef.current = onReconnect; }, [onReconnect]);
+  // onResize 同理:fit 触发点分散(挂载/字体就绪/RO),ref 防闭包 stale
+  const onResizeRef = useRef(onResize);
+  useEffect(() => { onResizeRef.current = onResize; }, [onResize]);
+  // fit + 尺寸上报(PTY window_change;SSH 通道消费)。所有 fit 触发点统一走此
+  // (挂载/字体/字号/聚焦/RO)——尺寸不变时后端幂等,多报无害,漏报才错位。
+  const fitAndReport = useCallback(() => {
+    fitRef.current?.fit();
+    const t = termRef.current;
+    if (t) onResizeRef.current?.(port, t.cols, t.rows);
+  }, [port]);
 
   // DOM reparent：把本根 div 挪到所属 group 的终端容器。targetContainer 变（跨 group 搬）→ 重挪。
   // 用 useLayoutEffect：在 paint 前挪，避免 term-pool 闪现；xterm 实例不重建，canvas 跟随根 div 移动。
@@ -155,7 +168,7 @@ export function TermView({
     });
     const timer = setTimeout(() => {
       try {
-        fit.fit();
+        fitAndReport();
         if (focused) term.focus();
       } catch {
         /* 容器未可见 */
@@ -168,7 +181,7 @@ export function TermView({
     const refit = () => {
       if (!alive) return;
       try {
-        fit.fit();
+        fitAndReport();
       } catch {
         /* 容器未可见 */
       }
@@ -203,19 +216,19 @@ export function TermView({
       if (!term) return;
       term.options.fontSize = n;
       try {
-        fitRef.current?.fit();
+        fitAndReport();
       } catch {
         /* ignore */
       }
     });
-  }, []);
+  }, [fitAndReport]);
 
   // 聚焦本终端（聚焦 group 的活动 tab）：fit 重排列 + 抢焦点
   useEffect(() => {
     if (focused && fitRef.current) {
       const timer = setTimeout(() => {
         try {
-          fitRef.current?.fit();
+          fitAndReport();
           termRef.current?.focus();
         } catch {
           /* ignore */
@@ -223,7 +236,7 @@ export function TermView({
       }, 0);
       return () => clearTimeout(timer);
     }
-  }, [focused]);
+  }, [focused, fitAndReport]);
 
   // 右键菜单项:复制(选中时)/粘贴/记录条显隐。xterm 的选词监听在 .xterm 元素上
   // 先触发,这里只接管"弹什么菜单"(preventDefault 掉 WebView 默认菜单)。
@@ -261,14 +274,14 @@ export function TermView({
     const ro = new ResizeObserver(() => {
       if (!visible) return; // display:none 时尺寸为 0，fit 会算错/抛
       try {
-        fitRef.current?.fit();
+        fitAndReport();
       } catch {
         /* ignore */
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [visible]);
+  }, [visible, fitAndReport]);
 
   return (
     <div

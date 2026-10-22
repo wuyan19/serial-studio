@@ -1,4 +1,4 @@
-import type { Macro, PortInfo, Script, SerialConfig } from "./types";
+import type { Macro, PortInfo, Script, SerialConfig, SshHost } from "./types";
 import { Channel } from "@tauri-apps/api/core";
 import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
 
@@ -61,8 +61,23 @@ export interface Transport {
   onConnectedChange(cb: (connected: boolean) => void): () => void;
   /** 服务版本号 + 是否启用远程脚本执行（关于页 + 脚本 UI 显隐）。本地恒 enableScripting=true。 */
   getVersion(): Promise<{ version: string; enableScripting: boolean }>;
-  /** 脚本编写 SKILL 全文(嵌入二进制;「脚本指南」对话框展示 / 复制给外部 Agent)。 */
+  /** 脚本编写 SKILL 全文(嵌入二进制；「脚本指南」对话框展示 / 复制给外部 Agent)。 */
   getScriptSkill(): Promise<string>;
+  // ===== SSH 设备管理面（注册表在所连 server 侧；数据经 onSshHosts 推送/回执） =====
+  /** SSH 注册表快照回调（sshList 回执 / sshSave 后回推）。 */
+  onSshHosts(cb: (hosts: SshHost[]) => void): () => void;
+  /** SSH 测试连接结果回调（多客户端同步）。 */
+  onSshTestResult(cb: (hostId: string, ok: boolean, message: string) => void): () => void;
+  /** 触发一次 SSH 注册表拉取；数据经 onSshHosts 回调推送（与 list 同推送模型）。 */
+  sshList(): Promise<void>;
+  /** 全量覆盖注册表（内存权威；后端先落盘再同步会话池）。 */
+  sshSave(hosts: SshHost[]): Promise<void>;
+  /** 测试连接（建连+认证+即拆）；结果也经 onSshTestResult 推送。 */
+  sshTest(hostId: string): Promise<{ ok: boolean; message: string }>;
+  /** 分配下一个空闲实例名（shell / shell@N，最小空闲）。 */
+  sshNextInstance(hostId: string, base: string): Promise<string>;
+  /** PTY 尺寸变更（SSH 实例消费；其它端口后端静默成功）。 */
+  resize(port: string, cols: number, rows: number): Promise<void>;
   dispose(): void;
 }
 
@@ -105,6 +120,10 @@ export interface TransportEventsMap {
   scriptResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
   scriptLog: (runId: string, message: string) => void;
   connected: (connected: boolean) => void;
+  /** SSH 注册表快照（sshList 回执 / sshSave 后回推 / 列表刷新）。 */
+  sshHosts: (hosts: SshHost[]) => void;
+  /** SSH 测试连接结果（管理弹窗状态列）。 */
+  sshTestResult: (hostId: string, ok: boolean, message: string) => void;
 }
 
 type HandlerSets = { [K in keyof TransportEventsMap]: Set<TransportEventsMap[K]> };
@@ -126,6 +145,8 @@ abstract class TransportEventBase {
     scriptLog: new Set(),
     connected: new Set(),
     devices: new Set(),
+    sshHosts: new Set(),
+    sshTestResult: new Set(),
   };
 
   onData(cb: TransportEventsMap["data"]) {
@@ -184,6 +205,14 @@ abstract class TransportEventBase {
     this.handlers.connected.add(cb);
     return () => { this.handlers.connected.delete(cb); };
   }
+  onSshHosts(cb: TransportEventsMap["sshHosts"]) {
+    this.handlers.sshHosts.add(cb);
+    return () => { this.handlers.sshHosts.delete(cb); };
+  }
+  onSshTestResult(cb: TransportEventsMap["sshTestResult"]) {
+    this.handlers.sshTestResult.add(cb);
+    return () => { this.handlers.sshTestResult.delete(cb); };
+  }
 }
 
 /** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）+ 自愈重连 + 心跳。
@@ -197,6 +226,10 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private openResolvers = new Map<string, Controller<AcquiredResult>>();
   private versionController: Controller<{ version: string; enableScripting: boolean }> | null = null;
   private scriptSkillController: Controller<string> | null = null;
+  /** SSH 管理面在途请求：ssh_list 单槽（快照语义）；test/next 按 host_id 路由（可并发）。 */
+  private sshListController: Controller<void> | null = null;
+  private sshTestControllers = new Map<string, Controller<{ ok: boolean; message: string }>>();
+  private sshInstanceControllers = new Map<string, Controller<string>>();
   /** WS 就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。每次重连重建。 */
   private openPromise!: Promise<void>;
   private openResolve: () => void = () => {};
@@ -324,6 +357,26 @@ export class RemoteTransport extends TransportEventBase implements Transport {
           break;
         case "pong":
           break; // 已由"任意入站帧重置 pong 超时"兜底，显式分支仅作协议标记
+        case "ssh_hosts":
+          // 推送模型（同 ports）：每条消息推给所有订阅者 + 唤醒在途 sshList
+          this.handlers.sshHosts.forEach((cb) => cb(msg.hosts as SshHost[]));
+          if (this.sshListController) {
+            this.sshListController.resolve();
+            this.sshListController = null;
+          }
+          break;
+        case "ssh_test_result": {
+          const r = { ok: !!msg.ok, message: (msg.message as string) ?? "" };
+          this.handlers.sshTestResult.forEach((cb) => cb(msg.host_id, r.ok, r.message));
+          this.sshTestControllers.get(msg.host_id)?.resolve(r);
+          this.sshTestControllers.delete(msg.host_id);
+          break;
+        }
+        case "ssh_instance": {
+          this.sshInstanceControllers.get(msg.host_id)?.resolve(msg.name as string);
+          this.sshInstanceControllers.delete(msg.host_id);
+          break;
+        }
       }
     };
   }
@@ -377,6 +430,12 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     this.versionController = null;
     this.scriptSkillController?.reject(err);
     this.scriptSkillController = null;
+    this.sshListController?.reject(err);
+    this.sshListController = null;
+    this.sshTestControllers.forEach((c) => c.reject(err));
+    this.sshTestControllers.clear();
+    this.sshInstanceControllers.forEach((c) => c.reject(err));
+    this.sshInstanceControllers.clear();
   }
 
   /** 统一发送出口：等 WS open 后再 send，消除裸 ws.send 在 CONNECTING 态抛异常的隐患。重连期间自然等待。 */
@@ -456,6 +515,35 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     });
     await this.send(JSON.stringify({ action: "get_script_skill" }));
     return result;
+  }
+  async sshList() {
+    const result = new Promise<void>((resolve, reject) => {
+      this.sshListController = { resolve, reject };
+    });
+    await this.send(JSON.stringify({ action: "ssh_list" }));
+    await result; // 数据经 onSshHosts 已推;此处等回执防"发送即成功"的假完成
+  }
+  async sshSave(hosts: SshHost[]) {
+    await this.send(JSON.stringify({ action: "ssh_save", hosts }));
+    // 成功回执是 ssh_hosts(推送已更新订阅者);失败是 error 消息(经 onError)。
+    // 此处不再等回执——save 后 UI 状态由前端持有,推送仅同步其它客户端。
+  }
+  async sshTest(hostId: string) {
+    const result = new Promise<{ ok: boolean; message: string }>((resolve, reject) => {
+      this.sshTestControllers.set(hostId, { resolve, reject });
+    });
+    await this.send(JSON.stringify({ action: "ssh_test", host_id: hostId }));
+    return result;
+  }
+  async sshNextInstance(hostId: string, base: string) {
+    const result = new Promise<string>((resolve, reject) => {
+      this.sshInstanceControllers.set(hostId, { resolve, reject });
+    });
+    await this.send(JSON.stringify({ action: "ssh_next_instance", host_id: hostId, base }));
+    return result;
+  }
+  async resize(port: string, cols: number, rows: number) {
+    await this.send(JSON.stringify({ action: "resize", port: this.wireName(port), cols, rows }));
   }
 
   override onConnectedChange(cb: (connected: boolean) => void) {
@@ -637,6 +725,25 @@ export class LocalTransport extends TransportEventBase implements Transport {
   }
   async getScriptSkill() {
     return tauriInvoke<string>("get_script_skill");
+  }
+  async sshList() {
+    const hosts = await tauriInvoke<SshHost[]>("ssh_list");
+    this.handlers.sshHosts.forEach((cb) => cb(hosts)); // 推送语义对齐 Remote
+  }
+  async sshSave(hosts: SshHost[]) {
+    await tauriInvoke("ssh_save", { hosts });
+    this.handlers.sshHosts.forEach((cb) => cb(hosts)); // 成功回推新表(本地权威即所发)
+  }
+  async sshTest(hostId: string) {
+    const [ok, message] = await tauriInvoke<[boolean, string]>("ssh_test", { hostId });
+    this.handlers.sshTestResult.forEach((cb) => cb(hostId, ok, message));
+    return { ok, message };
+  }
+  async sshNextInstance(hostId: string, base: string) {
+    return tauriInvoke<string>("ssh_next_instance", { hostId, base });
+  }
+  async resize(port: string, cols: number, rows: number) {
+    await tauriInvoke("resize_port", { port, cols, rows });
   }
 
   override onConnectedChange(cb: (connected: boolean) => void) {

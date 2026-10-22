@@ -275,3 +275,104 @@ fn next_instance_full_key_semantics() {
     let occ = vec!["sshdev::shell".to_string(), "sshdev::shell@3".to_string()];
     assert_eq!(ssh::next_instance_key("sshdev", "shell", &occ), "shell@2");
 }
+
+// ===== WS 层 CRUD 集成（handler 胶水：ssh_save/ssh_list/ssh_next_instance） =====
+
+use futures_util::{SinkExt, StreamExt};
+use ss_core::{EventBus, SerialManager};
+use ss_server::{create_router, AppState};
+use tokio_tungstenite::tungstenite::Message;
+
+/// 起 server(空设备表 + 真 SshManager,无 opener 需要——SSH 动作不触 open)。
+async fn boot_ws() -> String {
+    let event_bus = Arc::new(EventBus::new(64));
+    let manager = Arc::new(SerialManager::new(
+        event_bus.clone(),
+        Arc::new(ss_core::RealPortOpener), // 占位:SSH 动作不经 manager open
+    ));
+    let (meta_tx, _) = tokio::sync::broadcast::channel(16);
+    let (script_tx, _) = tokio::sync::broadcast::channel(16);
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone(), "inst-ssh-ws"));
+    devices.bind(Arc::downgrade(&devices));
+    let ssh = Arc::new(SshManager::from_registry());
+    let state = AppState {
+        manager,
+        event_bus,
+        meta_bus: Arc::new(meta_tx.clone()),
+        script_bus: Arc::new(script_tx),
+        enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        addresses: Arc::new(ss_server::address::AddressResolver::new(
+            Arc::clone(&devices),
+            meta_tx,
+            "inst-ssh-ws".into(),
+        )),
+        devices,
+        ssh: Arc::clone(&ssh),
+        instance_id: "inst-ssh-ws".into(),
+    };
+    let app = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("ws://{}/ws", addr)
+}
+
+#[tokio::test]
+async fn ws_ssh_save_list_next_roundtrip() {
+    let url = boot_ws().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // save:全量写两台(密钥+密码,camelCase 线格式) → 应回 ssh_hosts
+    let save = r#"{"action":"ssh_save","hosts":[
+        {"id":"h1","host":"192.0.2.10","port":22,"username":"root","auth":{"type":"key","keyPath":"~/.ssh/id_ed25519"},"endpoints":[{"name":"shell","type":"shell"}]},
+        {"id":"h2","host":"192.0.2.11","port":2222,"username":"pi","nickname":"车间网关","auth":{"type":"password","password":"pw"},"endpoints":[{"name":"shell","type":"shell","alias":"控制台"}]}]}"#;
+    ws.send(Message::Text(save.into())).await.unwrap();
+    let echo = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(Message::Text(t))) = ws.next().await {
+                if t.contains("\"ssh_hosts\"") { return t; }
+            }
+        }
+    }).await.unwrap();
+    assert!(echo.contains("车间网关") && echo.contains("控制台"), "回推注册表含昵称与端点别名: {echo}");
+    assert!(echo.contains("keyPath"), "线格式 camelCase: {echo}");
+
+    // list:另一连接拉取 → 同表
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws2.send(Message::Text(r#"{"action":"ssh_list"}"#.into())).await.unwrap();
+    let listed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(Message::Text(t))) = ws2.next().await {
+                if t.contains("\"ssh_hosts\"") { return t; }
+            }
+        }
+    }).await.unwrap();
+    assert!(listed.contains("192.0.2.11"));
+
+    // next_instance:无占用 → shell
+    ws2.send(Message::Text(r#"{"action":"ssh_next_instance","host_id":"h1","base":"shell"}"#.into())).await.unwrap();
+    let inst = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(Message::Text(t))) = ws2.next().await {
+                if t.contains("\"ssh_instance\"") { return t; }
+            }
+        }
+    }).await.unwrap();
+    assert!(inst.contains(r#""name":"shell""#), "首个实例名 = shell: {inst}");
+
+    // save 后端点兜底:缺 endpoints 的条目保存 → 回推补默认 shell
+    ws2.send(Message::Text(r#"{"action":"ssh_save","hosts":[{"id":"h3","host":"192.0.2.12","port":22,"username":"a","auth":{"type":"agent"}}]}"#.into())).await.unwrap();
+    let fixed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(Message::Text(t))) = ws2.next().await {
+                if t.contains("\"ssh_hosts\"") && t.contains("h3") { return t; }
+            }
+        }
+    }).await.unwrap();
+    assert!(fixed.contains("\"name\":\"shell\""), "端点缺失走默认兜底: {fixed}");
+}

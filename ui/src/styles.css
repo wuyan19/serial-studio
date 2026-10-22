@@ -3246,16 +3246,6 @@ button {
   white-space: nowrap;
 }
 
-/* SSH shell 行连接中：圆点呼吸（区别于 opened 常亮） */
-.port-item__dot.busy {
-  animation: ssh-dot-pulse 1s var(--ease) infinite;
-}
-@keyframes ssh-dot-pulse {
-  50% {
-    opacity: 0.3;
-  }
-}
-
 /* 管理弹窗头部：标题 + 「＋ 添加」同行 */
 .dialog__head-row {
   display: flex;
@@ -3315,6 +3305,9 @@ button {
 }
 .ssh-table__status.ok {
   color: var(--link);
+}
+.ssh-table__status.bad {
+  color: var(--danger);
 }
 .ssh-table__actions {
   display: flex;

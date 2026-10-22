@@ -2,7 +2,7 @@
 脚本指南、添加远程设备、远程设备详情、脚本运行参数收集、通用确认弹窗。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost } from "../types";
-import { BAUD_RATES, copyText, defaultSshEndpoints, displayPortName, isTauri, prefillRunValues } from "../lib";
+import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
 import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug, IconSsh } from "../icons";
@@ -1019,7 +1019,7 @@ export function SshManagerDialog({
 }: {
   hosts: SshHost[];
   /** 测试连接结果（预览模拟）：testing=测试中 / ok=可达 / undefined=未测。 */
-  testOf: (id: string) => "testing" | "ok" | undefined;
+  testOf: (id: string) => "testing" | "ok" | "fail" | undefined;
   /** 保存设备（isNew 区分添加/编辑；新建时 id 为空串，App 负责生成 UUID）。 */
   onCommit: (host: SshHost, isNew: boolean) => void;
   onDelete: (host: SshHost) => void;
@@ -1073,7 +1073,7 @@ export function SshManagerDialog({
               </div>
               {hosts.map((h) => {
                 const tst = testOf(h.id);
-                const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : "—";
+                const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : tst === "fail" ? "✗" : "—";
                 return (
                   <div key={h.id} className="ssh-table__row">
                     <span className="ssh-table__dev" title={`${h.username}@${h.host}:${h.port}`}>
@@ -1083,7 +1083,7 @@ export function SshManagerDialog({
                       </span>
                     </span>
                     <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}`} title={tst === "ok" ? "可达（预览）" : undefined}>
+                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}${tst === "fail" ? " bad" : ""}`} title={tst === "ok" ? "可达" : tst === "fail" ? "失败（原因见提示）" : undefined}>
                       {testText}
                     </span>
                     <span className="ssh-table__actions">
@@ -1176,7 +1176,7 @@ function SshHostForm({
       nickname: nickname.trim() || undefined,
       auth,
       // 端点不随设备表单编辑（v1 只读）；编辑保留原值，新建给默认
-      endpoints: initial?.endpoints ?? defaultSshEndpoints(),
+      endpoints: initial?.endpoints ?? [{ name: "shell", type: "shell" }],
     });
   };
   useDialogKeys({ onClose: onBack, onEnter: save });

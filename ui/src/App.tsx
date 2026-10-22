@@ -30,13 +30,10 @@ import {
   isTauri,
   loadConfig,
   loadScriptArgs,
-  loadSshHosts,
-  defaultSshEndpoints,
   mergeChunks,
   parsePortId,
   persistMacros,
   persistRemotes,
-  persistSshHosts,
   validateRemoteNickname,
   persistScriptArgs,
   persistScripts,
@@ -246,17 +243,13 @@ export default function App() {
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
   const [remoteDetailId, setRemoteDetailId] = useState<string | null>(null);
-  // ===== SSH 设备（UI 预览：localStorage 注册表 + 前端模拟连接；后端接入后换 server 侧） =====
-  const [sshHosts, setSshHosts] = useState<SshHost[]>(loadSshHosts);
+  // ===== SSH 设备（注册表在所连 server 侧；经 transport ssh_* 面读写） =====
+  const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
   /** 管理弹窗打开时的编辑种子（侧栏卡「编辑设备」直达表单）；null = 列表视图。 */
   const [sshEditSeed, setSshEditSeed] = useState<string | null>(null);
-  /** SSH 会话态（预览模拟）：connecting=首连中；instances=已开实例键（"shell"、
-   *  "shell@2"…，序号不复用）；next=下一个实例序号。空 instances=未连接。
-   *  实例=行：holders 数字保持全局语义「共享该流的人数」，实例数即行数。 */
-  const [sshStates, setSshStates] = useState<Map<string, { connecting: boolean; instances: string[]; next: number }>>(new Map());
-  /** 测试连接结果（模拟）：testing=测试中，ok=可达。 */
-  const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok">>(new Map());
+  /** 测试连接结果：testing=测试中，ok=可达，fail=失败（原因经 toast）。 */
+  const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok" | "fail">>(new Map());
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
@@ -948,6 +941,22 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     return () => clearInterval(tick);
   }, [isLocal, remotes]);
 
+  // SSH 注册表同步：命令面 transport 就绪 → 订阅推送 + 拉一次初值。注册表在所连
+  // server 侧(桌面=本机 ss,web=远端 ss),meta 广播(别名变更等)驱动的重拉走通用
+  // refreshPorts 路径;此处只管生命周期。connected 变化(重连)时重订阅重拉。
+  useEffect(() => {
+    if (!connected) return;
+    const t = cmdTransport();
+    if (!t) return;
+    const un1 = t.onSshHosts((hosts) => setSshHosts(hosts));
+    void t.sshList().catch(() => {/* 拉取失败:onError 已有通用提示 */});
+    return () => {
+      un1();
+    };
+    // cmdTransport 身份稳定(ref 化);connected 是唯一重订阅触发器
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected]);
+
   // 远程 Transport 引用计数（按需）——仅 Web/远程窗口形态:前端直连远端 ss。
   // 桌面形态远程设备已下沉到后端(DeviceClientManager),本地只有 "local" 一个 transport,
   // 设备连接/重连/断开全由 Rust 侧管理,前端经 devices 事件观察状态。
@@ -1300,13 +1309,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
   const triggerPort = (pid: PortId) => {
-    // SSH 设备端点行：预览模拟多实例（预览不走串口 open 流程，无配置框、无后端）
-    const { devId: trigDev, name: trigName } = parsePortId(pid);
-    const sshHost = sshHosts.find((h) => h.id === trigDev);
-    if (sshHost) {
-      triggerSshRow(sshHost, trigName);
-      return;
-    }
+    // SSH 端点/实例行：走标准 open 流程,但不弹串口配置框(无波特率语义,DEFAULT_CONFIG)
+    const isSshPort = sshHosts.some((h) => h.id === parsePortId(pid).devId);
     if (disconnectedPorts.has(pid)) {
       void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
       return;
@@ -1320,6 +1324,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       const { devId } = parsePortId(pid);
       const info = portsByDev[devId]?.find((p) => bucketPidOf(devId, p.name) === pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
+      else if (isSshPort) void openPort(pid, DEFAULT_CONFIG); // SSH 未开：直连(无配置框)
       else setPendingPort(pid); // 未开：弹配置框
     }
   };
@@ -1425,23 +1430,28 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   };
 
-  // ===== SSH 设备动作（UI 预览：连接/测试均为前端模拟；后端接入后替换 connectSsh/testSsh 实现） =====
+  // ===== SSH 设备动作（注册表/测试/实例分配全走 transport——数据在所连 server 侧） =====
 
   const openSshManager = (editSeed: string | null = null) => {
     setSshEditSeed(editSeed);
     setSshManagerOpen(true);
   };
 
-  /** 保存（添加/编辑）SSH 设备：新建生成 UUID；持久化在 updater 外调（同 addRemote 纪律）。 */
-  const commitSshHost = (host: SshHost, isNew: boolean) => {
+  /** 保存（添加/编辑）SSH 设备：全量覆盖 server 侧注册表；乐观更新，失败回滚。 */
+  const commitSshHost = async (host: SshHost, isNew: boolean) => {
     const next = isNew
       ? [...sshHosts, { ...host, id: crypto.randomUUID() }]
       : sshHosts.map((h) => (h.id === host.id ? host : h));
     setSshHosts(next);
-    persistSshHosts(next);
+    try {
+      await cmdTransport()?.sshSave(next);
+    } catch (e) {
+      setSshHosts(sshHosts);
+      libError(`保存 SSH 设备失败：${String(e)}`);
+    }
   };
 
-  /** 删除 SSH 设备（确认弹窗拦截），并清其连接/测试态。 */
+  /** 删除 SSH 设备（确认弹窗拦截）。 */
   const deleteSshHost = (host: SshHost) => {
     setConfirmState({
       title: "删除 SSH 设备",
@@ -1450,70 +1460,54 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       confirmText: "删除",
       tone: "danger",
       onConfirm: () => {
-        const next = sshHosts.filter((h) => h.id !== host.id);
-        setSshHosts(next);
-        persistSshHosts(next); // updater 外持久化(同 addRemote)
-        setSshStates((prev) => {
-          const n = new Map(prev);
-          n.delete(host.id);
-          return n;
-        });
-        setSshTests((prev) => {
-          const n = new Map(prev);
-          n.delete(host.id);
-          return n;
-        });
+        void (async () => {
+          const next = sshHosts.filter((h) => h.id !== host.id);
+          setSshHosts(next);
+          setSshTests((prev) => {
+            const n = new Map(prev);
+            n.delete(host.id);
+            return n;
+          });
+          try {
+            await cmdTransport()?.sshSave(next);
+          } catch (e) {
+            setSshHosts(sshHosts);
+            libError(`删除 SSH 设备失败：${String(e)}`);
+          }
+        })();
         setConfirmState(null);
       },
     });
   };
 
-  /** 新建终端（预览模拟）：未连接→首连（900ms 后 shell 实例出现）；已连接→追加实例
-   *  shell@N（序号只增不复用，关掉的实例号不回收——同 tab 语义）。 */
-  const newShellSession = (host: SshHost) => {
-    const st = sshStates.get(host.id);
-    if (st?.connecting) return;
-    if (!st || st.instances.length === 0) {
-      setSshStates((prev) => new Map(prev).set(host.id, { connecting: true, instances: [], next: 2 }));
-      window.setTimeout(() => {
-        setSshStates((prev) => new Map(prev).set(host.id, { connecting: false, instances: ["shell"], next: 2 }));
-      }, 900);
-      return;
-    }
-    setSshStates((prev) => {
-      const cur = prev.get(host.id) ?? { connecting: false, instances: [], next: 2 };
-      const n = cur.next;
-      return new Map(prev).set(host.id, { ...cur, instances: [...cur.instances, `shell@${n}`], next: n + 1 });
-    });
-  };
-
-  /** 点 SSH 端点行（预览模拟）：未连接=首连；已开实例=关闭该实例（末位关闭即回未连接态）。 */
-  const triggerSshRow = (host: SshHost, name: string) => {
-    const st = sshStates.get(host.id);
-    if (!st || st.instances.length === 0) {
-      newShellSession(host);
-      return;
-    }
-    if (st.instances.includes(name)) {
-      setSshStates((prev) =>
-        new Map(prev).set(host.id, { ...st, instances: st.instances.filter((k) => k !== name) }),
-      );
-    }
-  };
-
-  /** 测试连接模拟：testing → 800ms 后 ok（管理表显示「✓ 可达（预览）」）。 */
-  const testSsh = (host: SshHost) => {
+  /** 测试连接：server 侧建连+认证+即拆（不进会话池）。失败原因经 toast。 */
+  const testSsh = async (host: SshHost) => {
     setSshTests((prev) => new Map(prev).set(host.id, "testing"));
-    window.setTimeout(() => {
-      setSshTests((prev) => new Map(prev).set(host.id, "ok"));
-    }, 800);
+    try {
+      const r = await cmdTransport()?.sshTest(host.id);
+      setSshTests((prev) => new Map(prev).set(host.id, r?.ok ? "ok" : "fail"));
+      if (r && !r.ok && r.message) libError(`SSH 测试失败：${r.message}`);
+    } catch (e) {
+      setSshTests((prev) => new Map(prev).set(host.id, "fail"));
+      libError(`SSH 测试失败：${String(e)}`);
+    }
+  };
+
+  /** 新建终端：先向 server 要空闲实例名（shell / shell@N）再走标准 open。 */
+  const newShellSession = async (hostId: string) => {
+    try {
+      const name = await cmdTransport()?.sshNextInstance(hostId, "shell");
+      if (name) await openPort(portIdOf(hostId, name), DEFAULT_CONFIG);
+    } catch (e) {
+      libError(`新建终端失败：${String(e)}`);
+    }
   };
 
   /** 侧栏 SSH 卡菜单动作分发。 */
   const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
-    if (action === "connect") newShellSession(host);
+    if (action === "connect") void newShellSession(devId);
     else if (action === "edit") openSshManager(host.id);
     else deleteSshHost(host);
   };
@@ -1587,21 +1581,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
   const aliasOf = (pid: PortId) => portInfoOf(pid)?.alias;
 
-  /** 提交别名：SSH 端点走本地注册表（端点定义携带），串口走后端 ports.json + 刷新列表。空串 = 清除。 */
+  /** 提交别名：统一走 set_alias（后端按端口键路由——本机写 ports.json，SSH 端点写
+   *  注册表，远端设备转发；成功后 meta 广播驱动列表刷新）。空串 = 清除。 */
   const commitAlias = async (pid: PortId, alias: string) => {
     setAliasEdit(null);
-    const { devId, name } = parsePortId(pid);
-    const sshHost = sshHosts.find((h) => h.id === devId);
-    if (sshHost) {
-      const next = sshHosts.map((h) =>
-        h.id === devId
-          ? { ...h, endpoints: h.endpoints.map((ep) => (ep.name === name ? { ...ep, alias: alias.trim() || undefined } : ep)) }
-          : h,
-      );
-      setSshHosts(next);
-      persistSshHosts(next);
-      return;
-    }
     try {
       await cmdTransport()?.setAlias(pid, alias);
       refreshPorts();
@@ -1626,33 +1609,23 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       online: devOnline[d.id],
       ports: portsByDev[d.id] ?? [],
     })),
-    ...sshHosts.map((h) => {
-      const st = sshStates.get(h.id);
-      const eps = h.endpoints?.length ? h.endpoints : defaultSshEndpoints();
-      const aliasOfName = (n: string) => eps.find((e) => e.name === n)?.alias;
-      // 实例=行：未连接时列端点定义（点=首连）；有实例时列实例（shell、shell@2…，
-      // 各自独立开关）。holders 恒为"共享该流的人数"语义——预览恒 1，不承载实例数。
-      const rows =
-        st && st.instances.length > 0
-          ? st.instances.map((name) => ({ name, opened: true, holders: 1, alias: aliasOfName(name) }))
-          : eps.map((ep) => ({ name: ep.name, opened: false, holders: 0, alias: ep.alias }));
-      return {
-        devId: h.id,
-        label: h.nickname?.trim() || `${h.username}@${h.host}`,
-        detail: `${h.username}@${h.host}:${h.port}`,
-        kind: "ssh" as const,
-        connecting: st?.connecting ?? false,
-        // 端点名白名单：铅笔别名只对定义行开放（实例行 shell@N 的别名挂在定义上）
-        aliasableNames: eps.map((e) => e.name),
-        ports: rows,
-      };
-    }),
+    // SSH 卡:端口行直接来自 server 侧 list(注册表端点行 + manager 快照的实例行
+    // shell@N——opened/holders/disconnected 全是真实态)。aliasableNames 供铅笔白名单
+    // (实例行 shell@N 不挂铅笔,别名属端点定义)。
+    ...sshHosts.map((h) => ({
+      devId: h.id,
+      label: h.nickname?.trim() || `${h.username}@${h.host}`,
+      detail: `${h.username}@${h.host}:${h.port}`,
+      kind: "ssh" as const,
+      aliasableNames: h.endpoints.map((e) => e.name),
+      ports: portsByDev[h.id] ?? [],
+    })),
   ];
   /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。
-   *  SSH 卡不进面板（预览：shell 会话无后端，选中也无法打开）。 */
-  const allPorts: (PortInfo & { pid: PortId })[] = portGroups
-    .filter((g) => g.kind !== "ssh")
-    .flatMap((g) => g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })));
+   *  SSH 端点/实例也进面板——已是真实端口,选中即走 open。 */
+  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) =>
+    g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })),
+  );
   /** 详情弹窗设备（按 id 实时查找；设备被删 → undefined → 弹窗不渲染，自然关闭）。 */
   const remoteDetail = remoteDetailId ? remotes.find((r) => r.id === remoteDetailId) : undefined;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
@@ -2123,6 +2096,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 onReady={(inst) => {
                   if (inst) terminalsRef.current.set(port, inst);
                   else terminalsRef.current.delete(port);
+                }}
+                onResize={(p, cols, rows) => {
+                  void cmdTransport()?.resize(p, cols, rows).catch(() => {/* 断连期丢弃 */});
                 }}
                 disconnected={disconnectedPorts.has(port)}
                 onReconnect={() => reconnectPort(port)}
