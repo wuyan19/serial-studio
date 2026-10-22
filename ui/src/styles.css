@@ -3263,7 +3263,8 @@ button {
   justify-content: space-between;
 }
 
-/* SSH 设备表（管理弹窗列表视图）：紧凑四列 grid，无重边框——行悬浮即可扫读 */
+/* SSH 设备表（管理弹窗列表视图）：紧凑四列。末列定宽——各行是独立 grid,
+   auto 列会随各行内容变化导致表头与内容错位,定宽后 fr 列分配一致即对齐 */
 .ssh-table {
   display: grid;
   gap: 2px;
@@ -3271,20 +3272,13 @@ button {
 }
 .ssh-table__row {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) 56px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.5fr) 48px minmax(0, 1fr) 132px;
   gap: 10px;
   align-items: center;
   padding: 6px 8px;
   border-radius: var(--r-btn);
 }
-.ssh-table__row:not(.ssh-table__head) {
-  min-height: 34px;
-}
-/* 悬停覆盖整个设备条目（主行 + 端点行）：设备是一个整体 */
-.ssh-table__item {
-  border-radius: var(--r-btn);
-}
-.ssh-table__item:hover {
+.ssh-table__row:not(.ssh-table__head):hover {
   background: var(--surface-2);
 }
 .ssh-table__head {
@@ -3294,27 +3288,6 @@ button {
   color: var(--ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-}
-/* 端点展示行：设备=连到谁，端点=连上之后打开什么（v1 只读） */
-.ssh-table__endpoints {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 0 8px 7px;
-  font-size: var(--fs-xs);
-  color: var(--ink-faint);
-}
-.ssh-table__ep-label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.ssh-table__ep {
-  color: var(--ink-dim);
-}
-.ssh-table__ep-raw {
-  margin-left: 2px;
-  font-family: var(--font-mono);
-  color: var(--ink-faint);
 }
 .ssh-table__dev {
   display: flex;

@@ -1491,11 +1491,15 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }, 800);
   };
 
-  /** 侧栏 SSH 卡菜单动作分发（连接不开菜单——点「终端」行即连）。 */
-  const onSshAction = (devId: string, action: "edit" | "delete") => {
+  /** 侧栏 SSH 卡菜单动作分发。 */
+  const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
-    if (action === "edit") openSshManager(host.id);
+    if (action === "connect") {
+      // 预览为单会话模拟：已活跃时新建终端暂无效果（后端接入后=开新 channel）
+      if (sshStates.get(host.id) === "active") pushToast(true, "UI 预览：暂模拟单会话，多终端待后端接入");
+      else connectSsh(host);
+    } else if (action === "edit") openSshManager(host.id);
     else deleteSshHost(host);
   };
 
@@ -1568,9 +1572,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
   const aliasOf = (pid: PortId) => portInfoOf(pid)?.alias;
 
-  /** 提交别名：写 ports.json + 刷新列表使别名立即显示。空串 = 清除。 */
+  /** 提交别名：SSH 端点走本地注册表（端点定义携带），串口走后端 ports.json + 刷新列表。空串 = 清除。 */
   const commitAlias = async (pid: PortId, alias: string) => {
     setAliasEdit(null);
+    const { devId, name } = parsePortId(pid);
+    const sshHost = sshHosts.find((h) => h.id === devId);
+    if (sshHost) {
+      const next = sshHosts.map((h) =>
+        h.id === devId
+          ? { ...h, endpoints: h.endpoints.map((ep) => (ep.name === name ? { ...ep, alias: alias.trim() || undefined } : ep)) }
+          : h,
+      );
+      setSshHosts(next);
+      persistSshHosts(next);
+      return;
+    }
     try {
       await cmdTransport()?.setAlias(pid, alias);
       refreshPorts();
@@ -1606,7 +1622,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         kind: "ssh" as const,
         connecting: st === "connecting",
         // 端点行状态即会话状态：opened=活跃（圆点亮 + holders 1），connecting 由卡级标志驱动呼吸
-        ports: eps.map((ep) => ({ name: ep.name, opened: st === "active", holders: st === "active" ? 1 : 0 })),
+        ports: eps.map((ep) => ({
+          name: ep.name,
+          opened: st === "active",
+          holders: st === "active" ? 1 : 0,
+          alias: ep.alias,
+        })),
       };
     }),
   ];

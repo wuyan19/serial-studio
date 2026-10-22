@@ -1005,11 +1005,6 @@ export function sshAuthLabel(auth: SshAuth): string {
   return auth.type === "key" ? "密钥" : auth.type === "agent" ? "Agent" : "密码";
 }
 
-/** 端点友好名（按端点名映射；v1 只有 shell）。展示用，键本身不变。 */
-export function sshEndpointLabel(name: string): string {
-  return name === "shell" ? "终端" : name;
-}
-
 /** SSH 管理弹窗：设备 CRUD + 测试连接（列表视图）⇄ 表单视图（添加/编辑）单弹窗切换。
  *  只管设备，不提供连接——连接（开终端会话）是 PORTS 面板的事。
  *  Esc 语义随视图走：列表 = 关闭弹窗，表单 = 返回列表。 */
@@ -1078,40 +1073,30 @@ export function SshManagerDialog({
               </div>
               {hosts.map((h) => {
                 const tst = testOf(h.id);
-                const testText = tst === "testing" ? "测试中…" : tst === "ok" ? "✓ 可达（预览）" : "—";
+                const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : "—";
                 return (
-                  <div key={h.id} className="ssh-table__item">
-                    <div className="ssh-table__row">
-                      <span className="ssh-table__dev" title={`${h.username}@${h.host}:${h.port}`}>
-                        <span className="ssh-table__name">{h.nickname?.trim() || `${h.username}@${h.host}`}</span>
-                        <span className="ssh-table__addr">
-                          {h.username}@{h.host}:{h.port}
-                        </span>
+                  <div key={h.id} className="ssh-table__row">
+                    <span className="ssh-table__dev" title={`${h.username}@${h.host}:${h.port}`}>
+                      <span className="ssh-table__name">{h.nickname?.trim() || `${h.username}@${h.host}`}</span>
+                      <span className="ssh-table__addr">
+                        {h.username}@{h.host}:{h.port}
                       </span>
-                      <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                      <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}`}>{testText}</span>
-                      <span className="ssh-table__actions">
-                        <button className="mini-btn" onClick={() => setForm({ mode: "edit", host: h })}>
-                          编辑
-                        </button>
-                        <button className="mini-btn" onClick={() => onTest(h)} disabled={tst === "testing"}>
-                          测试
-                        </button>
-                        <button className="mini-btn mini-btn--danger" onClick={() => onDelete(h)}>
-                          删除
-                        </button>
-                      </span>
-                    </div>
-                    {/* 端点展示行（设备=连到谁，端点=连上之后打开什么；v1 只读） */}
-                    <div className="ssh-table__endpoints">
-                      <span className="ssh-table__ep-label">端点</span>
-                      {h.endpoints.map((ep) => (
-                        <span key={ep.name} className="ssh-table__ep" title={ep.name}>
-                          {sshEndpointLabel(ep.name)}
-                          <span className="ssh-table__ep-raw">({ep.name})</span>
-                        </span>
-                      ))}
-                    </div>
+                    </span>
+                    <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
+                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}`} title={tst === "ok" ? "可达（预览）" : undefined}>
+                      {testText}
+                    </span>
+                    <span className="ssh-table__actions">
+                      <button className="mini-btn" onClick={() => setForm({ mode: "edit", host: h })}>
+                        编辑
+                      </button>
+                      <button className="mini-btn" onClick={() => onTest(h)} disabled={tst === "testing"}>
+                        测试
+                      </button>
+                      <button className="mini-btn mini-btn--danger" onClick={() => onDelete(h)}>
+                        删除
+                      </button>
+                    </span>
                   </div>
                 );
               })}

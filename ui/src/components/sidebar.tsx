@@ -15,7 +15,6 @@ import {
   IconTrash,
 } from "../icons";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
-import { sshEndpointLabel } from "./dialogs";
 
 /** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡）。 */
 export interface PortGroupView {
@@ -72,8 +71,8 @@ export function PortsPanel({
   onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
   /** 右键菜单「设备详情」:打开该设备的只读详情弹窗。 */
   onShowRemoteDetail: (dev: RemoteDevice) => void;
-  /** SSH 设备卡菜单动作（edit=打开管理弹窗编辑 / delete=删除）。连接是 shell 行的事，不进菜单。 */
-  onSshAction: (devId: string, action: "edit" | "delete") => void;
+  /** SSH 设备卡菜单动作（connect=新建终端 / edit=打开管理弹窗编辑 / delete=删除）。 */
+  onSshAction: (devId: string, action: "connect" | "edit" | "delete") => void;
   onRefresh: () => void;
 }) {
   return (
@@ -120,6 +119,7 @@ export function PortsPanel({
                     ]
                   : isSsh
                     ? [
+                        { label: "新建终端", onSelect: () => onSshAction(grp.devId, "connect") },
                         { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
                         { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
                       ]
@@ -140,8 +140,7 @@ export function PortsPanel({
                   // 条目键首段已是桶 devId(本地合并视图的完整 pid)则直通;
                   // 远程 transport 的远端侧键则加桶前缀。幂等。
                   const pid = bucketPidOf(grp.devId, p.name);
-                  // 展示剥设备前缀,只留串口名;SSH 卡显示端点友好名(悬停见原键名)
-                  const shown = isSsh ? sshEndpointLabel(p.name) : displayPortName(p.name);
+                  const shown = displayPortName(p.name); // 展示剥设备前缀,只留串口名/端点名
                   const isActive = pid === activePort;
                   const editingThis = aliasEditPort === pid;
                   // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
@@ -165,8 +164,9 @@ export function PortsPanel({
                           }
                         }}
                       >
+                        {/* SSH shell 行连接中:圆点呼吸(不同于 opened 常亮) */}
                         <span className={`port-item__dot${p.opened ? " open" : ""}${isSsh && grp.connecting ? " busy" : ""}`} />
-                        <span className="port-item__name" title={isSsh ? p.name : undefined}>
+                        <span className="port-item__name">
                           {editingThis ? (
                             <InlineAliasInput
                               initial={p.alias ?? ""}
@@ -180,17 +180,16 @@ export function PortsPanel({
                         </span>
                         {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
                       </div>
-                      {!isSsh && (
-                        <button
-                          className="port-item__edit"
-                          title={`设置 ${shown} 别名`}
-                          aria-label={`设置 ${shown} 别名`}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => onSetAliasEdit(pid)}
-                        >
-                          <IconEdit />
-                        </button>
-                      )}
+                      {/* 别名编辑:串口与 SSH 端点同交互(SSH 分流在 App::commitAlias) */}
+                      <button
+                        className="port-item__edit"
+                        title={`设置 ${shown} 别名`}
+                        aria-label={`设置 ${shown} 别名`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => onSetAliasEdit(pid)}
+                      >
+                        <IconEdit />
+                      </button>
                       {canForce && (
                         <button
                           className="port-item__force"

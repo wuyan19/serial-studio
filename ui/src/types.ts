@@ -148,9 +148,9 @@ export type SshAuth =
 
 /** SSH 设备端点：设备上一个可打开的会话目标（复合键 `${deviceId}::${name}` 的端口段）。
  *  设备=连接身份与生命周期（认证/连接/测试）；端点=连上之后打开什么。
- *  v1 仅 shell（交互终端），由系统默认生成、暂不可编辑；
- *  规划中：exec(命令通道) / serial(远端 /dev/ttyUSB* 直连，可枚举)。 */
-export type SshEndpoint = { name: string; type: "shell" };
+ *  v1 仅 shell（交互终端），由系统默认生成、暂不可增删；alias 同串口别名（侧栏
+ *  铅笔编辑，显示「别名(shell)」）。规划中：exec(命令通道) / serial(远端串口直连)。 */
+export type SshEndpoint = { name: string; type: "shell"; alias?: string };
 
 /** SSH 设备：远程主机的终端会话提供方（像串口一样打开的"端口"来源）。
  *  每台设备一张卡，卡内端点各占一行。
