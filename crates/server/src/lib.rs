@@ -14,6 +14,7 @@ pub mod remotes_store;
 pub mod script_logs;
 pub mod scripts_store;
 pub mod settings;
+pub mod ssh;
 pub mod supervisor;
 pub mod telnet;
 mod ws;
@@ -89,6 +90,9 @@ pub struct AppState {
     /// 远程设备连接池:每注册设备一条 WS 到远端 ss。挂在 AppState(跨 ServiceSupervisor
     /// 热重启保留,连接不重建);start() 惰性幂等,由 supervisor.start 触发。
     pub devices: Arc<device::DeviceClientManager>,
+    /// SSH 设备管理器:注册表 + 每主机会话池(懒建)。挂在 AppState(跨热重启保留)。
+    /// CompositeOpener 按复合键首段路由到这里;会话不常驻重连(与 devices 的 eager 模式不同)。
+    pub ssh: Arc<ssh::SshManager>,
     /// 端口寻址解析:别名(本机/远端)与设备昵称 → 规范键。manager 的 KeyResolver
     /// 与 MCP 直查共用同一实例;meta_bus 驱动别名索引重建。
     pub addresses: Arc<address::AddressResolver>,
@@ -115,6 +119,7 @@ pub fn create_state() -> AppState {
         instance_id.to_string(),
     ));
     devices.bind(std::sync::Arc::downgrade(&devices)); // self-weak:client 握手学习上报用
+    let ssh = Arc::new(ssh::SshManager::from_registry());
     let addresses = Arc::new(address::AddressResolver::new(
         Arc::clone(&devices),
         meta_tx.clone(),
@@ -122,7 +127,7 @@ pub fn create_state() -> AppState {
     ));
     let manager = Arc::new(SerialManager::with_key_resolver(
         event_bus.clone(),
-        Arc::new(device::CompositeOpener::new(Arc::clone(&devices))),
+        Arc::new(device::CompositeOpener::new(Arc::clone(&devices), Arc::clone(&ssh))),
         addresses.key_resolver_fn(),
     ));
     let enable_scripting = Arc::new(std::sync::atomic::AtomicBool::new(
@@ -138,6 +143,7 @@ pub fn create_state() -> AppState {
         closers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         devices,
+        ssh,
         addresses,
         instance_id,
     }
@@ -233,6 +239,21 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             });
         }
     }
+    // SSH 桶(第三来源):注册表端点 + manager 占有权快照里的已开实例(shell@N)。
+    // 端点行 = 静态定义(opened=false/由快照覆盖);实例行 = 运行时产物,列表即时可见。
+    for rec in state.ssh.registry_snapshot() {
+        for ep in &rec.endpoints {
+            views.push(PortView {
+                info: ss_core::PortInfo {
+                    name: ss_core::compose_port_key(&rec.id, &ep.name),
+                    opened: false,
+                    holders: 0,
+                    disconnected: false,
+                },
+                alias: ep.alias.clone(),
+            });
+        }
+    }
     // 本地占有权覆盖远端桶的运行时状态(见函数头注释第 3 条)
     let snap: HashMap<String, ss_core::PortInfo> = state
         .manager
@@ -259,8 +280,9 @@ fn apply_local_override(views: &mut [PortView], snap: &HashMap<String, ss_core::
 
 /// 设置端口别名并广播元数据变更：写 ports.json 后向 meta_bus 发一次通知，
 /// 让所有已连 WS 客户端和本地 Tauri UI 刷新列表。alias 写入的唯一入口（Tauri 命令 / WS action 共用）。
-/// 端口键为复合键:本机端口写本地 ports.json(裸名键);远端设备端口经设备连接
-/// 转发 set_alias(写远端 ports.json——别名归端口所在机器)。
+/// 端口键为复合键:本机端口写本地 ports.json(裸名键);SSH 端点写注册表(别名归端点
+/// 定义,实例行 shell@N 拒绝);远端设备端口经设备连接转发 set_alias(写远端 ports.json
+/// ——别名归端口所在机器)。
 pub fn set_alias_and_notify(
     state: &AppState,
     port: &str,
@@ -270,6 +292,11 @@ pub fn set_alias_and_notify(
     match ss_core::split_port_key(port) {
         (ss_core::LOCAL_DEVICE_ID, name) => {
             port_meta_store::set_alias(name, alias)?;
+            let _ = state.meta_bus.send(());
+            Ok(())
+        }
+        (dev, rest) if state.ssh.has_host(dev) => {
+            state.ssh.set_endpoint_alias(dev, rest, alias)?;
             let _ = state.meta_bus.send(());
             Ok(())
         }

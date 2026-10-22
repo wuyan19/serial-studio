@@ -74,6 +74,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         devices,
+        ssh: Arc::new(ss_server::ssh::SshManager::empty()),
         // 寻址解析(manager 未注入 resolver,此实例仅占位;MCP 直查路径才用)
         addresses: Arc::new(ss_server::address::AddressResolver::new(
             Arc::new(ss_server::device::DeviceClientManager::empty(
@@ -379,6 +380,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         addresses,
         devices,
+        ssh: Arc::new(ss_server::ssh::SshManager::empty()),
         instance_id: "inst-ws-alias".into(),
     };
     let app = create_router(state);

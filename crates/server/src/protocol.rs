@@ -109,6 +109,21 @@ pub enum ServerMsg {
     },
     /// 心跳回复:客户端应用层 ping 的应答(浏览器 WS 不能发协议层 ping,由前端自备探活)。
     Pong,
+    /// ssh_list / ssh_save 的直接回复:注册表全量(注册表变更后也主动重推)。
+    SshHosts {
+        hosts: Vec<crate::ssh::SshHostRecord>,
+    },
+    /// ssh_test 的直接回复:可达性/认证结果(错误信息为空串 = 成功)。
+    SshTestResult {
+        host_id: String,
+        ok: bool,
+        message: String,
+    },
+    /// ssh_next_instance 的直接回复:name = 分配的实例裸名(shell / shell@N)。
+    SshInstance {
+        host_id: String,
+        name: String,
+    },
 }
 
 /// 远程设备在线状态(Devices 快照的条目)。host/port 供前端把"学习到的
@@ -207,6 +222,17 @@ pub enum ClientMsg {
     GetScriptSkill,
     /// 应用层心跳(浏览器 WS 不暴露协议层 ping,由前端定时发,服务端即时回 Pong)。
     Ping,
+    /// SSH 设备管理:全量读注册表。
+    SshList,
+    /// SSH 设备管理:全量写注册表(前端内存权威覆盖,update_registry 同步会话池)。
+    SshSave { hosts: Vec<crate::ssh::SshHostRecord> },
+    /// SSH 设备测试连接(建连+认证,即拆;不动会话池)。hostId 定位注册表条目。
+    SshTest { host_id: String },
+    /// 分配下一个空闲 SSH 实例名(shell / shell@N,见 ssh::next_instance_key)。
+    /// 前端「新建终端」先问名再 open,open 回执的 resolved 与之对齐。
+    SshNextInstance { host_id: String, base: String },
+    /// PTY 尺寸变更(xterm fit → window_change;当前仅 SSH 实例消费,串口忽略)。
+    Resize { port: String, cols: u32, rows: u32 },
 }
 
 fn default_encoding() -> String {

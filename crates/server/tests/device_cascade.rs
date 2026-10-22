@@ -95,10 +95,11 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
     let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), inst));
     devices.bind(Arc::downgrade(&devices)); // 握手学习上报需要 owner
+    let ssh = Arc::new(ss_server::ssh::SshManager::empty());
     let opener: Arc<dyn PortOpener> = if echo {
         Arc::new(EchoOpener)
     } else {
-        Arc::new(CompositeOpener::new(Arc::clone(&devices)))
+        Arc::new(CompositeOpener::new(Arc::clone(&devices), Arc::clone(&ssh)))
     };
     let manager = Arc::new(SerialManager::new(event_bus.clone(), opener));
     let state = AppState {
@@ -116,6 +117,7 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
             inst.into(),
         )),
         devices: Arc::clone(&devices),
+        ssh,
         instance_id: inst.into(),
     };
     let app = create_router(state);

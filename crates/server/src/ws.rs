@@ -800,6 +800,73 @@ async fn handle_client_msg(
             // 应用层心跳应答：客户端用 ping/pong 探活（应对服务端强杀不发 Close frame）
             let _ = out_tx.send(to_json(ServerMsg::Pong)).await;
         }
+        ClientMsg::SshList => {
+            let _ = out_tx
+                .send(to_json(ServerMsg::SshHosts { hosts: state.ssh.registry_snapshot() }))
+                .await;
+        }
+        ClientMsg::SshSave { hosts } => {
+            // 全量覆盖:先落盘(失败即不动内存)再同步会话池,成功后广播列表刷新
+            match crate::ssh::store::save(&hosts).map(|()| {
+                state.ssh.update_registry(hosts);
+            }) {
+                Ok(()) => {
+                    let _ = state.meta_bus.send(()); // 端点/别名变化 → 客户端重拉列表
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::SshHosts { hosts: state.ssh.registry_snapshot() }))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::Error { message: e, port: None, req: None }))
+                        .await;
+                }
+            }
+        }
+        ClientMsg::SshTest { host_id } => {
+            // 直连探测(建连+认证+即拆),不经过会话池;结果带具体失败原因。
+            let rec = state.ssh.registry_snapshot().into_iter().find(|r| r.id == host_id);
+            let result = match rec {
+                None => Err(format!("未知 SSH 设备: {host_id}")),
+                Some(rec) => crate::ssh::session::test_connection(rec).await,
+            };
+            match result {
+                Ok(()) => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::SshTestResult { host_id, ok: true, message: String::new() }))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = out_tx
+                        .send(to_json(ServerMsg::SshTestResult { host_id, ok: false, message: e }))
+                        .await;
+                }
+            }
+        }
+        ClientMsg::SshNextInstance { host_id, base } => {
+            // 以 manager 占有权快照为"已占用"依据:已开实例都在 manager map 里
+            let occupied: Vec<String> = state
+                .manager
+                .snapshot_open_states()
+                .await
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+            let name = crate::ssh::next_instance_key(&host_id, &base, &occupied);
+            let _ = out_tx
+                .send(to_json(ServerMsg::SshInstance { host_id, name }))
+                .await;
+        }
+        ClientMsg::Resize { port, cols, rows } => {
+            // 仅 SSH 实例消费(PTY window_change);串口端口无尺寸概念,静默成功
+            let (dev, rest) = ss_core::split_port_key(&port);
+            if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
+                state.ssh.resize_blocking(dev, rest, cols, rows);
+            }
+            let _ = out_tx
+                .send(to_json(ServerMsg::Ok { message: "resized".into(), port: Some(port), req: None }))
+                .await;
+        }
     }
 }
 

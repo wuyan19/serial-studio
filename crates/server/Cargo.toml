@@ -32,5 +32,7 @@ futures-util = "0.3"
 tokio-tungstenite = "0.21"
 rust-embed = "8"
 mime_guess = "2"
+russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 [dev-dependencies]
+rand = { version = "0.10", features = ["thread_rng"] }

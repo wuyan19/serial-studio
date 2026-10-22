@@ -890,6 +890,7 @@ mod tests {
                 "inst-mcp-test".into(),
             )),
             devices,
+            ssh: Arc::new(crate::ssh::SshManager::empty()),
             instance_id: "inst-mcp-test".into(),
         }
     }

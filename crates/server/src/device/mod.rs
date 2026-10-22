@@ -331,15 +331,16 @@ impl DeviceClientManager {
     }
 }
 
-/// 组合 opener:本地串口走 core 的 serial,远端设备走 DeviceClientManager。
-/// 后缀整体透传(split 首段路由)——级联(A→B→C)逐层剥段,无特判。
+/// 组合 opener:本地串口走 core 的 serial,SSH 设备走 SshManager,其余远端键走
+/// DeviceClientManager。后缀整体透传(split 首段路由)——级联(A→B→C)逐层剥段,无特判。
 pub struct CompositeOpener {
     devices: Arc<DeviceClientManager>,
+    ssh: Arc<crate::ssh::SshManager>,
 }
 
 impl CompositeOpener {
-    pub fn new(devices: Arc<DeviceClientManager>) -> Self {
-        Self { devices }
+    pub fn new(devices: Arc<DeviceClientManager>, ssh: Arc<crate::ssh::SshManager>) -> Self {
+        Self { devices, ssh }
     }
 }
 
@@ -347,6 +348,7 @@ impl ss_core::PortOpener for CompositeOpener {
     fn open(&self, port: &str, config: &SerialConfig) -> Result<Box<dyn PortIo>, SerialError> {
         match split_port_key(port) {
             (ss_core::LOCAL_DEVICE_ID, name) => ss_core::serial::open(name, config),
+            (dev, rest) if self.ssh.has_host(dev) => self.ssh.open_blocking(dev, rest, config),
             (dev, rest) => self.devices.open_blocking(dev, rest, config),
         }
     }

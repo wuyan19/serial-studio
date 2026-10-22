@@ -79,6 +79,7 @@ async fn boot() -> (
         closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         devices,
+        ssh: Arc::new(ss_server::ssh::SshManager::empty()),
         addresses: Arc::new(ss_server::address::AddressResolver::new(
             Arc::new(ss_server::device::DeviceClientManager::empty(
                 tokio::sync::broadcast::channel(16).0,
