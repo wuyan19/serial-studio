@@ -251,8 +251,10 @@ export default function App() {
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
   /** 管理弹窗打开时的编辑种子（侧栏卡「编辑设备」直达表单）；null = 列表视图。 */
   const [sshEditSeed, setSshEditSeed] = useState<string | null>(null);
-  /** 设备连接态（模拟）：connecting=连接中（shell 行圆点呼吸），active=会话活跃（圆点亮）。 */
-  const [sshStates, setSshStates] = useState<Map<string, "connecting" | "active">>(new Map());
+  /** SSH 会话态（预览模拟）：connecting=首连中；instances=已开实例键（"shell"、
+   *  "shell@2"…，序号不复用）；next=下一个实例序号。空 instances=未连接。
+   *  实例=行：holders 数字保持全局语义「共享该流的人数」，实例数即行数。 */
+  const [sshStates, setSshStates] = useState<Map<string, { connecting: boolean; instances: string[]; next: number }>>(new Map());
   /** 测试连接结果（模拟）：testing=测试中，ok=可达。 */
   const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok">>(new Map());
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
@@ -1298,10 +1300,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
   const triggerPort = (pid: PortId) => {
-    // SSH 设备 shell 行：预览模拟连接，不走串口 open 流程（无配置框、无后端）
-    const sshHost = sshHosts.find((h) => h.id === parsePortId(pid).devId);
+    // SSH 设备端点行：预览模拟多实例（预览不走串口 open 流程，无配置框、无后端）
+    const { devId: trigDev, name: trigName } = parsePortId(pid);
+    const sshHost = sshHosts.find((h) => h.id === trigDev);
     if (sshHost) {
-      connectSsh(sshHost);
+      triggerSshRow(sshHost, trigName);
       return;
     }
     if (disconnectedPorts.has(pid)) {
@@ -1465,22 +1468,37 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   };
 
-  /** 连接模拟：connecting → 900ms 后置 active；active 态再触发 = 断开回未连接。 */
-  const connectSsh = (host: SshHost) => {
+  /** 新建终端（预览模拟）：未连接→首连（900ms 后 shell 实例出现）；已连接→追加实例
+   *  shell@N（序号只增不复用，关掉的实例号不回收——同 tab 语义）。 */
+  const newShellSession = (host: SshHost) => {
     const st = sshStates.get(host.id);
-    if (st === "connecting") return;
-    if (st === "active") {
-      setSshStates((prev) => {
-        const n = new Map(prev);
-        n.delete(host.id);
-        return n;
-      });
+    if (st?.connecting) return;
+    if (!st || st.instances.length === 0) {
+      setSshStates((prev) => new Map(prev).set(host.id, { connecting: true, instances: [], next: 2 }));
+      window.setTimeout(() => {
+        setSshStates((prev) => new Map(prev).set(host.id, { connecting: false, instances: ["shell"], next: 2 }));
+      }, 900);
       return;
     }
-    setSshStates((prev) => new Map(prev).set(host.id, "connecting"));
-    window.setTimeout(() => {
-      setSshStates((prev) => new Map(prev).set(host.id, "active"));
-    }, 900);
+    setSshStates((prev) => {
+      const cur = prev.get(host.id) ?? { connecting: false, instances: [], next: 2 };
+      const n = cur.next;
+      return new Map(prev).set(host.id, { ...cur, instances: [...cur.instances, `shell@${n}`], next: n + 1 });
+    });
+  };
+
+  /** 点 SSH 端点行（预览模拟）：未连接=首连；已开实例=关闭该实例（末位关闭即回未连接态）。 */
+  const triggerSshRow = (host: SshHost, name: string) => {
+    const st = sshStates.get(host.id);
+    if (!st || st.instances.length === 0) {
+      newShellSession(host);
+      return;
+    }
+    if (st.instances.includes(name)) {
+      setSshStates((prev) =>
+        new Map(prev).set(host.id, { ...st, instances: st.instances.filter((k) => k !== name) }),
+      );
+    }
   };
 
   /** 测试连接模拟：testing → 800ms 后 ok（管理表显示「✓ 可达（预览）」）。 */
@@ -1495,11 +1513,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
-    if (action === "connect") {
-      // 预览为单会话模拟：已活跃时新建终端暂无效果（后端接入后=开新 channel）
-      if (sshStates.get(host.id) === "active") pushToast(true, "UI 预览：暂模拟单会话，多终端待后端接入");
-      else connectSsh(host);
-    } else if (action === "edit") openSshManager(host.id);
+    if (action === "connect") newShellSession(host);
+    else if (action === "edit") openSshManager(host.id);
     else deleteSshHost(host);
   };
 
@@ -1613,21 +1628,23 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     })),
     ...sshHosts.map((h) => {
       const st = sshStates.get(h.id);
-      // 端点驱动端口行（v1 恒为 shell；加载/保存路径已归一化，兜底防手工改库)
       const eps = h.endpoints?.length ? h.endpoints : defaultSshEndpoints();
+      const aliasOfName = (n: string) => eps.find((e) => e.name === n)?.alias;
+      // 实例=行：未连接时列端点定义（点=首连）；有实例时列实例（shell、shell@2…，
+      // 各自独立开关）。holders 恒为"共享该流的人数"语义——预览恒 1，不承载实例数。
+      const rows =
+        st && st.instances.length > 0
+          ? st.instances.map((name) => ({ name, opened: true, holders: 1, alias: aliasOfName(name) }))
+          : eps.map((ep) => ({ name: ep.name, opened: false, holders: 0, alias: ep.alias }));
       return {
         devId: h.id,
         label: h.nickname?.trim() || `${h.username}@${h.host}`,
         detail: `${h.username}@${h.host}:${h.port}`,
         kind: "ssh" as const,
-        connecting: st === "connecting",
-        // 端点行状态即会话状态：opened=活跃（圆点亮 + holders 1），connecting 由卡级标志驱动呼吸
-        ports: eps.map((ep) => ({
-          name: ep.name,
-          opened: st === "active",
-          holders: st === "active" ? 1 : 0,
-          alias: ep.alias,
-        })),
+        connecting: st?.connecting ?? false,
+        // 端点名白名单：铅笔别名只对定义行开放（实例行 shell@N 的别名挂在定义上）
+        aliasableNames: eps.map((e) => e.name),
+        ports: rows,
       };
     }),
   ];

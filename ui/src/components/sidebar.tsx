@@ -27,6 +27,8 @@ export interface PortGroupView {
   kind?: "ssh";
   /** ssh shell 行连接中（圆点呼吸动画）。 */
   connecting?: boolean;
+  /** SSH 端点名白名单：铅笔别名只对端点定义行开放（实例行 shell@N 不挂铅笔）。 */
+  aliasableNames?: string[];
   /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
   detail?: string;
 }
@@ -147,6 +149,8 @@ export function PortsPanel({
                   // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
                   // SSH 卡无此语义(会话即本卡 shell 行),同样隐藏。
                   const canForce = !isSsh && getMode() === "local" && p.opened;
+                  // SSH 实例行（shell@N）不挂铅笔：别名属于端点定义
+                  const canAlias = !isSsh || !grp.aliasableNames || grp.aliasableNames.includes(p.name);
                   return (
                     <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
                       <div
@@ -180,16 +184,18 @@ export function PortsPanel({
                         </span>
                         {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
                       </div>
-                      {/* 别名编辑:串口与 SSH 端点同交互(SSH 分流在 App::commitAlias) */}
-                      <button
-                        className="port-item__edit"
-                        title={`设置 ${shown} 别名`}
-                        aria-label={`设置 ${shown} 别名`}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => onSetAliasEdit(pid)}
-                      >
-                        <IconEdit />
-                      </button>
+                      {/* 别名编辑:串口与 SSH 端点定义行同交互(SSH 分流在 App::commitAlias) */}
+                      {canAlias && (
+                        <button
+                          className="port-item__edit"
+                          title={`设置 ${shown} 别名`}
+                          aria-label={`设置 ${shown} 别名`}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => onSetAliasEdit(pid)}
+                        >
+                          <IconEdit />
+                        </button>
+                      )}
                       {canForce && (
                         <button
                           className="port-item__force"
