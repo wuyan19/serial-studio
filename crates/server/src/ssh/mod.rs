@@ -275,14 +275,11 @@ impl SshManager {
             .cloned()
     }
 
-    /// 惰性回收实例别名:按 manager 快照(已开端口全集)retain——已关实例的别名
-    /// 不再驻留内存表/寻址索引(实现"关闭即失"语义;回收时机为下一次列表合并,
-    /// 非事件驱动,陈旧窗口只到下次 list)。
-    pub fn retain_instance_aliases(&self, open_full_keys: &std::collections::HashSet<String>) {
-        self.instance_aliases
-            .lock()
-            .unwrap()
-            .retain(|k, _| open_full_keys.contains(k));
+    /// 惰性回收实例别名:按谓词 retain(调用方传 manager 快照的成员判定——
+    /// 已关实例的别名不再驻留内存表/寻址索引,实现"关闭即失"语义;回收时机为
+    /// 下一次列表合并,非事件驱动,陈旧窗口只到下次 list)。
+    pub fn retain_instance_aliases(&self, keep: impl Fn(&str) -> bool) {
+        self.instance_aliases.lock().unwrap().retain(|k, _| keep(k));
     }
 
     /// 设置别名(端点优先,实例兜底)。端点命中写注册表(落盘);实例命中写内存表

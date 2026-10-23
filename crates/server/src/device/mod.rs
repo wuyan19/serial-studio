@@ -267,7 +267,14 @@ impl DeviceClientManager {
             .lock()
             .unwrap()
             .values()
-            .map(|c| (c.device().clone(), c.online()))
+            .map(|c| {
+                // dev 是构造时快照,就地改名(update_registry→set_nickname)只写
+                // nickname 锁——读昵称一律走 nickname()(同 adopt_device_id 的教训),
+                // 否则改名后 list 的 DeviceView.label 恒旧值直到 client 重建。
+                let mut dev = c.device().clone();
+                dev.nickname = c.nickname();
+                (dev, c.online())
+            })
             .collect()
     }
 

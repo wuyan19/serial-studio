@@ -645,9 +645,36 @@ async fn instance_rows_visible_in_list() {
     assert_eq!(base.info.holders, 1, "基端点行应回填本地 holders");
     assert!(base.info.opened, "基端点行 opened 由快照覆盖");
 
+    // 实例别名生命周期:开着的实例别名随 list 注入;release + 下次 list 后回收
+    // (retain 语义回归——两个方向的坏法都要能被抓住:开着被误清/关了不清)。
+    assert!(ssh
+        .set_ssh_alias("hlist", "shell@2", Some("临时别名".into()))
+        .is_ok());
+    let views2 = ss_server::list_ports_with_meta(&state).await;
+    assert_eq!(
+        views2
+            .iter()
+            .find(|v| v.info.name == "hlist::shell@2")
+            .unwrap()
+            .alias
+            .as_deref(),
+        Some("临时别名"),
+        "开着时实例别名随 list 注入"
+    );
+
     // 收尾:释放两端点,读线程退出,runtime 才能关闭
     let _ = manager.release("hlist::shell", sess1).await;
     let _ = manager.release("hlist::shell@2", sess2).await;
+    let views3 = ss_server::list_ports_with_meta(&state).await;
+    assert!(
+        !views3.iter().any(|v| v.info.name == "hlist::shell@2"),
+        "关闭后实例行随快照消失"
+    );
+    assert_eq!(
+        ssh.instance_alias_of("hlist::shell@2"),
+        None,
+        "关闭后实例别名被惰性回收"
+    );
 }
 
 /// Bug 回归 2:脚本寻址「设备昵称::shell」必须解析到 SSH 设备 id(此前 SSH 昵称

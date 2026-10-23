@@ -241,6 +241,21 @@ fn rewrite_remote_device(device: &mut Option<DeviceView>, direct: &DeviceView) {
     }
 }
 
+/// 旧版对端透传的多级行(线名自身含 `::`)不带 device 字段，而 origin 恰在线名
+/// 首段——合成最小属主视图(id=首段，via=remote，无昵称/地址)，不归直连中转
+/// (None 若直接走直连改写会把 origin 标成中转设备)。裸名返回 None(对端自家
+/// 串口，走直连改写)。新对端自带 device，不经此函数。
+fn legacy_origin_view(wire: &str) -> Option<DeviceView> {
+    let (origin, _) = ss_core::split_port_key(wire);
+    (origin != ss_core::LOCAL_DEVICE_ID).then(|| DeviceView {
+        id: origin.into(),
+        label: origin.into(),
+        detail: None,
+        via: "remote".into(),
+        online: None,
+    })
+}
+
 /// 端口键的裸名部分(剥设备前缀)。ports.json 按裸名存本机端口的别名——
 /// 本机端口键本就是裸名(遗留 `local::` 输入经 normalize 剥除),此函数对本机口
 /// 恒等;远端口别名随远端 PortView 透传,不走本地 ports.json。
@@ -344,7 +359,10 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             else {
                 continue; // 环(段重复/绕回)或超深,不透传
             };
-            let mut device = pv.device.clone();
+            let mut device = pv
+                .device
+                .clone()
+                .or_else(|| legacy_origin_view(&pv.info.name));
             if let Some(direct) = direct_devices.get(&dev_id) {
                 rewrite_remote_device(&mut device, direct);
             }
@@ -387,9 +405,11 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         .into_iter()
         .map(|p| (p.name.clone(), p))
         .collect();
+    let ssh_by_id: HashMap<&str, &ssh::SshHostRecord> =
+        ssh_regs.iter().map(|r| (r.id.as_str(), r)).collect();
     for (name, info) in &snap {
         let (first, rest) = ss_core::split_port_key(name);
-        if let Some(rec) = ssh_regs.iter().find(|r| r.id == first) {
+        if let Some(rec) = ssh_by_id.get(first) {
             // 实例行的 kind 按端点定义(shell@2 → shell 的 type);端点被删的
             // 残留实例兜底 "ssh"。
             let base = rest.split('@').next().unwrap_or(rest);
@@ -418,8 +438,7 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     apply_local_override(&mut views, &snap);
     // 实例别名惰性回收:快照是已开端口全集,已关实例的别名不再驻留内存表/寻址
     // 索引(回收时机为下一次列表合并,非事件驱动——足够:陈旧窗口只到下次 list)。
-    let open_keys: HashSet<String> = snap.keys().cloned().collect();
-    state.ssh.retain_instance_aliases(&open_keys);
+    state.ssh.retain_instance_aliases(|k| snap.contains_key(k));
     views
 }
 
@@ -693,6 +712,33 @@ mod tests {
         assert_eq!(instance_no("shell@2"), Some(2));
         assert_eq!(instance_no("shell"), None);
         assert_eq!(instance_no("a@b"), None); // 尾段非数字 → 端点名,非实例
+    }
+
+    /// 旧版对端多级行的 origin 合成:多段线名 → 首段为属主(via=remote);
+    /// 裸名 → None(对端自家串口,走直连改写)。与改写函数组合后不归中转。
+    #[test]
+    fn legacy_origin_view_synthesizes_first_segment() {
+        let origin = legacy_origin_view("dev-c::COM3").unwrap();
+        assert_eq!(origin.id, "dev-c");
+        assert_eq!(origin.via, "remote");
+        assert_eq!(origin.label, "dev-c"); // 无昵称来源,id 即展示名
+        assert_eq!(origin.detail, None);
+        assert_eq!(legacy_origin_view("COM3"), None, "裸名=对端自家串口");
+        // 组合:合成的 origin 视角经直连改写不被覆盖(via=remote 非 local)
+        let direct = DeviceView {
+            id: "dev-b".into(),
+            label: "中转".into(),
+            detail: None,
+            via: "remote".into(),
+            online: Some(true),
+        };
+        let mut device = legacy_origin_view("dev-c::COM3");
+        rewrite_remote_device(&mut device, &direct);
+        assert_eq!(device.as_ref().unwrap().id, "dev-c", "多级行不归直连中转");
+        // 裸名(无 legacy 视图)仍归直连设备
+        let mut bare = legacy_origin_view("COM3");
+        rewrite_remote_device(&mut bare, &direct);
+        assert_eq!(bare.as_ref().unwrap().id, "dev-b");
     }
 
     /// 回归(PC3 远程显示 1 而非 3):远端设备端口的 holders 必须保留远端桶缓存值
