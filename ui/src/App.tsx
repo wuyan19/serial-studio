@@ -1662,6 +1662,19 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) =>
     g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })),
   );
+  /** 端口面板条目的设备标注:复合键端点名可能跨设备重名(两台 SSH 设备各有 shell)。
+   *  判据用服务端原始名(p.name)的首段——SSH 端点/远程口在服务端已是复合键,首段即
+   *  属主设备;裸串口名(连接服务器自身枚举)无 ::,不标。SSH 标 昵称|user@host,
+   *  远程设备标 昵称|host:port。 */
+  const portDeviceLabelOf = (name: string): string | undefined => {
+    const idx = name.indexOf("::");
+    if (idx < 0) return undefined;
+    const devId = name.slice(0, idx);
+    const ssh = sshHosts.find((h) => h.id === devId);
+    if (ssh) return ssh.nickname?.trim() || `${ssh.username}@${ssh.host}`;
+    const r = remotes.find((r) => r.id === devId);
+    return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
+  };
   /** 详情弹窗设备（按 id 实时查找；设备被删 → undefined → 弹窗不渲染，自然关闭）。 */
   const remoteDetail = remoteDetailId ? remotes.find((r) => r.id === remoteDetailId) : undefined;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
@@ -2327,6 +2340,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       {portPaletteOpen && (
         <PortPalette
           ports={allPorts}
+          deviceOf={portDeviceLabelOf}
           onSelect={triggerPort}
           onClose={() => {
             setPortPaletteOpen(false);

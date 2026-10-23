@@ -263,13 +263,18 @@ export function ScriptPalette({
 
 // ===== 串口选择面板（Ctrl+I）=====
 
-/** 串口选择面板：模糊搜索端口，方向键选择，回车打开（onSelect 走与点端口行同一流程）。 */
+/** 串口选择面板：模糊搜索端口，方向键选择，回车打开（onSelect 走与点端口行同一流程）。
+ *  复合键端口(SSH 端点/远程口)的端点名可能跨设备重名(两台设备各有 shell)——
+ *  deviceOf 给出设备标注,渲染为条目第二行(同宏/脚本面板的 desc 位)并纳入搜索词。 */
 export function PortPalette({
   ports,
+  deviceOf,
   onSelect,
   onClose,
 }: {
   ports: (PortInfo & { pid: PortId })[];
+  /** 服务端原始端口名的设备标注(复合键首段=属主设备);裸串口名返回 undefined 不显示。 */
+  deviceOf?: (name: string) => string | undefined;
   onSelect: (pid: PortId) => void;
   onClose: () => void;
 }) {
@@ -281,15 +286,16 @@ export function PortPalette({
   useDialogA11y(dialogRef, inputRef);
 
   const filtered = useMemo(() => {
-    const matched: { pid: PortId; score: number; first: number }[] = [];
+    const matched: { pid: PortId; dev?: string; score: number; first: number }[] = [];
     for (const p of ports) {
-      const hay = p.alias ? `${p.alias} ${p.name}` : p.name;
+      const dev = deviceOf?.(p.name);
+      const hay = [p.name, p.alias, dev].filter(Boolean).join(" ");
       const m = fuzzyMatch(query, hay);
-      if (m) matched.push({ pid: p.pid, score: m.score, first: m.first });
+      if (m) matched.push({ pid: p.pid, dev, score: m.score, first: m.first });
     }
     matched.sort((a, b) => a.score - b.score || a.first - b.first || a.pid.localeCompare(b.pid));
-    return matched.map((x) => x.pid);
-  }, [ports, query]);
+    return matched.map((x) => ({ pid: x.pid, dev: x.dev }));
+  }, [ports, query, deviceOf]);
   useSelectedIntoView(listRef, selected, filtered.length);
 
   useEffect(() => {
@@ -319,8 +325,8 @@ export function PortPalette({
       if (filtered.length) setSelected((i) => (i - 1 + filtered.length) % filtered.length);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const pid = filtered[selected] ?? filtered[0];
-      if (pid) commit(pid);
+      const item = filtered[selected] ?? filtered[0];
+      if (item) commit(item.pid);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onClose();
@@ -342,7 +348,7 @@ export function PortPalette({
         />
         <div className="palette__list" ref={listRef}>
           {filtered.length === 0 && <div className="palette__empty">无匹配串口</div>}
-          {filtered.map((pid, i) => (
+          {filtered.map(({ pid, dev }, i) => (
             <button
               type="button"
               key={pid}
@@ -353,6 +359,7 @@ export function PortPalette({
               <span className="palette__name">
                 <PortLabel name={displayPortName(byPid[pid]?.name ?? pid)} alias={byPid[pid]?.alias} />
               </span>
+              {dev && <span className="palette__desc">{dev}</span>}
             </button>
           ))}
         </div>
