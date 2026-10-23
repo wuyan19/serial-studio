@@ -1082,22 +1082,31 @@ export function SshManagerDialog({
   /** 打开时直达某设备的编辑视图（侧栏卡「编辑设备」入口）；null = 列表视图。 */
   seedEditId: string | null;
 }) {
-  // 种子只在挂载时生效（App 以 {sshManagerOpen && <SshManagerDialog/>} 控制挂载）
+  // 种子只在挂载时生效（App 以 {sshManagerOpen && <SshManagerDialog/>} 控制挂载）。
+  // seeded=右键「编辑设备」直接进入表单:列表不渲染(否则透过表单遮罩仍见列表弹窗,
+  // 双模态叠加),返回/保存/Esc 关闭整个弹窗——用户意图是改这一台,不是浏览列表。
+  const seeded = seedEditId != null;
   const [form, setForm] = useState<null | { mode: "add" } | { mode: "edit"; host: SshHost }>(() => {
     const seed = seedEditId ? hosts.find((h) => h.id === seedEditId) : undefined;
     return seed ? { mode: "edit", host: seed } : null;
   });
-  // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回列表，对话框栈仲裁）
+  // 列表进入:返回 = 回列表;种子直达:返回 = 关闭
+  const exitForm = () => {
+    if (seeded) onClose();
+    else setForm(null);
+  };
+  // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回，对话框栈仲裁）
   useEscClose(() => {
     if (form === null) onClose();
-    else setForm(null);
+    else exitForm();
   });
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
 
   return (
     <>
-      <div className="dialog-overlay">
+      {form === null && (
+        <div className="dialog-overlay">
         <div
           ref={dialogRef}
           role="dialog"
@@ -1162,15 +1171,16 @@ export function SshManagerDialog({
             </button>
           </div>
         </div>
-      </div>
+        </div>
+      )}
       {form && (
         <SshHostForm
           initial={form.mode === "edit" ? form.host : null}
           existing={hosts}
-          onBack={() => setForm(null)}
+          onBack={exitForm}
           onSave={(h) => {
             onCommit(h, form.mode === "add");
-            setForm(null);
+            exitForm(); // 种子直达=保存即关,列表进入=回列表(可见更新后的行)
           }}
         />
       )}
