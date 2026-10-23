@@ -39,6 +39,7 @@ import {
   persistScriptArgs,
   persistScripts,
   portIdOf,
+  sanitizeFileName,
   saveConfig,
   saveConn,
   tauriInvoke,
@@ -2210,8 +2211,13 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConfirm={async (names) => {
             const obj: Record<string, Macro> = {};
             for (const n of names) obj[n] = macros[n];
+            // 单选→「名.macro.json」(与编辑器内单导出同名)；多选/全选→默认集合名
+            const filename =
+              names.length === 1
+                ? `${sanitizeFileName(names[0])}.macro.json`
+                : "serial-studio-macros.json";
             try {
-              const saved = await downloadJson("serial-studio-macros.json", obj);
+              const saved = await downloadJson(filename, obj);
               if (saved) setExportMacrosOpen(false); // 用户取消（saved=false）则保持对话框打开
             } catch (e) {
               libError(`导出失败：${String(e)}，请重试或更换保存位置`);
@@ -2228,8 +2234,13 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConfirm={async (names) => {
             const obj: Record<string, Script> = {};
             for (const n of names) obj[n] = scripts[n];
+            // 单选→「名.script.json」(与编辑器内单导出同名)；多选/全选→默认集合名
+            const filename =
+              names.length === 1
+                ? `${sanitizeFileName(names[0])}.script.json`
+                : "serial-studio-scripts.json";
             try {
-              const saved = await downloadJson("serial-studio-scripts.json", obj);
+              const saved = await downloadJson(filename, obj);
               if (saved) setExportScriptsOpen(false);
             } catch (e) {
               libError(`导出失败：${String(e)}，请重试或更换保存位置`);

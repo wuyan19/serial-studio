@@ -2,7 +2,7 @@
 newStep/validateMacro 是宏步骤的纯函数入口（App 导入宏 spec 用）。 */
 import { useEffect, useRef, useState } from "react";
 import type { Macro, MacroStep, Script, ScriptParam, StepType } from "../types";
-import { downloadJson, parseParamsFromCode } from "../lib";
+import { downloadJson, parseParamsFromCode, sanitizeFileName } from "../lib";
 import { IconAlert, IconBolt, IconChevronDown, IconChevronUp, IconClose, IconCode, IconCopy, IconExpand, IconExport, IconGrip, IconInfo, IconPlus, IconTrash } from "../icons";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { ConfigRow, useDialogA11y, useEscClose } from "./primitives";
@@ -324,7 +324,7 @@ export function MacroEditor({
               onClick={async () => {
                 const n = name.trim() || "macro";
                 try {
-                  await downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: macro });
+                  await downloadJson(`${sanitizeFileName(n)}.macro.json`, { [n]: macro });
                 } catch (e) {
                   console.error("导出失败", e);
                 }
@@ -487,7 +487,7 @@ export function ScriptEditor({
               onClick={async () => {
                 const n = name.trim() || "script";
                 try {
-                  await downloadJson(`${n.replace(/[<>:"/\\|?*]/g, "_")}.json`, { [n]: script });
+                  await downloadJson(`${sanitizeFileName(n)}.script.json`, { [n]: script });
                 } catch (e) {
                   console.error("导出失败", e);
                 }
