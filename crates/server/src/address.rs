@@ -272,7 +272,8 @@ impl Inner {
         }
         // 撞词警告:设备昵称 ∈ 别名索引 → 裸名(走别名)与 昵称::(走设备)可能指向
         // 不同目标——解析各自确定,但同一词两种形式含义分叉,起名撞词时留痕提醒。
-        let mut nicks: std::collections::HashSet<String> = self.devices.nicknames().into_iter().collect();
+        let mut nicks: std::collections::HashSet<String> =
+            self.devices.nicknames().into_iter().collect();
         nicks.extend(self.ssh.registry_nicknames());
         for n in nicks {
             if map.contains_key(&n) {
@@ -348,7 +349,12 @@ mod tests {
             port: 1,
             nickname: Some("test".into()),
         }]);
-        AddressResolver::new(Arc::clone(&devices), Arc::new(crate::ssh::SshManager::empty()), meta_tx, "inst-self".into())
+        AddressResolver::new(
+            Arc::clone(&devices),
+            Arc::new(crate::ssh::SshManager::empty()),
+            meta_tx,
+            "inst-self".into(),
+        )
     }
 
     fn real_names_of(names: &[&str]) -> RealNames {

@@ -649,7 +649,9 @@ impl DeviceClient {
                     self.route_legacy_ok();
                 }
             },
-            ServerMsg::Error { message, port, req, .. } => {
+            ServerMsg::Error {
+                message, port, req, ..
+            } => {
                 // open/write/set_alias 失败都走 Error;有 port 按 req/端口路由,
                 // 无 port(旧版服务端)按 FIFO 兜底,都没有只留痕
                 match port {

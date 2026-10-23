@@ -228,17 +228,31 @@ pub enum ClientMsg {
     Ping,
     /// SSH 设备管理:全量读注册表。
     SshList,
-    /// SSH 设备管理:全量写注册表(前端内存权威覆盖,update_registry 同步会话池)。
-    SshSave { hosts: Vec<crate::ssh::SshHostRecord> },
+    /// SSH 设备管理:全量写注册表(前端内存权威覆盖;变更/删除的设备终结其活会话,
+    /// 终端转断开态,reopen 按新记录重建)。
+    SshSave {
+        hosts: Vec<crate::ssh::SshHostRecord>,
+    },
     /// SSH 设备测试连接(建连+认证,即拆;不动会话池)。hostId 定位注册表条目。
-    SshTest { host_id: String },
+    SshTest {
+        host_id: String,
+    },
     /// 分配下一个空闲 SSH 实例名(shell / shell@N,见 ssh::next_instance_key)。
     /// 前端「新建终端」先问名再 open,open 回执的 resolved 与之对齐。
-    SshNextInstance { host_id: String, base: String },
+    SshNextInstance {
+        host_id: String,
+        base: String,
+    },
     /// PTY 尺寸变更(xterm fit → window_change;当前仅 SSH 实例消费,串口忽略)。
-    Resize { port: String, cols: u32, rows: u32 },
+    Resize {
+        port: String,
+        cols: u32,
+        rows: u32,
+    },
     /// 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断,不动会话池。
-    SshTrustHost { host_id: String },
+    SshTrustHost {
+        host_id: String,
+    },
 }
 
 fn default_encoding() -> String {

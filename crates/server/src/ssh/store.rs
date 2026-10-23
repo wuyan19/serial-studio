@@ -15,7 +15,11 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 /// 认证方式（判别联合，线上 tag="type"、字段 camelCase——与前端 TS 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SshAuthRecord {
     Key { key_path: String },
     Agent,
@@ -115,7 +119,8 @@ pub fn load_known_hosts() -> HashMap<String, String> {
 fn save_known_hosts(map: &HashMap<String, String>) -> Result<(), String> {
     let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
     let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
-    std::fs::write(known_file(&dir), json).map_err(|e| format!("写入 ssh_known_hosts.json 失败: {e}"))
+    std::fs::write(known_file(&dir), json)
+        .map_err(|e| format!("写入 ssh_known_hosts.json 失败: {e}"))
 }
 
 pub fn known_host_key(host: &str, port: u16) -> String {
@@ -125,7 +130,9 @@ pub fn known_host_key(host: &str, port: u16) -> String {
 /// 查询已信任指纹（None = 首次连接）。
 pub fn known_fingerprint(host: &str, port: u16) -> Option<String> {
     let _g = LOCK.lock().expect("ssh store lock poisoned");
-    load_known_hosts_locked().get(&known_host_key(host, port)).cloned()
+    load_known_hosts_locked()
+        .get(&known_host_key(host, port))
+        .cloned()
 }
 
 /// 记住指纹（TOFU 首连 / 显式信任）。
@@ -168,7 +175,12 @@ mod tests {
     fn wire_camel_case_roundtrip() {
         let json = r#"{"id":"u1","host":"192.168.1.9","port":2222,"username":"pi","nickname":"网关","auth":{"type":"key","keyPath":"~/.ssh/id_ed25519"},"endpoints":[{"name":"shell","type":"shell","alias":"控制台"}]}"#;
         let r: SshHostRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(r.auth, SshAuthRecord::Key { key_path: "~/.ssh/id_ed25519".into() });
+        assert_eq!(
+            r.auth,
+            SshAuthRecord::Key {
+                key_path: "~/.ssh/id_ed25519".into()
+            }
+        );
         assert_eq!(r.endpoints[0].alias.as_deref(), Some("控制台"));
         let back = serde_json::to_string(&r).unwrap();
         assert!(back.contains("\"keyPath\""), "序列化保持 camelCase: {back}");
@@ -178,8 +190,16 @@ mod tests {
     fn password_auth_shape() {
         let json = r#"{"id":"u2","host":"h","port":22,"username":"a","auth":{"type":"password","password":"pw"}}"#;
         let r: SshHostRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(r.auth, SshAuthRecord::Password { password: "pw".into() });
-        assert!(r.endpoints.is_empty(), "端点缺失走 ensure_default_endpoints 兜底");
+        assert_eq!(
+            r.auth,
+            SshAuthRecord::Password {
+                password: "pw".into()
+            }
+        );
+        assert!(
+            r.endpoints.is_empty(),
+            "端点缺失走 ensure_default_endpoints 兜底"
+        );
         let fixed = ensure_default_endpoints(r);
         assert_eq!(fixed.endpoints[0].name, "shell");
     }

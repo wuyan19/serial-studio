@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use russh::client::{self, Handle};
 use russh::keys::agent::client::AgentClient;
-use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::keys::ssh_key::HashAlg;
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg};
 
 use super::port_io::SshSharedIo;
@@ -42,7 +42,14 @@ pub(crate) enum SshCommand {
     /// 关闭实例(SshPortIo drop 触发):移出实例表 → 实例任务收尾。
     CloseInstance { instance: String },
     /// PTY 尺寸变更(xterm fit → window_change)。
-    Resize { instance: String, cols: u32, rows: u32 },
+    Resize {
+        instance: String,
+        cols: u32,
+        rows: u32,
+    },
+    /// 终结整个会话(注册表变更/删除设备):走统一收尾——标 dead + disconnect +
+    /// 实例级联关闭。终端表现为断开(USB 拔插模型),reopen 按新记录重建。
+    Shutdown,
 }
 
 /// 实例内命令(命令循环 → 实例任务)。
@@ -71,7 +78,12 @@ pub(crate) async fn run_session(
         Ok(h) => h,
         Err(e) => {
             dead.store(true, Ordering::Release);
-            tracing::warn!("SSH 设备 {}({}) 连接失败: {}", record.label(), record.id, e.message());
+            tracing::warn!(
+                "SSH 设备 {}({}) 连接失败: {}",
+                record.label(),
+                record.id,
+                e.message()
+            );
             while let Ok(cmd) = cmd_rx.try_recv() {
                 if let SshCommand::Open { reply, .. } = cmd {
                     let _ = reply.send(Err(e.clone()));
@@ -128,11 +140,10 @@ pub fn trust_host_key(record: SshHostRecord) -> Result<String, String> {
         let checker = TrustAndRecordChecker {
             seen: Arc::clone(&seen),
         };
-        let handle = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(
-            config,
-            (record.host.as_str(), record.port),
-            checker,
-        ))
+        let handle = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            client::connect(config, (record.host.as_str(), record.port), checker),
+        )
         .await
         .map_err(|_| format!("连接 {}:{} 超时", record.host, record.port))?
         .map_err(|e| format!("连接失败: {e}"))?;
@@ -144,7 +155,11 @@ pub fn trust_host_key(record: SshHostRecord) -> Result<String, String> {
         };
         store::remember_fingerprint(&record.host, record.port, &fp)
             .map_err(|e| format!("写入 known_hosts 失败: {e}"))?;
-        tracing::info!("SSH {}:{} 指纹已经用户确认并记录: {fp}", record.host, record.port);
+        tracing::info!(
+            "SSH {}:{} 指纹已经用户确认并记录: {fp}",
+            record.host,
+            record.port
+        );
         Ok(fp)
     })
 }
@@ -162,15 +177,24 @@ pub async fn test_connection(record: SshHostRecord) -> Result<(), SshOpenError> 
 impl client::Handler for HostKeyChecker {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         let fp = fingerprint_of(key);
         let kt = key_type_of(key);
         match store::known_fingerprint(&self.host, self.port) {
             Some(known) if known == fp => Ok(true),
             None => {
-                tracing::info!("SSH 首连 {}:{} 指纹未登记({kt} {fp}),拒绝待确认", self.host, self.port);
-                *self.classified.lock().unwrap() =
-                    Some(SshOpenError::HostKeyUnknown { fingerprint: fp, key_type: kt });
+                tracing::info!(
+                    "SSH 首连 {}:{} 指纹未登记({kt} {fp}),拒绝待确认",
+                    self.host,
+                    self.port
+                );
+                *self.classified.lock().unwrap() = Some(SshOpenError::HostKeyUnknown {
+                    fingerprint: fp,
+                    key_type: kt,
+                });
                 Ok(false)
             }
             Some(known) => {
@@ -198,7 +222,10 @@ struct TrustAndRecordChecker {
 impl client::Handler for TrustAndRecordChecker {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         *self.seen.lock().unwrap() = Some((fingerprint_of(key), key_type_of(key)));
         Ok(true)
     }
@@ -220,7 +247,12 @@ async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecke
         };
         let mut handle = client::connect(config, (record.host.as_str(), record.port), checker)
             .await
-            .map_err(|e| SshOpenError::into_freeform(format!("连接 {}:{} 失败: {e}", record.host, record.port)))?;
+            .map_err(|e| {
+                SshOpenError::into_freeform(format!(
+                    "连接 {}:{} 失败: {e}",
+                    record.host, record.port
+                ))
+            })?;
         if !authenticate(&mut handle, &record.username, &record.auth).await? {
             return Err(SshOpenError::AuthFailed {
                 method: auth_label(&record.auth).to_string(),
@@ -235,16 +267,14 @@ async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecke
             let cls = classified.lock().unwrap().take();
             Err(cls.unwrap_or(e))
         }
-        Err(_) => Err(classified
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| SshOpenError::into_freeform(format!(
+        Err(_) => Err(classified.lock().unwrap().take().unwrap_or_else(|| {
+            SshOpenError::into_freeform(format!(
                 "连接 {}:{} 超时({}秒)",
                 record.host,
                 record.port,
                 CONNECT_TIMEOUT.as_secs()
-            )))),
+            ))
+        })),
     }
 }
 
@@ -284,9 +314,14 @@ async fn authenticate(
             Ok(r.success())
         }
         SshAuthRecord::Key { key_path } => {
-            let key = load_secret_key(expand_tilde(key_path), None)
-                .map_err(|e| SshOpenError::into_freeform(format!("读取密钥 {key_path} 失败: {e}")))?;
-            let hash = handle.best_supported_rsa_hash().await.map_err(|e| SshOpenError::into_freeform(e.to_string()))?.flatten();
+            let key = load_secret_key(expand_tilde(key_path), None).map_err(|e| {
+                SshOpenError::into_freeform(format!("读取密钥 {key_path} 失败: {e}"))
+            })?;
+            let hash = handle
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|e| SshOpenError::into_freeform(e.to_string()))?
+                .flatten();
             let r = handle
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
@@ -296,23 +331,29 @@ async fn authenticate(
         SshAuthRecord::Agent => {
             // Windows=Pageant 命名管道,其余=SSH_AUTH_SOCK;逐身份尝试
             #[cfg(windows)]
-            let mut agent = AgentClient::connect_pageant()
-                .await
-                .map_err(|e| SshOpenError::into_freeform(format!("无法连接 SSH Agent(Pageant): {e}")))?;
+            let mut agent = AgentClient::connect_pageant().await.map_err(|e| {
+                SshOpenError::into_freeform(format!("无法连接 SSH Agent(Pageant): {e}"))
+            })?;
             #[cfg(not(windows))]
-            let mut agent = AgentClient::connect_env()
-                .await
-                .map_err(|e| SshOpenError::into_freeform(format!("无法连接 SSH Agent(SSH_AUTH_SOCK): {e}")))?;
+            let mut agent = AgentClient::connect_env().await.map_err(|e| {
+                SshOpenError::into_freeform(format!("无法连接 SSH Agent(SSH_AUTH_SOCK): {e}"))
+            })?;
             let identities = agent
                 .request_identities()
                 .await
                 .map_err(|e| SshOpenError::into_freeform(format!("Agent 列举身份失败: {e}")))?;
             if identities.is_empty() {
-                return Err(SshOpenError::into_freeform("SSH Agent 中没有可用密钥(先 ssh-add)".into()));
+                return Err(SshOpenError::into_freeform(
+                    "SSH Agent 中没有可用密钥(先 ssh-add)".into(),
+                ));
             }
             for id in identities {
                 let pk = id.public_key().clone().into_owned();
-                let hash = handle.best_supported_rsa_hash().await.map_err(|e| SshOpenError::into_freeform(e.to_string()))?.flatten();
+                let hash = handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|e| SshOpenError::into_freeform(e.to_string()))?
+                    .flatten();
                 if handle
                     .authenticate_publickey_with(user, pk, hash, &mut agent)
                     .await
@@ -336,10 +377,15 @@ async fn command_loop(
     cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<SshCommand>,
     dead: Arc<AtomicBool>,
 ) {
-    let mut instances: HashMap<String, tokio::sync::mpsc::UnboundedSender<InstanceCmd>> = HashMap::new();
+    let mut instances: HashMap<String, tokio::sync::mpsc::UnboundedSender<InstanceCmd>> =
+        HashMap::new();
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            SshCommand::Open { instance, shared, reply } => {
+            SshCommand::Open {
+                instance,
+                shared,
+                reply,
+            } => {
                 let r = match handle.channel_open_session().await {
                     Ok(mut channel) => match open_pty_shell(&mut channel).await {
                         Ok(()) => {
@@ -356,7 +402,9 @@ async fn command_loop(
                             );
                             Ok(())
                         }
-                        Err(e) => Err(SshOpenError::into_freeform(format!("请求 PTY/shell 失败: {e}"))),
+                        Err(e) => Err(SshOpenError::into_freeform(format!(
+                            "请求 PTY/shell 失败: {e}"
+                        ))),
                     },
                     Err(e) => Err(SshOpenError::into_freeform(format!("打开通道失败: {e}"))),
                 };
@@ -366,7 +414,11 @@ async fn command_loop(
                     break; // 连接已死 → 走统一收尾
                 }
             }
-            SshCommand::Write { instance, data, reply } => {
+            SshCommand::Write {
+                instance,
+                data,
+                reply,
+            } => {
                 match instances.get(&instance) {
                     Some(tx) => {
                         if tx.send(InstanceCmd::Data(data, reply)).is_err() {
@@ -385,11 +437,16 @@ async fn command_loop(
             SshCommand::CloseInstance { instance } => {
                 instances.remove(&instance); // drop tx → 实例任务收尾
             }
-            SshCommand::Resize { instance, cols, rows } => {
+            SshCommand::Resize {
+                instance,
+                cols,
+                rows,
+            } => {
                 if let Some(tx) = instances.get(&instance) {
                     let _ = tx.send(InstanceCmd::Resize(cols, rows));
                 }
             }
+            SshCommand::Shutdown => break, // 设备记录变更/删除 → 统一收尾
         }
     }
     // 统一收尾:命令通道关闭(会话被重建/进程退出)或连接死亡
@@ -401,7 +458,9 @@ async fn command_loop(
 
 /// 请求 PTY(80×24 初始,后续 resize 跟随) + 交互 shell。
 async fn open_pty_shell(channel: &mut Channel<client::Msg>) -> Result<(), russh::Error> {
-    channel.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[]).await?;
+    channel
+        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+        .await?;
     channel.request_shell(true).await?;
     Ok(())
 }
@@ -444,10 +503,9 @@ async fn instance_task(
         // select 之外串行执行 channel 写——&mut 借用无冲突
         match cmd {
             InstanceCmd::Data(data, reply) => {
-                let r = channel
-                    .data_bytes(data)
-                    .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionReset, e.to_string()));
+                let r = channel.data_bytes(data).await.map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::ConnectionReset, e.to_string())
+                });
                 let _ = reply.send(r);
             }
             InstanceCmd::Resize(cols, rows) => {

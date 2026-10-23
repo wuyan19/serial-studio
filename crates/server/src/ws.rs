@@ -258,7 +258,7 @@ fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
             port: None,
             req: None,
             ssh: None,
-            }),
+        }),
         SerialEvent::ScriptLog {
             run_id, message, ..
         } => to_json(ServerMsg::ScriptLog {
@@ -336,9 +336,9 @@ async fn handle_client_msg(
                     // SSH open 失败的分类明细(SerialError::OpenFailed.detail)随回执
                     // 下发——前端据此弹认证重输/指纹确认,而非纯 toast
                     let ssh = match &e {
-                        ss_core::SerialError::OpenFailed { detail: Some(json), .. } => {
-                            crate::ssh::SshOpenError::from_detail(json)
-                        }
+                        ss_core::SerialError::OpenFailed {
+                            detail: Some(json), ..
+                        } => crate::ssh::SshOpenError::from_detail(json),
                         _ => None,
                     };
                     let _ = out_tx
@@ -387,7 +387,7 @@ async fn handle_client_msg(
                         port: Some(port),
                         req,
                         ssh: None,
-                        }))
+                    }))
                     .await;
             }
         },
@@ -407,7 +407,7 @@ async fn handle_client_msg(
                                 port: Some(port),
                                 req,
                                 ssh: None,
-                                }))
+                            }))
                             .await;
                         return;
                     }
@@ -420,7 +420,7 @@ async fn handle_client_msg(
                             port: Some(port),
                             req,
                             ssh: None,
-                            }))
+                        }))
                         .await;
                     return;
                 }
@@ -451,7 +451,7 @@ async fn handle_client_msg(
                             port: Some(port_for_err),
                             req,
                             ssh: None,
-                            }))
+                        }))
                         .await;
                 }
             });
@@ -525,7 +525,7 @@ async fn handle_client_msg(
                         port: None,
                         req: None,
                         ssh: None,
-                        }))
+                    }))
                     .await;
                 return;
             }
@@ -540,7 +540,7 @@ async fn handle_client_msg(
                             port: None,
                             req: None,
                             ssh: None,
-                            }))
+                        }))
                         .await;
                     return;
                 }
@@ -782,7 +782,7 @@ async fn handle_client_msg(
                             port: Some(port),
                             req,
                             ssh: None,
-                            }))
+                        }))
                         .await;
                 }
             }
@@ -820,7 +820,9 @@ async fn handle_client_msg(
         }
         ClientMsg::SshList => {
             let _ = out_tx
-                .send(to_json(ServerMsg::SshHosts { hosts: state.ssh.registry_snapshot() }))
+                .send(to_json(ServerMsg::SshHosts {
+                    hosts: state.ssh.registry_snapshot(),
+                }))
                 .await;
         }
         ClientMsg::SshSave { hosts } => {
@@ -831,32 +833,53 @@ async fn handle_client_msg(
                 Ok(()) => {
                     let _ = state.meta_bus.send(()); // 端点/别名变化 → 客户端重拉列表
                     let _ = out_tx
-                        .send(to_json(ServerMsg::SshHosts { hosts: state.ssh.registry_snapshot() }))
+                        .send(to_json(ServerMsg::SshHosts {
+                            hosts: state.ssh.registry_snapshot(),
+                        }))
                         .await;
                 }
                 Err(e) => {
                     let _ = out_tx
-                        .send(to_json(ServerMsg::Error { message: e, port: None, req: None, ssh: None }))
+                        .send(to_json(ServerMsg::Error {
+                            message: e,
+                            port: None,
+                            req: None,
+                            ssh: None,
+                        }))
                         .await;
                 }
             }
         }
         ClientMsg::SshTest { host_id } => {
             // 直连探测(建连+认证+即拆),不经过会话池;结果带具体失败原因。
-            let rec = state.ssh.registry_snapshot().into_iter().find(|r| r.id == host_id);
+            let rec = state
+                .ssh
+                .registry_snapshot()
+                .into_iter()
+                .find(|r| r.id == host_id);
             let result: Result<(), String> = match rec {
                 None => Err(format!("未知 SSH 设备: {host_id}")),
-                Some(rec) => crate::ssh::session::test_connection(rec).await.map_err(|e| e.message()),
+                Some(rec) => crate::ssh::session::test_connection(rec)
+                    .await
+                    .map_err(|e| e.message()),
             };
             match result {
                 Ok(()) => {
                     let _ = out_tx
-                        .send(to_json(ServerMsg::SshTestResult { host_id, ok: true, message: String::new() }))
+                        .send(to_json(ServerMsg::SshTestResult {
+                            host_id,
+                            ok: true,
+                            message: String::new(),
+                        }))
                         .await;
                 }
                 Err(e) => {
                     let _ = out_tx
-                        .send(to_json(ServerMsg::SshTestResult { host_id, ok: false, message: e }))
+                        .send(to_json(ServerMsg::SshTestResult {
+                            host_id,
+                            ok: false,
+                            message: e,
+                        }))
                         .await;
                 }
             }
@@ -878,19 +901,29 @@ async fn handle_client_msg(
         ClientMsg::SshTrustHost { host_id } => {
             // 直连记录指纹(spawn_blocking:block_on + 网络等待,勿占 worker)
             let st = state.clone();
-            let result = tokio::task::spawn_blocking(move || st.ssh.trust_host_key_blocking(&host_id))
-                .await
-                .map_err(|e| format!("join 错误: {e}"))
-                .and_then(|r| r);
+            let result =
+                tokio::task::spawn_blocking(move || st.ssh.trust_host_key_blocking(&host_id))
+                    .await
+                    .map_err(|e| format!("join 错误: {e}"))
+                    .and_then(|r| r);
             match result {
                 Ok(fp) => {
                     let _ = out_tx
-                        .send(to_json(ServerMsg::Ok { message: format!("trusted {fp}"), port: None, req: None }))
+                        .send(to_json(ServerMsg::Ok {
+                            message: format!("trusted {fp}"),
+                            port: None,
+                            req: None,
+                        }))
                         .await;
                 }
                 Err(e) => {
                     let _ = out_tx
-                        .send(to_json(ServerMsg::Error { message: e, port: None, req: None, ssh: None }))
+                        .send(to_json(ServerMsg::Error {
+                            message: e,
+                            port: None,
+                            req: None,
+                            ssh: None,
+                        }))
                         .await;
                 }
             }
@@ -902,7 +935,11 @@ async fn handle_client_msg(
                 state.ssh.resize_blocking(dev, rest, cols, rows);
             }
             let _ = out_tx
-                .send(to_json(ServerMsg::Ok { message: "resized".into(), port: Some(port), req: None }))
+                .send(to_json(ServerMsg::Ok {
+                    message: "resized".into(),
+                    port: Some(port),
+                    req: None,
+                }))
                 .await;
         }
     }

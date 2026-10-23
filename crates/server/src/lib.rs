@@ -128,7 +128,10 @@ pub fn create_state() -> AppState {
     ));
     let manager = Arc::new(SerialManager::with_key_resolver(
         event_bus.clone(),
-        Arc::new(device::CompositeOpener::new(Arc::clone(&devices), Arc::clone(&ssh))),
+        Arc::new(device::CompositeOpener::new(
+            Arc::clone(&devices),
+            Arc::clone(&ssh),
+        )),
         addresses.key_resolver_fn(),
     ));
     let enable_scripting = Arc::new(std::sync::atomic::AtomicBool::new(

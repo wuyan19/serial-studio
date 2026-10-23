@@ -63,12 +63,21 @@ impl server::Handler for EchoSshServer {
         Ok(())
     }
 
-    async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         Ok(())
     }
 
-    async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         session.data(channel, data.to_vec())?;
         Ok(())
     }
@@ -87,7 +96,9 @@ async fn spawn_echo_ssh_server_abortable() -> (String, u16, tokio::task::AbortHa
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         loop {
-            let Ok((socket, _)) = listener.accept().await else { break };
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
             let config = Arc::clone(&config);
             tokio::spawn(async move {
                 let _ = server::run_stream(config, socket, EchoSshServer).await;
@@ -101,10 +112,11 @@ fn server_config() -> server::Config {
     server::Config {
         inactivity_timeout: None,
         auth_rejection_time: Duration::from_secs(1),
-        keys: vec![
-            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519)
-                .unwrap(),
-        ],
+        keys: vec![russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .unwrap()],
         ..Default::default()
     }
 }
@@ -118,8 +130,14 @@ fn record(id: &str, host: &str, port: u16) -> SshHostRecord {
         port,
         username: "testuser".into(),
         nickname: None,
-        auth: SshAuthRecord::Password { password: "correct-password".into() },
-        endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+        auth: SshAuthRecord::Password {
+            password: "correct-password".into(),
+        },
+        endpoints: vec![SshEndpointRecord {
+            name: "shell".into(),
+            r#type: "shell".into(),
+            alias: None,
+        }],
     }
 }
 
@@ -143,15 +161,17 @@ fn read_until(io: &mut Box<dyn PortIo>, want: usize, timeout: Duration) -> Vec<u
 /// 测试辅助:信任指定设备的 host key(新策略:首连不自动 TOFU,须显式确认)。
 /// trust_host_key 是同步阻塞(block_on),须在 spawn_blocking 里调。
 async fn trust(mgr: &SshManager, host_id: &str) {
-    let rec = mgr.registry_snapshot().into_iter().find(|r| r.id == host_id).unwrap();
+    let rec = mgr
+        .registry_snapshot()
+        .into_iter()
+        .find(|r| r.id == host_id)
+        .unwrap();
     let fp = tokio::task::spawn_blocking(move || ssh::session::trust_host_key(rec))
         .await
         .unwrap()
         .expect("trust 失败");
     assert!(fp.starts_with("SHA256:"), "指纹形态: {fp}");
 }
-
-
 
 /// 端到端主干：open（建连+认证+PTY+shell）→ write → 回显 read → drop 关闭。
 #[tokio::test]
@@ -226,6 +246,73 @@ async fn multiple_instances_isolated() {
     assert_eq!(h2.await.unwrap(), b"from-instance-2\n");
 }
 
+/// 注册表变更终结既有会话(回归:此前 update_registry 只换内存表,旧连接滞留,
+/// 新终端静默挂旧 host/凭据直到连接碰巧死亡)。变更后旧 IO 应读到断开错误,
+/// 重信任(新 host:port 首连)后重开走第二台服务器。
+#[tokio::test]
+async fn update_registry_kills_changed_session() {
+    let dir = std::env::temp_dir().join(format!("ss-ssh-test-regsync-{}", std::process::id()));
+    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (host1, port1) = spawn_echo_ssh_server().await;
+    let (host2, port2) = spawn_echo_ssh_server().await;
+    let mgr = Arc::new(SshManager::empty());
+    mgr.update_registry(vec![record("sshdev3", &host1, port1)]);
+    trust(&mgr, "sshdev3").await;
+
+    let m = Arc::clone(&mgr);
+    let mut io = tokio::task::spawn_blocking(move || {
+        m.open_blocking("sshdev3", "shell", &SerialConfig::default())
+    })
+    .await
+    .unwrap()
+    .expect("open 失败");
+
+    let m = Arc::clone(&mgr);
+    let (echoed, drop_err) = tokio::task::spawn_blocking(move || {
+        io.write_all(b"ping-old\n").unwrap();
+        let echoed = read_until(&mut io, b"ping-old\n".len(), Duration::from_secs(5));
+        // 同 id 换 host/port → 会话应终结;旧 IO 此后读到断开错误(非 TimedOut)
+        m.update_registry(vec![record("sshdev3", &host2, port2)]);
+        let mut drop_err = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 64];
+        while drop_err.is_empty() && std::time::Instant::now() < deadline {
+            match io.read(&mut buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => drop_err = e.to_string(),
+                Ok(_) => {} // 先排空残余回显
+            }
+        }
+        (echoed, drop_err)
+    })
+    .await
+    .unwrap();
+    assert_eq!(echoed, b"ping-old\n", "变更前回显正常");
+    assert!(
+        !drop_err.is_empty(),
+        "变更注册表后旧会话应断开(5s 内无断开错误)"
+    );
+
+    // 新记录生效:重开走第二台服务器(不同 host key,须重新信任)
+    trust(&mgr, "sshdev3").await;
+    let m = Arc::clone(&mgr);
+    let mut io2 = tokio::task::spawn_blocking(move || {
+        m.open_blocking("sshdev3", "shell", &SerialConfig::default())
+    })
+    .await
+    .unwrap()
+    .expect("变更后重开失败");
+    let echoed2 = tokio::task::spawn_blocking(move || {
+        io2.write_all(b"ping-new\n").unwrap();
+        read_until(&mut io2, b"ping-new\n".len(), Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(echoed2, b"ping-new\n", "重开应连上新记录的服务器");
+}
+
 /// 密码错误：open 回执带认证失败信息（不 panic,错误进 SerialError::OpenFailed）。
 #[tokio::test]
 async fn wrong_password_reports_auth_failure() {
@@ -235,7 +322,9 @@ async fn wrong_password_reports_auth_failure() {
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mut rec = record("sshdev3", &host, port);
-    rec.auth = SshAuthRecord::Password { password: "wrong".into() };
+    rec.auth = SshAuthRecord::Password {
+        password: "wrong".into(),
+    };
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![rec]);
     trust(&mgr, "sshdev3").await;
@@ -247,12 +336,19 @@ async fn wrong_password_reports_auth_failure() {
     .await
     .unwrap();
     match result {
-        Err(ss_core::SerialError::OpenFailed { message, detail, .. }) => {
-            assert!(message.contains("认证失败"), "错误信息应含认证失败: {message}");
+        Err(ss_core::SerialError::OpenFailed {
+            message, detail, ..
+        }) => {
+            assert!(
+                message.contains("认证失败"),
+                "错误信息应含认证失败: {message}"
+            );
             let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail);
             assert_eq!(
                 cls,
-                Some(ssh::SshOpenError::AuthFailed { method: "密码".into() }),
+                Some(ssh::SshOpenError::AuthFailed {
+                    method: "密码".into()
+                }),
                 "detail 应分类为 AuthFailed(重输闭环触发器)"
             );
         }
@@ -321,7 +417,10 @@ async fn boot_ws() -> (String, Arc<SshManager>) {
     ));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
     let (script_tx, _) = tokio::sync::broadcast::channel(16);
-    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone(), "inst-ssh-ws"));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        meta_tx.clone(),
+        "inst-ssh-ws",
+    ));
     devices.bind(Arc::downgrade(&devices));
     let ssh = Arc::new(SshManager::from_registry());
     let state = AppState {
@@ -365,46 +464,77 @@ async fn ws_ssh_save_list_next_roundtrip() {
     let echo = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Some(Ok(Message::Text(t))) = ws.next().await {
-                if t.contains("\"ssh_hosts\"") { return t; }
+                if t.contains("\"ssh_hosts\"") {
+                    return t;
+                }
             }
         }
-    }).await.unwrap();
-    assert!(echo.contains("车间网关") && echo.contains("控制台"), "回推注册表含昵称与端点别名: {echo}");
+    })
+    .await
+    .unwrap();
+    assert!(
+        echo.contains("车间网关") && echo.contains("控制台"),
+        "回推注册表含昵称与端点别名: {echo}"
+    );
     assert!(echo.contains("keyPath"), "线格式 camelCase: {echo}");
 
     // list:另一连接拉取 → 同表
     let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    ws2.send(Message::Text(r#"{"action":"ssh_list"}"#.into())).await.unwrap();
+    ws2.send(Message::Text(r#"{"action":"ssh_list"}"#.into()))
+        .await
+        .unwrap();
     let listed = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Some(Ok(Message::Text(t))) = ws2.next().await {
-                if t.contains("\"ssh_hosts\"") { return t; }
+                if t.contains("\"ssh_hosts\"") {
+                    return t;
+                }
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert!(listed.contains("192.0.2.11"));
 
     // next_instance:无占用 → shell
-    ws2.send(Message::Text(r#"{"action":"ssh_next_instance","host_id":"h1","base":"shell"}"#.into())).await.unwrap();
+    ws2.send(Message::Text(
+        r#"{"action":"ssh_next_instance","host_id":"h1","base":"shell"}"#.into(),
+    ))
+    .await
+    .unwrap();
     let inst = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Some(Ok(Message::Text(t))) = ws2.next().await {
-                if t.contains("\"ssh_instance\"") { return t; }
+                if t.contains("\"ssh_instance\"") {
+                    return t;
+                }
             }
         }
-    }).await.unwrap();
-    assert!(inst.contains(r#""name":"shell""#), "首个实例名 = shell: {inst}");
+    })
+    .await
+    .unwrap();
+    assert!(
+        inst.contains(r#""name":"shell""#),
+        "首个实例名 = shell: {inst}"
+    );
 
     // save 后端点兜底:缺 endpoints 的条目保存 → 回推补默认 shell
     ws2.send(Message::Text(r#"{"action":"ssh_save","hosts":[{"id":"h3","host":"192.0.2.12","port":22,"username":"a","auth":{"type":"agent"}}]}"#.into())).await.unwrap();
     let fixed = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Some(Ok(Message::Text(t))) = ws2.next().await {
-                if t.contains("\"ssh_hosts\"") && t.contains("h3") { return t; }
+                if t.contains("\"ssh_hosts\"") && t.contains("h3") {
+                    return t;
+                }
             }
         }
-    }).await.unwrap();
-    assert!(fixed.contains("\"name\":\"shell\""), "端点缺失走默认兜底: {fixed}");
+    })
+    .await
+    .unwrap();
+    assert!(
+        fixed.contains("\"name\":\"shell\""),
+        "端点缺失走默认兜底: {fixed}"
+    );
 }
 
 /// Bug 回归 1:新建终端后实例行(shell@2)必须出现在 list(此前只有 tab 没有
@@ -423,15 +553,25 @@ async fn instance_rows_visible_in_list() {
         }
     }
     impl std::io::Write for FakePort {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { Ok(b.len()) }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     impl PortIo for FakePort {
-        fn try_clone(&self) -> std::io::Result<Box<dyn PortIo>> { Ok(Box::new(FakePort)) }
+        fn try_clone(&self) -> std::io::Result<Box<dyn PortIo>> {
+            Ok(Box::new(FakePort))
+        }
     }
     struct FakeOpen;
     impl PortOpener for FakeOpen {
-        fn open(&self, _p: &str, _c: &SerialConfig) -> Result<Box<dyn PortIo>, ss_core::SerialError> {
+        fn open(
+            &self,
+            _p: &str,
+            _c: &SerialConfig,
+        ) -> Result<Box<dyn PortIo>, ss_core::SerialError> {
             Ok(Box::new(FakePort))
         }
     }
@@ -439,7 +579,10 @@ async fn instance_rows_visible_in_list() {
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpen)));
     let (meta_tx, _) = tokio::sync::broadcast::channel(16);
-    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone(), "inst-ssh-list"));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        meta_tx.clone(),
+        "inst-ssh-list",
+    ));
     let ssh = Arc::new(SshManager::empty());
     ssh.update_registry(vec![record("hlist", "192.0.2.50", 22)]);
     let state = AppState {
@@ -466,9 +609,13 @@ async fn instance_rows_visible_in_list() {
     // 等不到读线程退出,测试进程挂死(ws_session 同款 FakePort 皆以 close 收尾,故不挂)。
     let sess1 = ss_core::SessionId::next();
     let sess2 = ss_core::SessionId::next();
-    let s1 = manager.acquire("hlist::shell".into(), SerialConfig::default(), sess1).await;
+    let s1 = manager
+        .acquire("hlist::shell".into(), SerialConfig::default(), sess1)
+        .await;
     assert!(s1.is_ok(), "{s1:?}");
-    let s2 = manager.acquire("hlist::shell@2".into(), SerialConfig::default(), sess2).await;
+    let s2 = manager
+        .acquire("hlist::shell@2".into(), SerialConfig::default(), sess2)
+        .await;
     assert!(s2.is_ok(), "{s2:?}");
 
     // list 合并:端点行 + 两个实例行都在
@@ -477,11 +624,24 @@ async fn instance_rows_visible_in_list() {
 
     let names: Vec<&str> = views.iter().map(|v| v.info.name.as_str()).collect();
     assert!(names.contains(&"hlist::shell"), "端点行存在: {names:?}");
-    assert!(names.contains(&"hlist::shell@2"), "实例行存在(bug1): {names:?}");
-    let inst = views.iter().find(|v| v.info.name == "hlist::shell@2").unwrap();
-    assert!(inst.info.opened && inst.info.holders >= 1, "实例行是真实态: {:?}", inst.info);
+    assert!(
+        names.contains(&"hlist::shell@2"),
+        "实例行存在(bug1): {names:?}"
+    );
+    let inst = views
+        .iter()
+        .find(|v| v.info.name == "hlist::shell@2")
+        .unwrap();
+    assert!(
+        inst.info.opened && inst.info.holders >= 1,
+        "实例行是真实态: {:?}",
+        inst.info
+    );
     // 基端点行 holders 回填(用户 bug:首开 shell 行不显数字)
-    let base = views.iter().find(|v| v.info.name == "hlist::shell").unwrap();
+    let base = views
+        .iter()
+        .find(|v| v.info.name == "hlist::shell")
+        .unwrap();
     assert_eq!(base.info.holders, 1, "基端点行应回填本地 holders");
     assert!(base.info.opened, "基端点行 opened 由快照覆盖");
 
@@ -496,7 +656,10 @@ async fn instance_rows_visible_in_list() {
 #[tokio::test]
 async fn ssh_nickname_resolves_in_addressing() {
     let (tx, _) = tokio::sync::broadcast::channel(4);
-    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(tx.clone(), "self"));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        tx.clone(),
+        "self",
+    ));
     let ssh = Arc::new(SshManager::empty());
     ssh.update_registry(vec![SshHostRecord {
         id: "uuid-ssh-1".into(),
@@ -505,16 +668,32 @@ async fn ssh_nickname_resolves_in_addressing() {
         username: "root".into(),
         nickname: Some("switch-dev".into()),
         auth: SshAuthRecord::Agent,
-        endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+        endpoints: vec![SshEndpointRecord {
+            name: "shell".into(),
+            r#type: "shell".into(),
+            alias: None,
+        }],
     }]);
-    let r = ss_server::address::AddressResolver::new(devices, Arc::clone(&ssh), tx.clone(), "self".into());
+    let r = ss_server::address::AddressResolver::new(
+        devices,
+        Arc::clone(&ssh),
+        tx.clone(),
+        "self".into(),
+    );
     let resolved = r.resolve_for_test("switch-dev::shell");
-    assert_eq!(resolved, "uuid-ssh-1::shell", "SSH 设备昵称应解析为 id(bug2)");
+    assert_eq!(
+        resolved, "uuid-ssh-1::shell",
+        "SSH 设备昵称应解析为 id(bug2)"
+    );
 
     // 端点别名(裸名寻址):「控制台」→ uuid-ssh-1::shell
-    ssh.set_ssh_alias("uuid-ssh-1", "shell", Some("控制台".into())).unwrap();
+    ssh.set_ssh_alias("uuid-ssh-1", "shell", Some("控制台".into()))
+        .unwrap();
     let r2 = ss_server::address::AddressResolver::new(
-        Arc::new(ss_server::device::DeviceClientManager::empty(tx.clone(), "self")),
+        Arc::new(ss_server::device::DeviceClientManager::empty(
+            tx.clone(),
+            "self",
+        )),
         Arc::clone(&ssh),
         tokio::sync::broadcast::channel(4).0,
         "self".into(),
@@ -523,14 +702,22 @@ async fn ssh_nickname_resolves_in_addressing() {
     assert_eq!(resolved2, "uuid-ssh-1::shell", "SSH 端点别名应解析(bug2)");
 
     // 实例别名(内存表):set_alias 到 shell@2 后解析
-    ssh.set_ssh_alias("uuid-ssh-1", "shell@2", Some("tmp".into())).unwrap();
+    ssh.set_ssh_alias("uuid-ssh-1", "shell@2", Some("tmp".into()))
+        .unwrap();
     let r3 = ss_server::address::AddressResolver::new(
-        Arc::new(ss_server::device::DeviceClientManager::empty(tokio::sync::broadcast::channel(4).0, "self")),
+        Arc::new(ss_server::device::DeviceClientManager::empty(
+            tokio::sync::broadcast::channel(4).0,
+            "self",
+        )),
         ssh,
         tokio::sync::broadcast::channel(4).0,
         "self".into(),
     );
-    assert_eq!(r3.resolve_for_test("tmp"), "uuid-ssh-1::shell@2", "实例别名应解析");
+    assert_eq!(
+        r3.resolve_for_test("tmp"),
+        "uuid-ssh-1::shell@2",
+        "实例别名应解析"
+    );
 }
 
 /// 指纹生命周期(bug 回归+新策略):首连拒绝(HostKeyUnknown,带指纹) → 信任后可开
@@ -549,14 +736,22 @@ async fn host_key_lifecycle_unknown_then_changed() {
 
     // 1) 首连:拒绝 + 分类 HostKeyUnknown(带指纹与算法)
     let m1 = Arc::clone(&mgr);
-    let r1 = tokio::task::spawn_blocking(move || m1.open_blocking("hk", "shell", &SerialConfig::default()))
-        .await
-        .unwrap();
+    let r1 = tokio::task::spawn_blocking(move || {
+        m1.open_blocking("hk", "shell", &SerialConfig::default())
+    })
+    .await
+    .unwrap();
     match &r1 {
         Err(ss_core::SerialError::OpenFailed { detail, .. }) => {
-            let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail).unwrap();
+            let cls = detail
+                .as_deref()
+                .and_then(ssh::SshOpenError::from_detail)
+                .unwrap();
             match cls {
-                ssh::SshOpenError::HostKeyUnknown { fingerprint, key_type } => {
+                ssh::SshOpenError::HostKeyUnknown {
+                    fingerprint,
+                    key_type,
+                } => {
                     assert!(fingerprint.starts_with("SHA256:"), "{fingerprint}");
                     assert!(!key_type.is_empty());
                 }
@@ -569,10 +764,12 @@ async fn host_key_lifecycle_unknown_then_changed() {
     // 2) 信任后:可开可读写
     trust(&mgr, "hk").await;
     let m2 = Arc::clone(&mgr);
-    let mut io = tokio::task::spawn_blocking(move || m2.open_blocking("hk", "shell", &SerialConfig::default()))
-        .await
-        .unwrap()
-        .expect("信任后应可开");
+    let mut io = tokio::task::spawn_blocking(move || {
+        m2.open_blocking("hk", "shell", &SerialConfig::default())
+    })
+    .await
+    .unwrap()
+    .expect("信任后应可开");
     // PortIo 阻塞接口须 spawn_blocking(直接调会冻结 current_thread runtime,写回执永不到达)
     let echoed = tokio::task::spawn_blocking(move || {
         io.write_all(b"hi\n").unwrap();
@@ -587,11 +784,15 @@ async fn host_key_lifecycle_unknown_then_changed() {
     //    新建连:known_hosts 落盘共享,新连即对上新 key → HostKeyChanged。
     server1.abort();
     tokio::time::sleep(Duration::from_millis(300)).await; // 端口释放窗口
-    let server2 = tokio::net::TcpListener::bind(format!("{host}:{port}")).await.unwrap();
+    let server2 = tokio::net::TcpListener::bind(format!("{host}:{port}"))
+        .await
+        .unwrap();
     let cfg2 = Arc::new(server_config());
     let t2 = tokio::spawn(async move {
         loop {
-            let Ok((socket, _)) = server2.accept().await else { break };
+            let Ok((socket, _)) = server2.accept().await else {
+                break;
+            };
             let cfg = Arc::clone(&cfg2);
             tokio::spawn(async move {
                 let _ = server::run_stream(cfg, socket, EchoSshServer).await;
@@ -601,14 +802,21 @@ async fn host_key_lifecycle_unknown_then_changed() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let m3 = Arc::new(SshManager::empty());
     m3.update_registry(vec![record("hk", &host, port)]);
-    let r3 = tokio::task::spawn_blocking(move || m3.open_blocking("hk", "shell", &SerialConfig::default()))
-        .await
-        .unwrap();
+    let r3 = tokio::task::spawn_blocking(move || {
+        m3.open_blocking("hk", "shell", &SerialConfig::default())
+    })
+    .await
+    .unwrap();
     match &r3 {
         Err(ss_core::SerialError::OpenFailed { detail, .. }) => {
-            let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail).unwrap();
+            let cls = detail
+                .as_deref()
+                .and_then(ssh::SshOpenError::from_detail)
+                .unwrap();
             match cls {
-                ssh::SshOpenError::HostKeyChanged { known, received, .. } => {
+                ssh::SshOpenError::HostKeyChanged {
+                    known, received, ..
+                } => {
                     assert!(known.starts_with("SHA256:") && received.starts_with("SHA256:"));
                     assert_ne!(known, received, "新旧指纹应不同");
                 }
@@ -634,5 +842,8 @@ fn ssh_open_error_wire_shape() {
     // 兼容:detail 缺失的 OpenFailed(外 tag 枚举形)仍可反序列化,detail=None
     let legacy = r#"{"OpenFailed":{"port":"COM5","message":"x"}}"#;
     let e: ss_core::SerialError = serde_json::from_str(legacy).unwrap();
-    assert!(matches!(e, ss_core::SerialError::OpenFailed { detail: None, .. }));
+    assert!(matches!(
+        e,
+        ss_core::SerialError::OpenFailed { detail: None, .. }
+    ));
 }

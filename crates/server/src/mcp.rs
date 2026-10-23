@@ -329,8 +329,7 @@ async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
         }
         out.push(parts.join(" · "));
     }
-    ok_text(out.join("
-"))
+    ok_text(out.join("\n"))
 }
 
 async fn tool_serial_send(args: Value, state: &AppState) -> Value {
@@ -431,7 +430,11 @@ async fn tool_serial_status(args: Value, state: &AppState) -> Value {
             // SSH 端点:串口参数无意义,显示连接身份(设备/认证/端点)——与通道条同语义
             let (dev, _rest) = ss_core::split_port_key(&port);
             let body = if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
-                let rec = state.ssh.registry_snapshot().into_iter().find(|r| r.id == dev);
+                let rec = state
+                    .ssh
+                    .registry_snapshot()
+                    .into_iter()
+                    .find(|r| r.id == dev);
                 match rec {
                     Some(r) => format!(
                         "SSH device: {} ({}@{}:{})\nAuth: {}\nEndpoint: {}\nHolders: {}",
@@ -1336,10 +1339,10 @@ mod tests {
 
 #[cfg(test)]
 mod ssh_display_tests {
+    use super::tests::make_state;
     use super::*;
     use crate::ssh::{SshAuthRecord, SshEndpointRecord, SshHostRecord, SshManager};
     use std::sync::Arc;
-    use super::tests::make_state;
 
     fn ssh_with_entries() -> Arc<SshManager> {
         let m = SshManager::empty();
@@ -1350,8 +1353,14 @@ mod ssh_display_tests {
                 port: 22,
                 username: "root".into(),
                 nickname: Some("车间网关".into()),
-                auth: SshAuthRecord::Password { password: "pw".into() },
-                endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: Some("控制台".into()) }],
+                auth: SshAuthRecord::Password {
+                    password: "pw".into(),
+                },
+                endpoints: vec![SshEndpointRecord {
+                    name: "shell".into(),
+                    r#type: "shell".into(),
+                    alias: Some("控制台".into()),
+                }],
             },
             SshHostRecord {
                 id: "ssh-x2".into(),
@@ -1360,7 +1369,11 @@ mod ssh_display_tests {
                 username: "pi".into(),
                 nickname: None,
                 auth: SshAuthRecord::Agent,
-                endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+                endpoints: vec![SshEndpointRecord {
+                    name: "shell".into(),
+                    r#type: "shell".into(),
+                    alias: None,
+                }],
             },
         ]);
         Arc::new(m)
@@ -1377,7 +1390,10 @@ mod ssh_display_tests {
         // addresses 内持独立的 ssh 引用(make_state 注入的是空表),一并重建
         let (tx, _) = tokio::sync::broadcast::channel(16);
         state.addresses = Arc::new(crate::address::AddressResolver::new(
-            Arc::new(crate::device::DeviceClientManager::empty(tx, "inst-mcp-ssh")),
+            Arc::new(crate::device::DeviceClientManager::empty(
+                tx,
+                "inst-mcp-ssh",
+            )),
             ssh,
             tokio::sync::broadcast::channel(16).0,
             "inst-mcp-ssh".into(),
@@ -1385,20 +1401,39 @@ mod ssh_display_tests {
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
         let resp = handle_request(req, &state).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        let line1 = text.lines().find(|l| l.starts_with("ssh-x1::shell")).unwrap();
+        let line1 = text
+            .lines()
+            .find(|l| l.starts_with("ssh-x1::shell"))
+            .unwrap();
         assert!(line1.contains("端点别名 控制台"), "{line1}");
-        assert!(line1.contains("SSH 设备 车间网关") && line1.contains("寻址 车间网关::shell"), "{line1}");
-        assert!(line1.ends_with("closed") && !line1.contains('('), "扁平无括号: {line1}");
-        let line2 = text.lines().find(|l| l.starts_with("ssh-x2::shell")).unwrap();
-        assert!(line2.contains("SSH 设备 ssh-x2") && !line2.contains("寻址"), "无昵称 uuid 兜底: {line2}");
+        assert!(
+            line1.contains("SSH 设备 车间网关") && line1.contains("寻址 车间网关::shell"),
+            "{line1}"
+        );
+        assert!(
+            line1.ends_with("closed") && !line1.contains('('),
+            "扁平无括号: {line1}"
+        );
+        let line2 = text
+            .lines()
+            .find(|l| l.starts_with("ssh-x2::shell"))
+            .unwrap();
+        assert!(
+            line2.contains("SSH 设备 ssh-x2") && !line2.contains("寻址"),
+            "无昵称 uuid 兜底: {line2}"
+        );
     }
 
     /// nickname_of 双来源:SSH 注册表昵称可查(展示与解析同源)。
     #[tokio::test]
     async fn nickname_of_includes_ssh_source() {
         let (tx, _) = tokio::sync::broadcast::channel(4);
-        let devices = Arc::new(crate::device::DeviceClientManager::empty(tx.clone(), "self"));
-        let r = crate::address::AddressResolver::new(devices, ssh_with_entries(), tx, "self".into());
+        let devices = Arc::new(crate::device::DeviceClientManager::empty(
+            tx.clone(),
+            "self",
+        ));
+        let r =
+            crate::address::AddressResolver::new(devices, ssh_with_entries(), tx, "self".into());
         assert_eq!(r.nickname_of("ssh-x1").as_deref(), Some("车间网关"));
         assert_eq!(r.nickname_of("ssh-nope"), None);
     }

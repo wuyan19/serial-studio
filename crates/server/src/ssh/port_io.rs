@@ -39,7 +39,11 @@ struct Inbound {
 impl SshSharedIo {
     pub(crate) fn new(read_timeout: Duration) -> Self {
         Self {
-            inbound: Mutex::new(Inbound { buf: VecDeque::new(), closed: None, dropped: 0 }),
+            inbound: Mutex::new(Inbound {
+                buf: VecDeque::new(),
+                closed: None,
+                dropped: 0,
+            }),
             cv: Condvar::new(),
             read_timeout,
             close_sent: AtomicBool::new(false),
@@ -115,7 +119,11 @@ impl SshPortIo {
         cmd_tx: tokio::sync::mpsc::UnboundedSender<SshCommand>,
         instance: String,
     ) -> Self {
-        Self { shared, cmd_tx, instance }
+        Self {
+            shared,
+            cmd_tx,
+            instance,
+        }
     }
 }
 
@@ -123,7 +131,9 @@ impl SshPortIo {
 impl Drop for SshPortIo {
     fn drop(&mut self) {
         if !self.shared.close_sent.swap(true, Ordering::AcqRel) {
-            let _ = self.cmd_tx.send(SshCommand::CloseInstance { instance: self.instance.clone() });
+            let _ = self.cmd_tx.send(SshCommand::CloseInstance {
+                instance: self.instance.clone(),
+            });
         }
     }
 }

@@ -52,12 +52,19 @@ const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 /// host_key_changed → 红色警告确认)。经 SerialError::OpenFailed.detail(JSON 文本)
 /// 穿越 core,server 层回执时解析为 ServerMsg::Error.ssh 字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SshOpenError {
     /// 认证失败(密码错/密钥不被接受)。method = 设备配置的认证方式。
     AuthFailed { method: String },
     /// 首连:服务器指纹未登记(需用户确认后 ssh_trust_host 记录再重开)。
-    HostKeyUnknown { fingerprint: String, key_type: String },
+    HostKeyUnknown {
+        fingerprint: String,
+        key_type: String,
+    },
     /// 指纹变更(合法重装或中间人——由用户核对决断,UI 走严重警告样式)。
     HostKeyChanged {
         known: String,
@@ -114,7 +121,12 @@ impl SshManager {
     /// 读 ssh_hosts.json 构造(生产组装点)。
     pub fn from_registry() -> Self {
         Self {
-            registry: Mutex::new(store::load().into_iter().map(store::ensure_default_endpoints).collect()),
+            registry: Mutex::new(
+                store::load()
+                    .into_iter()
+                    .map(store::ensure_default_endpoints)
+                    .collect(),
+            ),
             sessions: Mutex::new(Vec::new()),
             instance_aliases: Mutex::new(std::collections::HashMap::new()),
         }
@@ -130,8 +142,38 @@ impl SshManager {
     }
 
     /// 全量替换注册表(ssh_save 后调用)。端点缺失兜底默认 shell。
+    /// 变更/删除的设备同步终结其活会话——否则 ensure_session 持续返回旧连接,
+    /// 新终端静默挂在旧 host/凭据上直到连接碰巧死亡。
     pub fn update_registry(&self, list: Vec<SshHostRecord>) {
-        *self.registry.lock().unwrap() = list.into_iter().map(store::ensure_default_endpoints).collect();
+        let new_list: Vec<SshHostRecord> = list
+            .into_iter()
+            .map(store::ensure_default_endpoints)
+            .collect();
+        // 三把锁各自独立短持,不嵌套(与读路径的加锁顺序无交叉)
+        let old: std::collections::HashMap<String, SshHostRecord> = self
+            .registry
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.id.clone(), r.clone()))
+            .collect();
+        let changed_or_removed: std::collections::HashSet<&String> = old
+            .iter()
+            .filter(|(id, r)| new_list.iter().all(|n| &n.id != *id || n != *r))
+            .map(|(id, _)| id)
+            .collect();
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.retain(|(id, s)| {
+            if changed_or_removed.contains(id) {
+                let _ = s.cmd_tx.send(SshCommand::Shutdown);
+                tracing::info!("SSH 设备 {} 记录已变更/删除,终结既有会话", id);
+                false
+            } else {
+                true
+            }
+        });
+        drop(sessions);
+        *self.registry.lock().unwrap() = new_list;
     }
 
     /// 注册表快照(list 合并 / WS ssh_list / 路由判定用)。
@@ -141,7 +183,11 @@ impl SshManager {
 
     /// 复合键首段是否为已注册 SSH 设备(CompositeOpener 路由判定)。
     pub fn has_host(&self, host_id: &str) -> bool {
-        self.registry.lock().unwrap().iter().any(|r| r.id == host_id)
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.id == host_id)
     }
 
     /// 注册表全部设备昵称(撞词检查用)。
@@ -150,7 +196,12 @@ impl SshManager {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|r| r.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty()))
+            .filter_map(|r| {
+                r.nickname
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+            })
             .map(str::to_string)
             .collect()
     }
@@ -187,9 +238,11 @@ impl SshManager {
         let mut pairs: Vec<(String, String)> = reg
             .iter()
             .flat_map(|r| {
-                r.endpoints
-                    .iter()
-                    .filter_map(|ep| ep.alias.as_ref().map(|a| (a.clone(), compose_key(&r.id, &ep.name))))
+                r.endpoints.iter().filter_map(|ep| {
+                    ep.alias
+                        .as_ref()
+                        .map(|a| (a.clone(), compose_key(&r.id, &ep.name)))
+                })
             })
             .collect();
         pairs.extend(inst.iter().map(|(k, a)| (a.clone(), k.clone())));
@@ -197,7 +250,9 @@ impl SshManager {
     }
 
     /// 各设备端点真实名集合(小写)——别名"真实名恒优先"判据(AddressResolver 用)。
-    pub fn device_real_leaves(&self) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    pub fn device_real_leaves(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
         self.registry
             .lock()
             .unwrap()
@@ -213,13 +268,24 @@ impl SshManager {
 
     /// 实例别名查询(list 合并注入)。
     pub fn instance_alias_of(&self, instance_full_key: &str) -> Option<String> {
-        self.instance_aliases.lock().unwrap().get(instance_full_key).cloned()
+        self.instance_aliases
+            .lock()
+            .unwrap()
+            .get(instance_full_key)
+            .cloned()
     }
 
     /// 设置别名(端点优先,实例兜底)。端点命中写注册表(落盘);实例命中写内存表
     /// (运行时生灭)。二者都 miss 时报错(调用方 set_alias_and_notify 的 ssh 分支)。
-    pub fn set_ssh_alias(&self, host_id: &str, name: &str, alias: Option<String>) -> Result<bool, String> {
-        let trimmed = alias.filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
+    pub fn set_ssh_alias(
+        &self,
+        host_id: &str,
+        name: &str,
+        alias: Option<String>,
+    ) -> Result<bool, String> {
+        let trimmed = alias
+            .filter(|a| !a.trim().is_empty())
+            .map(|a| a.trim().to_string());
         // 先试端点(注册表)
         {
             let mut list = self.registry.lock().unwrap().clone();
@@ -247,10 +313,14 @@ impl SshManager {
         }
     }
 
-
     /// CompositeOpener 入口(同步阻塞,manager 的 spawn_blocking 里调)。
     /// `rest` = 端点名或实例名(shell / shell@2);全键 `${hostId}::${rest}` 是命令路由键。
-    pub fn open_blocking(&self, host_id: &str, rest: &str, config: &SerialConfig) -> Result<Box<dyn PortIo>, SerialError> {
+    pub fn open_blocking(
+        &self,
+        host_id: &str,
+        rest: &str,
+        config: &SerialConfig,
+    ) -> Result<Box<dyn PortIo>, SerialError> {
         let record = self
             .registry_snapshot()
             .into_iter()
@@ -271,13 +341,28 @@ impl SshManager {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<(), SshOpenError>>();
         session
             .cmd_tx
-            .send(SshCommand::Open { instance: instance.clone(), shared: Arc::clone(&shared), reply: reply_tx })
-            .map_err(|_| open_failed(&instance, SshOpenError::into_freeform("SSH 会话任务已退出".into())))?;
+            .send(SshCommand::Open {
+                instance: instance.clone(),
+                shared: Arc::clone(&shared),
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                open_failed(
+                    &instance,
+                    SshOpenError::into_freeform("SSH 会话任务已退出".into()),
+                )
+            })?;
         // 分片等待:每 200ms 检查 dead(连接失败快速失败,不等满 20s)。deadline 兜底。
         let deadline = std::time::Instant::now() + OPEN_REPLY_TIMEOUT;
         loop {
             match reply_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(Ok(())) => return Ok(Box::new(SshPortIo::new(shared, session.cmd_tx.clone(), instance))),
+                Ok(Ok(())) => {
+                    return Ok(Box::new(SshPortIo::new(
+                        shared,
+                        session.cmd_tx.clone(),
+                        instance,
+                    )))
+                }
                 Ok(Err(e)) => {
                     if session.dead.load(Ordering::Acquire) {
                         self.drop_session(host_id); // 连接级失败:清池,下次重建
@@ -287,20 +372,28 @@ impl SshManager {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if session.dead.load(Ordering::Acquire) {
                         self.drop_session(host_id);
-                        return Err(open_failed(&instance, SshOpenError::into_freeform(
-                            "SSH 连接失败(不可达或握手错误,详见服务端日志)".into(),
-                        )));
+                        return Err(open_failed(
+                            &instance,
+                            SshOpenError::into_freeform(
+                                "SSH 连接失败(不可达或握手错误,详见服务端日志)".into(),
+                            ),
+                        ));
                     }
                     if std::time::Instant::now() >= deadline {
-                        return Err(open_failed(&instance, SshOpenError::into_freeform(
-                            format!("打开超时({}秒)", OPEN_REPLY_TIMEOUT.as_secs()),
-                        )));
+                        return Err(open_failed(
+                            &instance,
+                            SshOpenError::into_freeform(format!(
+                                "打开超时({}秒)",
+                                OPEN_REPLY_TIMEOUT.as_secs()
+                            )),
+                        ));
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(open_failed(&instance, SshOpenError::into_freeform(
-                        "SSH 会话任务退出(回执通道关闭)".into(),
-                    )));
+                    return Err(open_failed(
+                        &instance,
+                        SshOpenError::into_freeform("SSH 会话任务退出(回执通道关闭)".into()),
+                    ));
                 }
             }
         }
@@ -341,7 +434,10 @@ impl SshManager {
         }
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let session = Arc::new(SshSession { cmd_tx: cmd_tx.clone(), dead: Arc::clone(&dead) });
+        let session = Arc::new(SshSession {
+            cmd_tx: cmd_tx.clone(),
+            dead: Arc::clone(&dead),
+        });
         let rt = tokio::runtime::Handle::current();
         rt.spawn(run_session(record.clone(), cmd_rx, dead));
         sessions.push((record.id.clone(), Arc::clone(&session)));
@@ -349,7 +445,10 @@ impl SshManager {
     }
 
     fn drop_session(&self, host_id: &str) {
-        self.sessions.lock().unwrap().retain(|(id, _)| id != host_id);
+        self.sessions
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| id != host_id);
     }
 }
 
@@ -361,7 +460,11 @@ pub fn next_instance_key(host_id: &str, base: &str, occupied_full_keys: &[String
     let base_key = format!("{host_id}{}{base}", ss_core::PORT_KEY_SEP);
     let taken: HashSet<&str> = occupied_full_keys
         .iter()
-        .filter(|k| k.starts_with(&base_key) && k.len() > base_key.len() && k.as_bytes()[base_key.len()] == b'@')
+        .filter(|k| {
+            k.starts_with(&base_key)
+                && k.len() > base_key.len()
+                && k.as_bytes()[base_key.len()] == b'@'
+        })
         .map(|k| ss_core::split_port_key(k).1)
         .collect();
     if !occupied_full_keys.contains(&base_key) {
@@ -387,7 +490,10 @@ mod tests {
     #[test]
     fn next_instance_first_is_base() {
         assert_eq!(next_instance_key("h", "shell", &[]), "shell");
-        assert_eq!(next_instance_key("h", "shell", &[key("other::shell"), key("h::COM5")]), "shell");
+        assert_eq!(
+            next_instance_key("h", "shell", &[key("other::shell"), key("h::COM5")]),
+            "shell"
+        );
     }
 
     #[test]
@@ -416,7 +522,11 @@ mod tests {
             username: "root".into(),
             nickname: None,
             auth: SshAuthRecord::Agent,
-            endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+            endpoints: vec![SshEndpointRecord {
+                name: "shell".into(),
+                r#type: "shell".into(),
+                alias: None,
+            }],
         }]);
         let err = match m.open_blocking("h1", "exec:foo", &SerialConfig::default()) {
             Ok(_) => panic!("未定义端点应报错"),

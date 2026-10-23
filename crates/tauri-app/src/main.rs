@@ -368,12 +368,15 @@ async fn open_port_stream(
             // 结构化错误:invoke reject 载荷为 {message, ssh?}(SSH 认证/host key 分类,
             // 前端弹交互闭环);非 SSH 来源 ssh=None
             let ssh = match &e {
-                ss_core::SerialError::OpenFailed { detail: Some(json), .. } => {
-                    ss_server::ssh::SshOpenError::from_detail(json)
-                }
+                ss_core::SerialError::OpenFailed {
+                    detail: Some(json), ..
+                } => ss_server::ssh::SshOpenError::from_detail(json),
                 _ => None,
             };
-            Err(OpenErrorView { message: e.to_string(), ssh })
+            Err(OpenErrorView {
+                message: e.to_string(),
+                ssh,
+            })
         }
     }
 }
@@ -449,7 +452,9 @@ async fn set_port_alias(
 
 /// SSH 注册表全量。
 #[tauri::command]
-async fn ssh_list(state: tauri::State<'_, AppState>) -> Result<Vec<ss_server::ssh::SshHostRecord>, String> {
+async fn ssh_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ss_server::ssh::SshHostRecord>, String> {
     Ok(state.ssh.registry_snapshot())
 }
 
@@ -497,12 +502,17 @@ async fn ssh_next_instance(
         .into_iter()
         .map(|p| p.name)
         .collect();
-    Ok(ss_server::ssh::next_instance_key(&host_id, &base, &occupied))
+    Ok(ss_server::ssh::next_instance_key(
+        &host_id, &base, &occupied,
+    ))
 }
 
 /// 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。
 #[tauri::command]
-async fn ssh_trust_host(state: tauri::State<'_, AppState>, host_id: String) -> Result<String, String> {
+async fn ssh_trust_host(
+    state: tauri::State<'_, AppState>,
+    host_id: String,
+) -> Result<String, String> {
     let st = state.inner().clone();
     tokio::task::spawn_blocking(move || st.ssh.trust_host_key_blocking(&host_id))
         .await
@@ -511,7 +521,12 @@ async fn ssh_trust_host(state: tauri::State<'_, AppState>, host_id: String) -> R
 
 /// PTY 尺寸变更（xterm fit → window_change）。SSH 实例消费；其它端口静默成功。
 #[tauri::command]
-async fn resize_port(state: tauri::State<'_, AppState>, port: String, cols: u32, rows: u32) -> Result<(), String> {
+async fn resize_port(
+    state: tauri::State<'_, AppState>,
+    port: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
     let (dev, rest) = ss_core::split_port_key(&port);
     if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
         state.ssh.resize_blocking(dev, rest, cols, rows);
@@ -522,7 +537,8 @@ async fn resize_port(state: tauri::State<'_, AppState>, port: String, cols: u32,
 /// 弹出原生保存对话框让用户选位置，写 JSON 文本。桌面端导出用（Web 走浏览器 blob 下载）。
 /// 返回 true=已保存，false=用户取消（不报错）。
 #[tauri::command]
-async fn save_json_file(default_name: String, content: String) -> Result<bool, String> {    let file = rfd::AsyncFileDialog::new()
+async fn save_json_file(default_name: String, content: String) -> Result<bool, String> {
+    let file = rfd::AsyncFileDialog::new()
         .set_file_name(&default_name)
         .add_filter("JSON", &["json"])
         .save_file()
