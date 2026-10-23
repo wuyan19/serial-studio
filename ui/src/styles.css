@@ -2101,6 +2101,7 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative; /* 锚定右上角操作说明浮层(同 dialog--macro 的最大化按钮) */
 }
 .dialog--shortcuts .shortcut-list {
   flex: 1;

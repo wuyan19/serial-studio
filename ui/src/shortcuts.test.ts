@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { comboToAccelerator, eventToCombo, findAction, formatCombo } from "./shortcuts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { comboToAccelerator, DEFAULT_BINDINGS, eventToCombo, findAction, formatCombo, setBinding } from "./shortcuts";
 
 /** 造最小 KeyboardEvent 形状（node 环境无 DOM，eventToCombo 只读这五个字段）。 */
 function ev(key: string, opts: { ctrl?: boolean; meta?: boolean; alt?: boolean; shift?: boolean }) {
@@ -91,5 +91,49 @@ describe("formatCombo", () => {
     expect(formatCombo("mod+shift+f")).toBe("Ctrl+Shift+F");
     expect(formatCombo("mod+-")).toBe("Ctrl+-");
     expect(formatCombo("")).toBe("—");
+  });
+});
+
+describe("解绑（空 combo，改键对话框录制中按 Backspace 触达）", () => {
+  beforeEach(() => {
+    // setBinding → validateCombo → isReserved → isTauri 读 window；node 环境无 DOM，
+    // stub 空 window（无 __TAURI_INTERNALS__ = web 模式语义）
+    vi.stubGlobal("window", {});
+  });
+  afterEach(() => {
+    // 先还原（此时 window 仍 stub），再撤全部 stub
+    setBinding("search.open", DEFAULT_BINDINGS["search.open"].combo);
+    setBinding("theme.toggle", DEFAULT_BINDINGS["theme.toggle"].combo);
+    vi.unstubAllGlobals();
+  });
+
+  it("空串解绑恒成功，解绑后任何组合不再命中该动作", () => {
+    expect(setBinding("search.open", "")).toEqual({ ok: true });
+    expect(findAction("mod+shift+f")).toBeNull();
+  });
+
+  it("被解绑的组合释放，可被其它动作占用（冲突检查跳过空 combo）", () => {
+    setBinding("search.open", "");
+    expect(setBinding("theme.toggle", "mod+shift+f")).toEqual({ ok: true });
+    expect(findAction("mod+shift+f")).toEqual({ id: "theme.toggle" });
+  });
+
+  it("解绑的空串 overlay 持久化往返不丢（不被 load 的 ?? 吞回默认）", async () => {
+    // localStorage 是模块私有的存取通道，stub + resetModules 走真实 persist/load
+    const store: Record<string, string> = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => {
+        store[k] = v;
+      },
+    });
+    vi.resetModules();
+    const m = await import("./shortcuts");
+    expect(m.setBinding("search.open", "")).toEqual({ ok: true });
+    expect(JSON.parse(store["serial-studio-keybindings2"])["search.open"]).toBe("");
+    // 重新加载（load 在 import 时执行）：空串非 nullish，?? 必须原样保留
+    vi.resetModules();
+    const m2 = await import("./shortcuts");
+    expect(m2.getBindings()["search.open"].combo).toBe("");
   });
 });

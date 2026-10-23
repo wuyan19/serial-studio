@@ -15,6 +15,9 @@ import { ContextMenu, type ContextMenuItem } from "./context-menu";
 
 // ===== 终端视图 =====
 
+/** 空态提示条的键帽：动作被解绑（combo 空）时不渲染键帽只留文字，避免"—"残影。 */
+const HintKbd = ({ combo }: { combo: string }) => (combo ? <kbd>{formatCombo(combo)}</kbd> : null);
+
 // xterm 配色在 theme.ts 注册表里集中定义(canvas 不吃 CSS 变量,只能给纯色);
 // 此处仅按当前主题取定义,不再持有本地映射表——新增主题无需改本文件。
 const MONO_STACK =
@@ -591,7 +594,7 @@ export function GroupView({
                     e.stopPropagation();
                     onReconnectTab?.(port);
                   }}
-                  title={`重连 ${portName} (${formatCombo(getBindings()["port.reconnect"].combo)})`}
+                  title={`重连 ${portName}${bindings["port.reconnect"].combo ? ` (${formatCombo(bindings["port.reconnect"].combo)})` : ""}`}
                 >
                   <IconPlug />
                 </span>
@@ -608,11 +611,12 @@ export function GroupView({
             <IconPlug className="term-empty__icon" />
             <div>从左侧 PORTS 打开一个串口开始收发</div>
             {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
-                现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆 */}
+                现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。
+                动作被解绑(combo 空)时不渲染键帽,只留文字——不显示"—"残影 */}
             <div className="term-empty__hint">
-              <span><kbd>{formatCombo(bindings["port.palette"].combo)}</kbd> 串口面板</span>
-              <span><kbd>{formatCombo(bindings["macro.palette"].combo)}</kbd> 宏</span>
-              <span><kbd>{formatCombo(bindings["script.palette"].combo)}</kbd> 脚本</span>
+              <span><HintKbd combo={bindings["port.palette"].combo} /> 串口面板</span>
+              <span><HintKbd combo={bindings["macro.palette"].combo} /> 宏</span>
+              <span><HintKbd combo={bindings["script.palette"].combo} /> 脚本</span>
             </div>
           </div>
         )}

@@ -5,7 +5,7 @@ import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, Scrip
 import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
-import { IconAlert, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconKeyboard, IconPlug, IconSsh } from "../icons";
+import { IconAlert, IconClose, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconInfo, IconKeyboard, IconPlug, IconSsh } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 import { marked } from "marked";
 
@@ -536,11 +536,12 @@ const SHORTCUT_GROUPS: { title: string; items: ActionId[] }[] = [
 
 /** 快捷键改键对话框：分 5 组卡片两列展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。
  *  模态打开时 App 的全局 listener 已被抑制，这里的录制 listener 独占 keydown。
- *  录制中：读下一组非纯修饰符 keydown → setBinding 校验；Esc 取消录制。
+ *  录制中：读下一组非纯修饰符 keydown → setBinding 校验；裸 Backspace 清除绑定；Esc 取消录制。
  *  非录制：Esc 关闭对话框。 */
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const [map, setMap] = useState<ShortcutMap>(() => getBindings());
   const [recording, setRecording] = useState<ActionId | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [error, setError] = useState("");
   // Web 页面端(!isTauri)只隐藏 remote.open(已处远程,再开远程无意义);其余均显示
   const groups = SHORTCUT_GROUPS.map((g) => ({
@@ -557,12 +558,27 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Esc 优先级链(由外到内逐层退)：帮助浮层 → 录制态 → 对话框本身。
+      // 帮助浮层不能用 useEscClose——它与本 effect 双 window 监听且本 effect 先注册，
+      // Esc 会连对话框一起关掉，必须在此统一裁决。
+      if (e.key === "Escape" && helpOpen) {
+        e.preventDefault();
+        setHelpOpen(false);
+        return;
+      }
       if (recording) {
         e.preventDefault();
         e.stopPropagation();
         const combo = eventToCombo(e);
         if (!combo) return; // 纯修饰符，等主键
         if (combo === "escape") {
+          setRecording(null);
+          setError("");
+          return;
+        }
+        // 裸退格 = 清除该动作的快捷键；带修饰符的组合(mod+alt+backspace)仍是普通候选
+        if (combo === "backspace") {
+          setBinding(recording, ""); // 空 combo = 解绑，validateCombo 恒放行
           setRecording(null);
           setError("");
           return;
@@ -581,13 +597,25 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [recording, onClose]);
+  }, [recording, helpOpen, onClose]);
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
   return (
     /* 遮罩按下关闭(改键即改即存,无"未保存丢失"顾虑;Esc 语义不变) */
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="键盘快捷键" className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
+        {/* 右上角操作说明浮层(同脚本编辑器的 info 速查) */}
+        <button
+          className="dialog__max"
+          onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */}
+          onClick={() => setHelpOpen((v) => !v)}
+          title="快捷键操作说明"
+          aria-label="快捷键操作说明"
+          aria-expanded={helpOpen}
+        >
+          <IconInfo />
+        </button>
+        {helpOpen && <ShortcutsHelpPanel onClose={() => setHelpOpen(false)} />}
         <h3 className="dialog__title">
           <IconKeyboard /> SHORTCUTS
         </h3>
@@ -665,6 +693,32 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** 快捷键对话框右上角速查浮层：复用脚本编辑器 script-help 的浮层样式与结构。
+ *  键盘关闭由 ShortcutsDialog 的录制 effect 统一裁决（Esc 优先级链），此处不做键盘处理。 */
+function ShortcutsHelpPanel({ onClose }: { onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDialogA11y(ref);
+  return (
+    <>
+      {/* 点击面板外(对话框内区域)关闭；同时挡住行区域——帮助开着时点行先关帮助 */}
+      <div className="script-help__backdrop" onClick={onClose} />
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="快捷键操作说明" className="script-help">
+        <div className="script-help__head">
+          <span>速查</span>
+          <button className="banner__close" onClick={onClose} aria-label="关闭帮助">
+            <IconClose />
+          </button>
+        </div>
+        <div className="script-help__row">点击键帽 → 录制新组合</div>
+        <div className="script-help__row">录制中 <code>Backspace</code> 清除 / <code>Esc</code> 取消</div>
+        <div className="script-help__row">组合须含 Ctrl/⌘ 或 Alt（重连除外）</div>
+        <div className="script-help__row">冲突 / 保留键会被拒绝</div>
+        <div className="script-help__row"><code>↺</code> 恢复默认 · 「全部重置」恢复全部</div>
+      </div>
+    </>
   );
 }
 
