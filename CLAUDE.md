@@ -76,6 +76,7 @@ npx tsc --noEmit --prefix ui     # 严格类型检查(vite build 会吞部分错
 - **段名=实例 id(身份统一)**:每台 ss 实例首启生成 uuid 落 settings.json(`settings::instance_id`,跨重启永不变)。DeviceClient 建连先经 Version 交换身份(双向 `instance_id` 可选字段,旧版对端缺省=None):**连接发起方学到的对端实例 id 直接作为段名**——占位 uuid(前端添加设备时生成)经 `adopt_device_id` 删旧建新替换,**学习先于 online**(open/列表/别名永远只见过学习 id,无端口键迁移)。学习是单向的(hub 不为连入方命名);重复注册学到同 id → 后学者保持占位(warn);旧版对端不报 id → 占位保持(行为与旧版一致)。多级键 `instA::instB::instC::COM7` 的段链即**全局路径向量**。
 - **防环谓词双层**(纯函数 `passthrough_port_key`,lib.rs,列表合并与别名索引共用):①语义判据——非首段含本机实例 id = 绕回(互注册幽灵一次斩断);首段豁免(自连镜像 `selfId::COM7` 合法);②结构判据(永在,兜底旧版对端的本地 uuid 段名)——段重复(自连第二轮 `me::me::COM7`、绕回 `ab::ba::ab::…`)丢弃;段数上限 4。自连(把本机地址注册为远程设备)是合法形态:本地口的远程镜像,open 路由回本机(附加到同一端口的占有权)。多级级联的口在直连设备的 UI 可见(归其分组平铺,`displayPortName` 只显串口名)。
 - **list 合并**(server/src/lib.rs::list_ports_with_meta):本地桶(manager 枚举 + 本地别名)⊕ 远端桶(DeviceClient 缓存的远端 PortView 透传,多级条目经 `passthrough_port_key` 判定,**远端别名归端口所在机器**)⊕ 本地占有权快照覆盖(opened/holders/disconnected 以本地为唯一真相)。远端桶缓存本身不过滤二级条目(量级极小),谓词在两处消费点(列表合并 + 别名索引)兜底。
+- **端口行结构化元数据**(设计文档 docs/port-endpoint-model.md):PortView 除 alias 外还带 `kind`("serial"/"ssh",字符串枚举留扩展)、`instance`(shell@N 实例行序号)、`device`(属主 `{id,label,detail,via,online?}`)。**name 复合键仍是唯一寻址键但降级为不透明句柄**——UI 消费语义(弹不弹串口配置框/设备标注/实例行判定/分桶)读结构化字段,不解析字符串;仅老 server(字段缺省)回退旧猜测。远端桶透传时 device 改写:对端自称本机(via=local 或字段缺失)→ 换成直连设备视角,其余原样——**行上 device 恒为绝对属主**(级联口归 origin 设备)。前端 pid 在 store ingest 单源定型(`wireToPid(transport域,线名)`=事件回流键),桶内行带 pid,消费方不再反算。
 - **前端 id 对齐**:Devices 推送带 `host/port`(DeviceStateView),App 的 onDevices(isLocal)按地址把学习 id 对齐回 remotes(`lib.ts::alignRemotesId` 纯函数)并 persistRemotes 写回——**remotes.json 唯一写者仍是前端 save_remotes**,后端永不写盘。设备命令(断开/重连/删除)与折叠态键随之替换;web/remote-window 形态不经后端设备层,零涉及。
 
 ### 串口占有权模型(session 引用计数)
@@ -133,7 +134,7 @@ text 模式自动追加换行的逻辑**只此一处**:`ss-core::macros::encode_
 | `scripts.json` | 脚本库 | 桌面端走 Tauri command;Web 端 localStorage;MCP 单条 `upsert`/`remove` 经进程内锁 |
 | `remotes.json` | 已知远程设备列表 | 仅桌面端走 Tauri command(`load_remotes`/`save_remotes`);Web/远程窗口由 connConfig 派生单设备,不持久化 |
 
-别名写入的唯一入口是 `set_alias_and_notify`(写 ports.json + 发 meta_bus)。`PortView` 的 `serde(flatten)` 契约要求线上 JSON 扁平为 `{name,opened,holders,alias?}`——改 `PortInfo`/`PortView` 字段要顾全前端 `PortInfo` 接口。
+别名写入的唯一入口是 `set_alias_and_notify`(写 ports.json + 发 meta_bus)。`PortView` 的 `serde(flatten)` 契约要求线上 JSON 扁平为 `{name,opened,holders,alias?,kind?,instance?,device?}`——改 `PortInfo`/`PortView` 字段要顾全前端 `PortInfo` 接口(结构化字段全部可缺省,旧版对端解析新版上报得 None)。
 
 ## 关键不变量(改代码时守住)
 

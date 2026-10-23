@@ -9,6 +9,7 @@ import type {
   PaneNode,
   PortId,
   PortInfo,
+  PortRow,
   RemoteDevice,
   Script,
   ScriptRunCard,
@@ -23,6 +24,7 @@ import { leafGroupIds } from "./pane-tree";
 import {
   DEFAULT_CONFIG,
   alignRemotesId,
+  copyText,
   defaultCaptureName,
   displayPortName,
   downloadJson,
@@ -44,7 +46,6 @@ import {
   saveConn,
   tauriInvoke,
   wireToPid,
-  bucketPidOf,
 } from "./lib";
 import { initialSession, sessionReducer } from "./store";
 import {
@@ -70,7 +71,10 @@ import {
   newStep,
   CompositePortLabel,
   RemoteDialog,
-  RemoteDetailDialog,
+  DeviceDetailDialog,
+  type DeviceDetailInfo,
+  PortDetailDialog,
+  type PortDetailInfo,
   RunCards,
   ScriptEditor,
   ScriptRunParamsDialog,
@@ -83,6 +87,7 @@ import {
   SshManagerDialog,
   SshEditDialog,
   SshTrustDialog,
+  sshAuthLabel,
   TermView,
   validateMacro,
 } from "./components";
@@ -247,7 +252,13 @@ export default function App() {
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
-  const [remoteDetailId, setRemoteDetailId] = useState<string | null>(null);
+  /** 通用设备详情弹窗目标(remote/ssh 按 id 实时查本地注册表;meta = 级联补充卡,
+   *  按 device.id 从端口行实时查元数据;local = 本机)。 */
+  const [deviceDetail, setDeviceDetail] = useState<
+    { kind: "remote" | "ssh" | "local" | "meta"; id?: string } | null
+  >(null);
+  /** 端口详情弹窗目标(按 pid 实时查行;行消失 → 弹窗自然关闭)。 */
+  const [portDetail, setPortDetail] = useState<PortId | null>(null);
   // ===== SSH 设备（注册表在所连 server 侧；经 transport ssh_* 面读写） =====
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
@@ -534,6 +545,29 @@ export default function App() {
     []
   );
 
+  /** pid → 列表行（经 sessionRef 直读最新态）：稳定回调（openPort 等）与 render
+   *  作用域共用同一访问器——ingest 定型的 pid 与结构化元数据（kind/device）的
+   *  唯一查询口。查不到（列表未到达/端口已移除）返回 undefined，调用方各自回退。 */
+  const portRowOf = useCallback((pid: PortId): PortRow | undefined => {
+    for (const rows of Object.values(sessionRef.current.portsByDev)) {
+      const row = rows.find((r) => r.pid === pid);
+      if (row) return row;
+    }
+    return undefined;
+  }, []);
+  const portInfoOf = (pid: PortId): PortInfo | undefined => portRowOf(pid);
+  /** 端点是否无串口参数语义（SSH 等）：线上 kind 优先（kind!=="serial"）；老
+   *  server 缺 kind 回退 pid 首段 ∈ sshHosts（桌面形态可靠；web 形态首段是连接桶，
+   *  回退失灵——老 server + web 的误弹是已知遗留，升级 server 即愈）。 */
+  const isNonSerialPid = (pid: PortId): boolean => {
+    const k = portRowOf(pid)?.kind;
+    return k !== undefined ? k !== "serial" : sshHosts.some((h) => h.id === parsePortId(pid).devId);
+  };
+  /** pid → SSH 设备（结构化 device.id 优先；老 server 回退首段）。认证/指纹闭环
+   *  与 issue 弹窗共用——web 形态 pid 首段是连接桶，回退查不中。 */
+  const sshHostOfPid = (pid: PortId): SshHost | undefined =>
+    sshHosts.find((h) => h.id === (portRowOf(pid)?.device?.id ?? parsePortId(pid).devId));
+
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
    *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
   const openPort = useCallback(async (pid: PortId, config: SerialConfig) => {
@@ -544,9 +578,15 @@ export default function App() {
       // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
       dispatch({ type: "port_acquired", pid, config: res.config });
       if (!res.opened) {
-        // 附加到已开端口：请求的 config 被忽略，告知实际配置
-        const c = res.config;
-        libNotify(`已加入 ${displayPortName(pid)}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${c.baud_rate} 波特、换行 ${c.line_ending.toUpperCase()}。如需修改配置，请强制关闭该端口后重新打开。`, 8000);
+        // 附加到已开端口：请求的 config 被忽略，告知实际配置。SSH 等非串口无
+        // 波特率语义（线上 kind 判别；老 server 缺省按串口文案）。
+        const k = portRowOf(pid)?.kind;
+        libNotify(
+          k !== undefined && k !== "serial"
+            ? `已加入 ${displayPortName(pid)}（当前 ${res.holders} 人在线）。`
+            : `已加入 ${displayPortName(pid)}（当前 ${res.holders} 人在线）；端口沿用既有配置 ${res.config.baud_rate} 波特、换行 ${res.config.line_ending.toUpperCase()}。如需修改配置，请强制关闭该端口后重新打开。`,
+          8000
+        );
       }
       return res;
     } catch (e) {
@@ -560,7 +600,7 @@ export default function App() {
       }
       return undefined;
     }
-  }, [libNotify, libError, cmdTransport]);
+  }, [libNotify, libError, cmdTransport, portRowOf]);
 
   /** 取走该口记录队列的剩余积压并合并(状态转换点收尾用);空队列返回 null。
    *  只碰 ref,故 useCallback([]) 稳定。 */
@@ -627,12 +667,15 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     dispatch({ type: "prune_port", pid });
   }, [finishCapture, setRecBarByPort, takeCaptureQueue]);
 
-  /** 记录默认名的设备标识:remotes 昵称优先,否则键首段(uuid)。本地口返回 undefined。 */
+  /** 记录默认名的设备标识:结构化 device.label 优先(SSH/级联属主都有),回退
+   *  remotes 昵称/键首段。本地口返回 undefined。 */
   const devLabelOf = useCallback((pid: PortId): string | undefined => {
+    const d = portRowOf(pid)?.device;
+    if (d && d.via !== "local") return d.label;
     const { devId } = parsePortId(pid);
     if (devId === "local") return undefined;
     return remotesRef.current.find((r) => r.id === devId)?.nickname ?? devId;
-  }, []);
+  }, [portRowOf]);
 
   /** 选记录文件(原生保存对话框)→ 开始记录。用户取消不动现状;换文件先收尾旧句柄。
    *  对话框悬停期间旧会话保持 recording:flush 定时器照常写旧文件,数据零丢失。 */
@@ -816,7 +859,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               return next;
             });
             // 详情弹窗若开着同一设备,跟随 id 替换(否则按旧 id 查找失败而静默关闭)
-            setRemoteDetailId((prev) => (prev ? renamed.get(prev) ?? prev : prev));
+            setDeviceDetail((prev) =>
+              prev?.kind === "remote" && prev.id ? { ...prev, id: renamed.get(prev.id) ?? prev.id } : prev
+            );
           }
         }
         let anyOnline = false;
@@ -962,7 +1007,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     if (!connected) return;
     const t = cmdTransport();
     if (!t) return;
-    const un1 = t.onSshHosts((hosts) => setSshHosts(hosts));
+    // ssh_hosts 变化(本端增删改/别的客户端写)后重拉端口列表:SSH 桶的端点行随
+    // 注册表生灭,不重拉则被删设备的行残留(侧栏幽灵卡)。
+    const un1 = t.onSshHosts((hosts) => {
+      setSshHosts(hosts);
+      t.list();
+    });
     void t.sshList().catch(() => {/* 拉取失败:onError 已有通用提示 */});
     return () => {
       un1();
@@ -1277,11 +1327,20 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
         aliasOf={aliasOf}
         sourceLabelOf={(pid) => {
+          // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
+          // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
+          const d = portRowOf(pid)?.device;
+          if (d) {
+            if (d.via !== "local") return d.label;
+            if (isLocal || remotes.length === 0) return undefined;
+            const s = remotes[0];
+            return s.nickname?.trim() || `${s.host}:${s.port}`;
+          }
           if (remotes.length === 0) return undefined;
           const { devId } = parsePortId(pid);
           if (devId === "local") return undefined;
-          const d = remotes.find((r) => r.id === devId);
-          return d ? (d.nickname?.trim() || `${d.host}:${d.port}`) : undefined;
+          const r = remotes.find((x) => x.id === devId);
+          return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
         }}
         disconnectedOf={(pid) => disconnectedPorts.has(pid)}
         onReconnectTab={reconnectPort}
@@ -1321,10 +1380,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     openPort(pid, portConfigs[pid] ?? DEFAULT_CONFIG);
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
-   *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。 */
+   *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。
+   *  串口/非串口的分野读线上 kind(isNonSerialPid)——与设备表无关,三种形态统一,
+   *  不再有"pid 首段 ∈ sshHosts"的形态敏感猜测。 */
   const triggerPort = (pid: PortId) => {
-    // SSH 端点/实例行：走标准 open 流程,但不弹串口配置框(无波特率语义,DEFAULT_CONFIG)
-    const isSshPort = sshHosts.some((h) => h.id === parsePortId(pid).devId);
     if (disconnectedPorts.has(pid)) {
       void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
       return;
@@ -1335,11 +1394,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       if (gid) switchTabInGroup(gid, pid);
       else switchPort(pid);
     } else {
-      const { devId } = parsePortId(pid);
-      const info = portsByDev[devId]?.find((p) => bucketPidOf(devId, p.name) === pid);
+      const info = portInfoOf(pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
-      else if (isSshPort) void openPort(pid, DEFAULT_CONFIG); // SSH 未开：直连(无配置框)
-      else setPendingPort(pid); // 未开：弹配置框
+      else if (isNonSerialPid(pid)) void openPort(pid, DEFAULT_CONFIG); // SSH 等非串口：直连(无配置框)
+      else setPendingPort(pid); // 串口未开：弹配置框
     }
   };
 
@@ -1506,11 +1564,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }
   };
 
-  /** 新建终端：先向 server 要空闲实例名（shell / shell@N）再走标准 open。 */
+  /** 新建终端：先向 server 要空闲实例名（shell / shell@N）再走标准 open。
+   *  pid 经 transport 域定型（wireToPid）——web 形态需 remote:: 前缀，与事件
+   *  回流键同源；此前手拼 hostId::name 在 web 形态与数据帧键错位（终端哑）。 */
   const newShellSession = async (hostId: string) => {
     try {
       const name = await cmdTransport()?.sshNextInstance(hostId, "shell");
-      if (name) await openPort(portIdOf(hostId, name), DEFAULT_CONFIG);
+      if (name) {
+        const domain = cmdTransport()?.devId ?? "local";
+        await openPort(wireToPid(domain, portIdOf(hostId, name)), DEFAULT_CONFIG);
+      }
     } catch (e) {
       libError(`新建终端失败：${String(e)}`);
     }
@@ -1518,7 +1581,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   /** 认证重输确认:更新保存的密码并立即重开(失败会再次进入闭环弹窗)。 */
   const retrySshAuth = async (pid: PortId, password: string, updateSaved: boolean) => {
-    const host = sshHosts.find((h) => h.id === parsePortId(pid).devId);
+    const host = sshHostOfPid(pid);
     setSshIssue(null);
     if (!host) return;
     if (updateSaved) {
@@ -1529,10 +1592,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   /** 指纹信任确认:记录指纹(直连即断)并立即重开。 */
   const trustSshHost = async (pid: PortId) => {
-    const hostId = parsePortId(pid).devId;
+    const host = sshHostOfPid(pid);
     setSshIssue(null);
+    if (!host) return;
     try {
-      await cmdTransport()?.sshTrustHost(hostId);
+      await cmdTransport()?.sshTrustHost(host.id);
     } catch (e) {
       libError(`信任指纹失败：${String(e)}`);
       return;
@@ -1610,13 +1674,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     cmdTransport()?.list();
   };
 
-  /** 按复合键查端口信息。桶内条目名经 bucketPidOf 幂等转 pid 后比对——本地合并
-   *  视图条目名即完整 pid(直通),web 形态条目名是远端侧键(加桶前缀),两种形态统一命中。 */
-  const portInfoOf = (pid: PortId): PortInfo | undefined => {
-    const { devId } = parsePortId(pid);
-    return portsByDev[devId]?.find((p) => bucketPidOf(devId, p.name) === pid);
-  };
-  const aliasOf = (pid: PortId) => portInfoOf(pid)?.alias;
+  const aliasOf = (pid: PortId) => portRowOf(pid)?.alias;
 
   /** 提交别名：统一走 set_alias（后端按端口键路由——本机写 ports.json，SSH 端点写
    *  注册表，远端设备转发；成功后 meta 广播驱动列表刷新）。空串 = 清除。 */
@@ -1636,8 +1694,31 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const macroFailed = [...macroRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && macroUnseen.has(rid));
   const scriptRunning = [...scriptRuns.values()].some((c) => c.status === "running");
   const scriptFailed = [...scriptRuns.entries()].some(([rid, c]) => c.status === "done" && !c.success && scriptUnseen.has(rid));
-  /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）+ SSH 设备卡（预览）。
-   *  每卡带 devId/label/online/ports；SSH 卡 kind="ssh"（lazy 连接——无 online，状态在 shell 行）。 */
+  /** 串口分组：本地卡（仅桌面）+ 远程设备卡（按 remotes 顺序）+ SSH 设备卡 + 补充卡。
+   *  桶内行已带 pid（ingest 定型）；SSH 卡 kind="ssh"（lazy 连接——无 online，状态
+   *  在 shell 行）。补充卡兜住 device 分桶产生、但本地表（remotes/sshHosts）查不到的
+   *  属主——web 形态的级联设备、sshList 未同步的窗口期——行上 device 元数据即卡片
+   *  信息，任何端口行都有卡可归，不静默丢失。 */
+  const knownDevs = new Set<string>([
+    ...(isLocal ? ["local"] : []),
+    ...remotes.map((r) => r.id),
+    ...sshHosts.map((h) => h.id),
+  ]);
+  const extraGroups: PortGroupView[] = Object.entries(portsByDev)
+    .filter(([id]) => !knownDevs.has(id))
+    .map(([id, ports]) => {
+      const d = ports.find((p) => p.device?.id === id)?.device;
+      return {
+        devId: id,
+        label: d?.label ?? id,
+        detail: d?.detail,
+        online: d?.online ?? undefined,
+        kind: d?.via === "ssh" ? ("ssh" as const) : undefined,
+        external: true,
+        meta: d,
+        ports,
+      };
+    });
   const portGroups: PortGroupView[] = [
     ...(isLocal ? [{ devId: "local", label: "本地", online: devOnline["local"], ports: portsByDev["local"] ?? [] }] : []),
     ...remotes.map((d) => ({
@@ -1647,8 +1728,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       ports: portsByDev[d.id] ?? [],
     })),
     // SSH 卡:端口行直接来自 server 侧 list(注册表端点行 + manager 快照的实例行
-    // shell@N——opened/holders/disconnected 全是真实态)。aliasableNames 供铅笔白名单
-    // (实例行 shell@N 不挂铅笔,别名属端点定义)。
+    // shell@N——opened/holders/disconnected 全是真实态)。行别名:端点写注册表,
+    // 实例走内存表(铅笔对两类行都有效)。
     ...sshHosts.map((h) => ({
       devId: h.id,
       label: h.nickname?.trim() || `${h.username}@${h.host}`,
@@ -1656,27 +1737,30 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       kind: "ssh" as const,
       ports: portsByDev[h.id] ?? [],
     })),
+    ...extraGroups,
   ];
-  /** 平铺所有端口（带 pid），供 PortPalette 搜索选择。bucketPidOf 幂等转 pid。
+  /** 平铺所有端口（行已带 pid），供 PortPalette 搜索选择。
    *  SSH 端点/实例也进面板——已是真实端口,选中即走 open。 */
-  const allPorts: (PortInfo & { pid: PortId })[] = portGroups.flatMap((g) =>
-    g.ports.map((p) => ({ ...p, pid: bucketPidOf(g.devId, p.name) })),
-  );
-  /** 端口面板条目的设备标注:复合键端点名可能跨设备重名(两台 SSH 设备各有 shell)。
-   *  判据用服务端原始名(p.name)的首段——SSH 端点/远程口在服务端已是复合键,首段即
-   *  属主设备;裸串口名(连接服务器自身枚举)无 ::,不标。SSH 标 昵称|user@host,
-   *  远程设备标 昵称|host:port。 */
-  const portDeviceLabelOf = (name: string): string | undefined => {
-    const idx = name.indexOf("::");
+  const allPorts: PortRow[] = portGroups.flatMap((g) => g.ports);
+  /** 端口面板条目的设备标注（结构化优先）：行带 device 直接用——via=local 在 web
+   *  形态标所连 server（remotes[0] 派生条目，它是实际提供方），桌面本机口不标；
+   *  老 server 缺 device 回退拆首段查表。 */
+  const portDeviceLabelOf = (p: PortRow): string | undefined => {
+    const d = p.device;
+    if (d) {
+      if (d.via !== "local") return d.label;
+      if (isLocal || remotes.length === 0) return undefined;
+      const s = remotes[0];
+      return s.nickname?.trim() || `${s.host}:${s.port}`;
+    }
+    const idx = p.name.indexOf("::");
     if (idx < 0) return undefined;
-    const devId = name.slice(0, idx);
+    const devId = p.name.slice(0, idx);
     const ssh = sshHosts.find((h) => h.id === devId);
     if (ssh) return ssh.nickname?.trim() || `${ssh.username}@${ssh.host}`;
-    const r = remotes.find((r) => r.id === devId);
+    const r = remotes.find((x) => x.id === devId);
     return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
   };
-  /** 详情弹窗设备（按 id 实时查找；设备被删 → undefined → 弹窗不渲染，自然关闭）。 */
-  const remoteDetail = remoteDetailId ? remotes.find((r) => r.id === remoteDetailId) : undefined;
   const activeConfig = activePort ? portConfigs[activePort] : undefined;
   const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
   // 活动端口拆段:devId 优先换设备昵称,查无昵称/非本表设备(web 形态级联中段)
@@ -1685,15 +1769,30 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const { devId: activeDevId, name: activePortName } = parsePortId(activePort);
   const activeDev =
     activeDevId === "local" ? undefined : remotes.find((r) => r.id === activeDevId);
-  /** 活动端口友好显示(通道条 / 宏与脚本面板标题共用):设备段=远程昵称优先
-   *  (兜底 uuid,悬停补 id · 地址),本地口无前缀;端口段走 CompositePortLabel
-   *  的 PortLabel(串口别名优先,别名(真名))。 */
-  const activePortDev = activeDev
-    ? { label: activeDev.nickname?.trim() || activeDev.id, title: `${activeDev.id} · ${activeDev.host}:${activeDev.port}` }
-    : undefined;
+  /** 活动端口友好显示(通道条 / 宏与脚本面板标题共用):设备段=结构化 device
+   *  优先(SSH/级联属主都有 label,悬停补 id · 地址;老 server 回退 remotes 昵称,
+   *  兜底 uuid),本地口无前缀;端口段走 CompositePortLabel 的 PortLabel
+   *  (串口别名优先,别名(真名))。 */
+  const activePortDev = (() => {
+    const d = portInfoOf(activePort)?.device;
+    if (d && d.via !== "local")
+      return { label: d.label, title: d.detail ? `${d.id} · ${d.detail}` : d.id };
+    return activeDev
+      ? { label: activeDev.nickname?.trim() || activeDev.id, title: `${activeDev.id} · ${activeDev.host}:${activeDev.port}` }
+      : undefined;
+  })();
   const activePortLabel = activePort ? (
     <CompositePortLabel dev={activePortDev} portName={activePortName} alias={aliasOf(activePort)} />
   ) : null;
+  /** 通道条配置段:非串口(SSH 等)显属主地址 + PTY(结构化 device.detail 优先,
+   *  老 server 回退首段查 sshHosts);串口/未知名 = null → 调用方显实际配置。 */
+  const channelConfigText = (() => {
+    if (!activePort || !isNonSerialPid(activePort)) return null;
+    const detail = portInfoOf(activePort)?.device?.detail;
+    if (detail) return `${detail} · PTY`;
+    const h = sshHosts.find((x) => x.id === activeDevId);
+    return h ? `${h.username}@${h.host}:${h.port} · PTY` : "PTY";
+  })();
 
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
@@ -1734,7 +1833,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     macroPaletteOpen ||
     scriptPaletteOpen ||
     portPaletteOpen ||
-    remoteDetail ||
+    deviceDetail ||
+    portDetail ||
     sshManagerOpen ||
     sshEditDirect ||
     sshIssue
@@ -1918,9 +2018,26 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
               onRenameRemote={renameRemote}
-              onShowRemoteDetail={(dev) => setRemoteDetailId(dev.id)}
+              onShowDeviceDetail={(target) =>
+                setDeviceDetail(
+                  target.kind === "local"
+                    ? { kind: "local" }
+                    : target.kind === "remote"
+                      ? { kind: "remote", id: target.dev.id }
+                      : target.kind === "ssh"
+                        ? { kind: "ssh", id: target.devId }
+                        : { kind: "meta", id: target.device.id }
+                )
+              }
               onSshAction={onSshAction}
               onClosePort={(pid) => closePort(pid)}
+              onCopyPortKey={(row) => {
+                void copyText(row.name).then((ok) => {
+                  if (ok) libNotify(`已复制端口键：${row.name}`, 3000);
+                  else libError(`复制失败，可右键「端口详情」手动复制：${row.name}`);
+                });
+              }}
+              onShowPortDetail={(pid) => setPortDetail(pid)}
               onRefresh={() => refreshPorts()}
             />
           )}
@@ -2186,12 +2303,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </span>
             <span className="channel-strip__sep">·</span>
             <span className="channel-strip__config">
-              {sshHosts.some((h) => h.id === activeDevId)
-                ? (() => {
-                    const h = sshHosts.find((x) => x.id === activeDevId)!;
-                    return `${h.username}@${h.host}:${h.port} · PTY`;
-                  })()
-                : formatConfig(activeConfig)}
+              {channelConfigText ?? formatConfig(activeConfig)}
             </span>
             {activeHolders > 0 && (
               <>
@@ -2358,16 +2470,148 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           existing={remotes.map((r) => `${r.host}:${r.port}`)}
         />
       )}
-      {remoteDetail && (
-        <RemoteDetailDialog
-          dev={remoteDetail}
-          online={devOnline[remoteDetail.id]}
-          ports={portsByDev[remoteDetail.id] ?? []}
-          onClose={() => setRemoteDetailId(null)}
-        />
-      )}
+      {/* 通用设备详情(remote/SSH/本机):按 id 实时查找,设备被删 → info 为空 → 不渲染 */}
+      {deviceDetail && (() => {
+        let info: DeviceDetailInfo | null = null;
+        if (deviceDetail.kind === "remote") {
+          const dev = remotes.find((r) => r.id === deviceDetail.id);
+          if (dev) {
+            info = {
+              icon: "globe",
+              label: dev.nickname?.trim() || `${dev.host}:${dev.port}`,
+              rows: [
+                { label: "地址", value: `${dev.host}:${dev.port}`, copy: true },
+                { label: "昵称", value: dev.nickname?.trim() || "未设置" },
+                { label: "设备 ID", value: dev.id, copy: true },
+              ],
+              online: devOnline[dev.id],
+              ports: portsByDev[dev.id] ?? [],
+              hint: "设备 ID 是该设备的稳定标识（MCP 寻址等用途），重连/改名不变。",
+            };
+          }
+        } else if (deviceDetail.kind === "ssh") {
+          const host = sshHosts.find((h) => h.id === deviceDetail.id);
+          if (host) {
+            // SSH 无"连接中"三态(懒连接):状态 = 空闲/活动会话数,端口列端点+实例行
+            const rows = portsByDev[host.id] ?? [];
+            const opened = rows.filter((p) => p.opened).length;
+            info = {
+              icon: "ssh",
+              label: host.nickname?.trim() || `${host.username}@${host.host}`,
+              rows: [
+                { label: "地址", value: `${host.host}:${host.port}`, copy: true },
+                { label: "用户", value: host.username },
+                { label: "认证", value: sshAuthLabel(host.auth) },
+                { label: "设备 ID", value: host.id, copy: true },
+                { label: "端点", value: host.endpoints.map((e) => e.alias?.trim() || e.name).join(" · ") || "—" },
+              ],
+              statusNode: opened > 0 ? (
+                <><span className="dot on" /> 在线 · {opened} 个活动会话</>
+              ) : (
+                <><span className="dot" /> 空闲</>
+              ),
+              portsText:
+                rows.map((p) => displayPortName(p.name)).join(" · ") ||
+                host.endpoints.map((e) => e.alias?.trim() || e.name).join(" · "),
+              ports: rows,
+              hint: "连接按需建立（首次打开终端时连）；凭据仅存于所连 server，此处不显示。",
+            };
+          }
+        } else if (deviceDetail.kind === "meta") {
+          // 级联补充卡:属主注册在远程 server 上,本机无注册表条目——元数据/端口行
+          // 实时取自端口列表(行上 device),查无(设备消失)→ 弹窗自然关闭。
+          const meta = (() => {
+            for (const rows of Object.values(portsByDev)) {
+              const row = rows.find((r) => r.device?.id === deviceDetail.id);
+              if (row?.device) return { device: row.device, ports: rows };
+            }
+            return undefined;
+          })();
+          if (meta) {
+            const d = meta.device;
+            const opened = meta.ports.filter((p) => p.opened).length;
+            info = {
+              icon: d.via === "ssh" ? "ssh" : "globe",
+              label: d.label,
+              rows: [
+                ...(d.detail ? [{ label: "地址", value: d.detail, copy: true }] : []),
+                { label: "设备 ID", value: d.id, copy: true },
+                { label: "来源", value: d.via === "ssh" ? "SSH 设备（经远程 server 级联）" : "远程 server（级联）" },
+              ],
+              statusNode:
+                d.via === "ssh" ? (
+                  opened > 0 ? (
+                    <><span className="dot on" /> 在线 · {opened} 个活动会话</>
+                  ) : (
+                    <><span className="dot" /> 空闲</>
+                  )
+                ) : d.online === true ? (
+                  <><span className="dot on" /> 在线</>
+                ) : d.online === false ? (
+                  <><span className="dot off" /> 离线</>
+                ) : (
+                  <><span className="dot" /> 连接中…</>
+                ),
+              portsText: meta.ports.map((p) => displayPortName(p.name)).join(" · ") || "无可见端口",
+              ports: meta.ports,
+              hint: "该设备注册在所连的远程 server 上，此处为只读视图（管理需到那台 server）。",
+            };
+          }
+        } else {
+          info = {
+            icon: "plug",
+            label: "本地",
+            rows: [{ label: "设备 ID", value: "local" }],
+            online: true,
+            ports: portsByDev["local"] ?? [],
+          };
+        }
+        return info ? <DeviceDetailDialog info={info} onClose={() => setDeviceDetail(null)} /> : null;
+      })()}
+      {/* 端口详情:按 pid 实时查行(行消失/设备删除 → 不渲染,弹窗自然关闭)。
+          端口键 = 服务端侧键(脚本/MCP 寻址值);类别/状态读结构化字段(老 server 回退推断)。 */}
+      {portDetail && (() => {
+        const row = portRowOf(portDetail);
+        if (!row) return null;
+        const d = row.device;
+        const isSshRow = isNonSerialPid(portDetail);
+        const cfg = portConfigs[portDetail];
+        const info: PortDetailInfo = {
+          icon: isSshRow ? "ssh" : "plug",
+          label: row.alias?.trim() ? `${row.alias}（${displayPortName(row.name)}）` : displayPortName(row.name),
+          rows: [
+            { label: "端口键", value: row.name, copy: true },
+            ...(d
+              ? [
+                  { label: "属主设备", value: d.label },
+                  ...(d.detail ? [{ label: "设备地址", value: d.detail, copy: true }] : []),
+                  { label: "设备 ID", value: d.id, copy: true },
+                ]
+              : []),
+            {
+              label: "类别",
+              value: isSshRow
+                ? row.instance != null
+                  ? `SSH 终端（实例 @${row.instance}）`
+                  : "SSH 端点"
+                : "串口",
+            },
+            {
+              label: "状态",
+              value: row.disconnected
+                ? "已断开（可重连）"
+                : row.opened
+                  ? `已打开 · ${row.holders} 人共享`
+                  : "未打开",
+            },
+            ...(!isSshRow && cfg ? [{ label: "当前配置", value: formatConfig(cfg) }] : []),
+          ],
+        };
+        return <PortDetailDialog info={info} onClose={() => setPortDetail(null)} />;
+      })()}
       {sshIssue && (() => {
-        const host = sshHosts.find((h) => h.id === parsePortId(sshIssue.pid).devId);
+        // 结构化 device.id 查属主(web 形态 pid 首段是连接桶,老查法失灵)
+        const host = sshHostOfPid(sshIssue.pid);
         if (!host) return null;
         const { error, pid } = sshIssue;
         if (error.kind === "auth_failed") {

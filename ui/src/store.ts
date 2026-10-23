@@ -13,11 +13,12 @@
  */
 import { parsePortId, wireToPid } from "./lib";
 import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
-import type { Group, PaneHalf, PaneNode, PortId, PortInfo, SerialConfig } from "./types";
+import type { Group, PaneHalf, PaneNode, PortId, PortInfo, PortRow, SerialConfig } from "./types";
 
 export interface SessionState {
-  /** 按设备域分桶的端口列表（key=devId："local" 或远程设备 UUID/窗口 "remote"）。 */
-  portsByDev: Record<string, PortInfo[]>;
+  /** 按设备域分桶的端口列表（key=devId："local"/远程设备 UUID/窗口 "remote"）。
+   *  桶内条目带 ingest 定型的 pid（单源，消费方不再各自反算）。 */
+  portsByDev: Record<string, PortRow[]>;
   /** devId → 该设备 WS/IPC 是否就绪。 */
   devOnline: Record<string, boolean>;
   /** 本会话打开的端口复合键，有序。 */
@@ -101,18 +102,28 @@ function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId:
 function reduce(s: SessionState, a: SessionAction): SessionState {
   switch (a.type) {
     case "ports_listed": {
-      // 两种列表形态:
-      // - 本地 transport(devId="local"):后端合并视图(本地 + 远端设备桶),
-      //   条目键是本机视角完整键 → 按首段分桶入位(级联条目归直连设备卡,平铺);
-      // - 远程 transport(devId=uuid/"remote"):条目键是远端侧键 → 整体归该桶。
-      const target = (p: PortInfo) => (a.devId === "local" ? parsePortId(p.name).devId : a.devId);
-      const buckets: Record<string, PortInfo[]> = {};
+      // pid 单源定型：wireToPid(transport 域, 线名) = 事件回流键（onData 等同式计键），
+      // 列表/侧栏/查表全消费行上的 pid——此前消费方各自 bucketPidOf 反算，散落且口径漂移。
+      // 分桶：行带 device（新 server）按属主分桶——via=local 归 transport 域（web 形态
+      // server 自家串口归 "remote" 卡），via=ssh/remote 归 device.id（绝对属主，级联口
+      // 归 origin 设备）；老 server 缺 device 回退旧字符串解析（本地按首段/远程整桶）。
+      const buckets: Record<string, PortRow[]> = {};
       for (const p of a.ports) {
-        (buckets[target(p)] ??= []).push(p);
+        const pid = wireToPid(a.devId, p.name);
+        const owner =
+          p.device && p.device.via !== "local"
+            ? p.device.id
+            : a.devId === "local"
+              ? parsePortId(p.name).devId
+              : a.devId;
+        (buckets[owner] ??= []).push({ ...p, pid });
       }
-      // 只覆盖出现的桶——离线设备的桶不随列表到达(后端缓存保留),由 devOnline 表达状态
-      const portsByDev = { ...s.portsByDev, ...buckets };
-      return { ...s, portsByDev };
+      // 整体替换（不是覆盖合并）：列表是所连 transport 的全量合并视图（当前单
+      // transport——本地形态=本地+远端+SSH 桶全量，web=远端 server 全量），消失的
+      // 桶 = 设备已被删除/移除，必须跟着消失——否则残留桶会被补充卡捞成"幽灵设备"
+      // （删除 SSH/远程设备后侧栏仍显示）。离线设备的桶不在"消失"之列：远端桶在
+      // server 侧缓存保留（list 恒含），SSH 注册表行同理。
+      return { ...s, portsByDev: buckets };
     }
 
     case "dev_online": {

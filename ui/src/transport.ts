@@ -21,6 +21,10 @@ export interface OpenError {
 
 /** 数据面传输抽象：屏蔽 IPC/WS 协议差异。组件只懂领域（port/bytes/macro）。 */
 export interface Transport {
+  /** 本 transport 的设备域（local = "local"；远程 = ownerId）。pid 定型单源：
+   *  事件回流与列表 ingest 都按 wireToPid(devId, 线名) 计键，open 侧手拼 pid 的
+   *  调用方（如 SSH 新建终端）必须经它对齐，否则与事件键错位丢数据。 */
+  readonly devId: string;
   /** 触发一次端口列表拉取；数据经 onPorts 回调推送（推送模型，避免请求-响应竞态丢回复）。 */
   list(): Promise<void>;
   /** 端口列表更新回调（list 响应或服务端推送均经此）。后到覆盖先到——最新数据胜出。 */
@@ -226,6 +230,7 @@ abstract class TransportEventBase {
 /** WS 实现（远程/Web 模式）。封装 WS 协议细节（控制 JSON + 数据 Binary 帧）+ 自愈重连 + 心跳。
  *  服务端重启 / 强杀 / 断电后：指数退避自动重连 → 重连成功重新 list + (由 App 层) 重放开过的端口。 */
 export class RemoteTransport extends TransportEventBase implements Transport {
+  readonly devId: string; // = ownerId(接口注释见 Transport.devId)
   private host: string;
   private portNum: number;
   /** 本 transport 所属的远程设备 id(${ownerId}:: 前缀的口属于远端 ss 本机,线上
@@ -258,6 +263,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     this.host = host;
     this.portNum = port;
     this.ownerId = ownerId;
+    this.devId = ownerId;
     this.connect();
   }
 
@@ -596,6 +602,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
 
 /** IPC 实现（本地模式）：Tauri invoke 命令 + event 监听。绕过 WS，进程内直连。 */
 export class LocalTransport extends TransportEventBase implements Transport {
+  readonly devId = "local"; // 接口注释见 Transport.devId
   private unlisten: Array<() => void> = [];
   /** dispose 已发生标记。setupEvents 逐个 `await listen()` 注册(异步),若 dispose
    *  先于注册完成发生(StrictMode 双挂载/effect 快速拆建),晚到的注册经 track 立即

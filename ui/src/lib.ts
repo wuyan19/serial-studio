@@ -214,12 +214,6 @@ export function mergeChunks(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** 桶内条目名 → pid（列表消费侧，幂等）：条目键首段已等于桶 devId（本地 transport
- *  的合并视图，键为完整 pid）则直通；否则（远程 transport 的远端侧键）加桶前缀。 */
-export function bucketPidOf(grpDevId: string, name: string): PortId {
-  return parsePortId(name).devId === grpDevId ? (name as PortId) : portIdOf(grpDevId, name);
-}
-
 // ===== localStorage 持久化（跟着用户走的配置） =====
 
 const CONFIG_KEY = "serial-studio-config";

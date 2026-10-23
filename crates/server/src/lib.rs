@@ -153,16 +153,92 @@ pub fn create_state() -> AppState {
     }
 }
 
-/// 面向客户端的端口视图：core 的运行时事实(`PortInfo`) + server 层用户元数据(alias)。
-/// serde(flatten) 把 PortInfo 内联，线 JSON 扁平为 `{name,opened,holders,alias}`，
-/// 前端 PortInfo 接口无需改。core 不持有别名——别名属 server 关注点。
-/// 未来加 description/color 只在此 struct 加字段，core 不受影响。
+/// 端口行的属主设备视图(结构化元数据,列表合并每行内嵌)。id=稳定主键，
+/// label=已解析展示名(昵称优先)，detail=完整地址(悬停/详情用)，via=hub 够到
+/// 该设备的途径，online 仅 via="remote" 有值(hub 知道连接状态；SSH 懒连接、
+/// 本机恒在)。via 用字符串枚举而非 Rust enum:新版对端上报的新值不得让旧版
+/// 反序列化失败(kind 同理)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceView {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub via: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+}
+
+/// 面向客户端的端口视图：core 的运行时事实(`PortInfo`) + server 层结构化元数据。
+/// serde(flatten) 把 PortInfo 内联；alias/kind/instance/device 均可缺省——
+/// 旧版对端解析新版上报得 None(平滑降级)，新版自身输出恒填充。
+/// name 复合键仍是唯一寻址键(降级为不透明句柄)，语义消费走结构化字段，
+/// UI 不再解析字符串猜属主/类别。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PortView {
     #[serde(flatten)]
     pub info: ss_core::PortInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// 端点类别："serial"|"ssh"(字符串枚举，为 exec/tcp 等新端点类型留空间)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 运行实例序号(Some(n)=shell@N 实例行；缺省=端点定义行/串口行)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<u32>,
+    /// 属主设备(原始属主，非连接桶；远端桶经改写规则维持绝对属主)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceView>,
+}
+
+/// 本机设备视图(本地串口行的 device)。
+fn local_device_view() -> DeviceView {
+    DeviceView {
+        id: ss_core::LOCAL_DEVICE_ID.into(),
+        label: "本地".into(),
+        detail: None,
+        via: "local".into(),
+        online: None,
+    }
+}
+
+/// SSH 设备视图(注册表记录 → 结构化属主)。label 复用记录的解析规则(昵称回退 user@host)。
+fn ssh_device_view(rec: &ssh::SshHostRecord) -> DeviceView {
+    DeviceView {
+        id: rec.id.clone(),
+        label: rec.label(),
+        detail: Some(format!("{}@{}:{}", rec.username, rec.host, rec.port)),
+        via: "ssh".into(),
+        online: None,
+    }
+}
+
+/// 端点 type → 线上 kind。v1 仅 shell(→ssh)；未知值透传(字符串枚举，新旧互不炸)。
+fn endpoint_kind(t: &str) -> String {
+    if t == "shell" {
+        "ssh".into()
+    } else {
+        t.to_string()
+    }
+}
+
+/// 实例行名(shell@N)→ 序号；无 `@` 或尾段非数字 → None(端点定义行)。
+fn instance_no(rest: &str) -> Option<u32> {
+    rest.rsplit_once('@').and_then(|(_, n)| n.parse().ok())
+}
+
+/// 远端桶行的 device 改写(纯函数)：行的 device 缺失(旧版对端)或 via=local
+/// (对端自称本机的串口)时，改写为本机注册的直连设备视角；其余(对端的 SSH/
+/// 远端设备)原样保留。维持不变量：行上 device 恒为绝对属主——多级级联的口
+/// (devB::devC::COM3)归 origin 设备 devC，不归直连中转 devB。
+fn rewrite_remote_device(device: &mut Option<DeviceView>, direct: &DeviceView) {
+    let take = match device.as_ref() {
+        Some(d) => d.via == "local",
+        None => true,
+    };
+    if take {
+        *device = Some(direct.clone());
+    }
 }
 
 /// 端口键的裸名部分(剥设备前缀)。ports.json 按裸名存本机端口的别名——
@@ -216,6 +292,7 @@ pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str, self_id: &str) -> O
 ///    设备离线后 holders 停留在最后一次缓存值,红标已表明状态不可信,无需兜底。
 pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     let meta = port_meta_store::load();
+    let local_device = local_device_view();
     let mut views: Vec<PortView> = state
         .manager
         .list_ports()
@@ -225,21 +302,58 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             let alias = meta
                 .get(bare_name_of(&info.name))
                 .and_then(|m| m.alias.clone());
-            PortView { info, alias }
+            PortView {
+                info,
+                alias,
+                kind: Some("serial".into()),
+                instance: None,
+                device: Some(local_device.clone()),
+            }
         })
         .collect();
     // 远端桶(键加本设备段;后缀保持远端线名)。多级条目透传,环/超深由谓词判定
     // (语义判据用本机实例 id);线名已在 DeviceClient 入站归一(剥遗留 local::)。
     // 远端桶缓存本身不过滤(二级条目量级极小),谓词在两处消费点兜底。
+    // device 改写:直连设备的行(对端自称本机的串口/旧版对端缺字段)换成直连
+    // 设备视角;对端自己的 SSH/远端设备原样透传(绝对属主不变量,见改写函数注释)。
+    let direct_devices: HashMap<String, DeviceView> = state
+        .devices
+        .device_views()
+        .into_iter()
+        .map(|(d, online)| {
+            let addr = format!("{}:{}", d.host, d.port);
+            (
+                d.id.clone(),
+                DeviceView {
+                    id: d.id.clone(),
+                    label: d
+                        .nickname
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or(addr.clone()),
+                    detail: Some(addr),
+                    via: "remote".into(),
+                    online: Some(online),
+                },
+            )
+        })
+        .collect();
     for (dev_id, ports) in state.devices.remote_buckets() {
         for pv in ports {
             let Some(name) = passthrough_port_key(&dev_id, &pv.info.name, &state.instance_id)
             else {
                 continue; // 环(段重复/绕回)或超深,不透传
             };
+            let mut device = pv.device.clone();
+            if let Some(direct) = direct_devices.get(&dev_id) {
+                rewrite_remote_device(&mut device, direct);
+            }
             views.push(PortView {
                 info: ss_core::PortInfo { name, ..pv.info },
                 alias: pv.alias,
+                kind: pv.kind,
+                instance: pv.instance,
+                device,
             });
         }
     }
@@ -247,7 +361,10 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     // 端点行是静态定义(opened 由下方快照覆盖);实例行是运行时产物——从快照按
     // 设备前缀补入(快照是唯一真相:opened/holders/disconnected 直接可用),
     // 别名取内存实例别名表。reopen 的 disconnected 实例同样在快照 → 同样可见。
-    for rec in state.ssh.registry_snapshot() {
+    // 注册表快照取一次:端点行/实例行的 kind/device 共用。
+    let ssh_regs = state.ssh.registry_snapshot();
+    for rec in &ssh_regs {
+        let device = ssh_device_view(rec);
         for ep in &rec.endpoints {
             views.push(PortView {
                 info: ss_core::PortInfo {
@@ -257,6 +374,9 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                     disconnected: false,
                 },
                 alias: ep.alias.clone(),
+                kind: Some(endpoint_kind(&ep.r#type)),
+                instance: None,
+                device: Some(device.clone()),
             });
         }
     }
@@ -267,15 +387,18 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         .into_iter()
         .map(|p| (p.name.clone(), p))
         .collect();
-    let ssh_ids: std::collections::HashSet<String> = state
-        .ssh
-        .registry_snapshot()
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
     for (name, info) in &snap {
-        let (first, _) = ss_core::split_port_key(name);
-        if ssh_ids.contains(first) {
+        let (first, rest) = ss_core::split_port_key(name);
+        if let Some(rec) = ssh_regs.iter().find(|r| r.id == first) {
+            // 实例行的 kind 按端点定义(shell@2 → shell 的 type);端点被删的
+            // 残留实例兜底 "ssh"。
+            let base = rest.split('@').next().unwrap_or(rest);
+            let kind = rec
+                .endpoints
+                .iter()
+                .find(|e| e.name == base)
+                .map(|e| endpoint_kind(&e.r#type))
+                .unwrap_or_else(|| "ssh".into());
             match views.iter_mut().find(|v| v.info.name == *name) {
                 // 端点定义行已占此名(shell 基端点):回填 holders——apply_local_override
                 // 刻意不覆盖 holders(远端桶权威在远端 hub),SSH 行的权威恰是本地快照
@@ -283,6 +406,9 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 None => views.push(PortView {
                     info: info.clone(),
                     alias: state.ssh.instance_alias_of(name),
+                    kind: Some(kind),
+                    instance: instance_no(rest),
+                    device: Some(ssh_device_view(rec)),
                 }),
             }
         }
@@ -290,6 +416,10 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
     // 本地占有权覆盖远端桶/SSH 端点行的运行时状态(见函数头注释第 3 条;snap 已在
     // SSH 实例行补入前计算——实例行本身来自快照,无需覆盖)
     apply_local_override(&mut views, &snap);
+    // 实例别名惰性回收:快照是已开端口全集,已关实例的别名不再驻留内存表/寻址
+    // 索引(回收时机为下一次列表合并,非事件驱动——足够:陈旧窗口只到下次 list)。
+    let open_keys: HashSet<String> = snap.keys().cloned().collect();
+    state.ssh.retain_instance_aliases(&open_keys);
     views
 }
 
@@ -445,19 +575,124 @@ mod tests {
                 disconnected: false,
             },
             alias: Some("GPS".into()),
+            kind: None,
+            instance: None,
+            device: None,
         };
         let json = serde_json::to_value(&v).unwrap();
         let obj = json.as_object().unwrap();
         assert_eq!(
             obj.len(),
             5,
-            "flatten 应内联 PortInfo 字段(含 disconnected) + alias"
+            "flatten 应内联 PortInfo 字段(含 disconnected) + alias;None 新字段不上线"
         );
         assert_eq!(obj["name"], "COM7");
         assert_eq!(obj["opened"], true);
         assert_eq!(obj["holders"], 2);
         assert_eq!(obj["disconnected"], false);
         assert_eq!(obj["alias"], "GPS");
+    }
+
+    /// 新字段线形状契约:kind/instance/device 为 Some 时扁平内联(device 为嵌套对象),
+    /// 前端 {name,opened,holders,alias?,kind?,instance?,device?} 直读,不再解析 name。
+    #[test]
+    fn port_view_carries_structured_meta() {
+        let v = PortView {
+            info: ss_core::PortInfo {
+                name: "ssh-uuid::shell@2".into(),
+                opened: true,
+                holders: 1,
+                disconnected: false,
+            },
+            alias: None,
+            kind: Some("ssh".into()),
+            instance: Some(2),
+            device: Some(DeviceView {
+                id: "ssh-uuid".into(),
+                label: "测试机".into(),
+                detail: Some("wuyan@10.0.0.5:22".into()),
+                via: "ssh".into(),
+                online: None,
+            }),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            7,
+            "name/opened/holders/disconnected + kind/instance/device(alias None 不上线)"
+        );
+        assert_eq!(obj["kind"], "ssh");
+        assert_eq!(obj["instance"], 2);
+        assert_eq!(obj["device"]["id"], "ssh-uuid");
+        assert_eq!(obj["device"]["label"], "测试机");
+        assert_eq!(obj["device"]["detail"], "wuyan@10.0.0.5:22");
+        assert_eq!(obj["device"]["via"], "ssh");
+        assert!(!obj["device"].as_object().unwrap().contains_key("online"));
+        // 旧版对端视角:未知新字段整体缺省 → None(平滑降级)
+        let legacy: PortView = serde_json::from_value(serde_json::json!({
+            "name": "COM3", "opened": false, "holders": 0
+        }))
+        .unwrap();
+        assert_eq!(legacy.kind, None);
+        assert_eq!(legacy.instance, None);
+        assert_eq!(legacy.device, None);
+    }
+
+    /// 远端桶 device 改写规则:缺失(旧版对端)/via=local(对端自称本机)→ 直连设备
+    /// 视角;对端的 SSH/远端设备原样保留(绝对属主不变量)。
+    #[test]
+    fn rewrite_remote_device_translates_peer_local_only() {
+        let direct = DeviceView {
+            id: "dev-b".into(),
+            label: "中转机".into(),
+            detail: Some("10.0.0.2:18700".into()),
+            via: "remote".into(),
+            online: Some(true),
+        };
+        // 旧版对端:字段缺失 → 改写为直连设备
+        let mut none = None;
+        rewrite_remote_device(&mut none, &direct);
+        assert_eq!(none.as_ref().unwrap().id, "dev-b");
+        // 新版对端的本机串口(via=local)→ 改写
+        let mut peer_local = Some(DeviceView {
+            id: "local".into(),
+            label: "本地".into(),
+            detail: None,
+            via: "local".into(),
+            online: None,
+        });
+        rewrite_remote_device(&mut peer_local, &direct);
+        assert_eq!(peer_local.as_ref().unwrap().id, "dev-b");
+        // 对端自己的 SSH 设备 → 原样(绝对属主)
+        let mut peer_ssh = Some(DeviceView {
+            id: "ssh-c".into(),
+            label: "origin".into(),
+            detail: Some("root@10.0.0.3:22".into()),
+            via: "ssh".into(),
+            online: None,
+        });
+        rewrite_remote_device(&mut peer_ssh, &direct);
+        assert_eq!(peer_ssh.as_ref().unwrap().id, "ssh-c");
+        // 对端的远端设备(级联 origin)→ 原样
+        let mut peer_remote = Some(DeviceView {
+            id: "dev-c".into(),
+            label: "origin-ss".into(),
+            detail: Some("10.0.0.3:18700".into()),
+            via: "remote".into(),
+            online: Some(true),
+        });
+        rewrite_remote_device(&mut peer_remote, &direct);
+        assert_eq!(peer_remote.as_ref().unwrap().id, "dev-c");
+    }
+
+    #[test]
+    fn endpoint_kind_and_instance_no() {
+        assert_eq!(endpoint_kind("shell"), "ssh");
+        assert_eq!(endpoint_kind("exec"), "exec"); // 未知值透传(字符串枚举)
+        assert_eq!(instance_no("shell@2"), Some(2));
+        assert_eq!(instance_no("shell"), None);
+        assert_eq!(instance_no("a@b"), None); // 尾段非数字 → 端点名,非实例
     }
 
     /// 回归(PC3 远程显示 1 而非 3):远端设备端口的 holders 必须保留远端桶缓存值
@@ -474,6 +709,9 @@ mod tests {
                 disconnected: false,
             },
             alias: None,
+            kind: None,
+            instance: None,
+            device: None,
         }];
         // 本地快照(PC3 自己的 manager map):同复合键,opened/holders 只反映本机 1 个窗口会话
         let snap: HashMap<String, ss_core::PortInfo> = HashMap::from([(
@@ -499,6 +737,9 @@ mod tests {
                 disconnected: false,
             },
             alias: None,
+            kind: None,
+            instance: None,
+            device: None,
         }];
         let snap2: HashMap<String, ss_core::PortInfo> = HashMap::from([(
             "uuid-pc1::COM3".into(),
@@ -528,6 +769,9 @@ mod tests {
                 disconnected: false,
             },
             alias: None,
+            kind: None,
+            instance: None,
+            device: None,
         };
         let json = serde_json::to_value(&v).unwrap();
         let obj = json.as_object().unwrap();

@@ -227,3 +227,85 @@ describe("portIdOf 复合键一致性", () => {
     });
   });
 });
+
+describe("ports_listed 分桶与 pid 单源(端点模型)", () => {
+  const row = (name: string, extra?: Partial<import("./types").PortInfo>) => ({
+    name,
+    opened: false,
+    holders: 0,
+    ...extra,
+  });
+
+  it("行带 device:非本机属主归 device.id,本机行归 transport 域", () => {
+    const s = sessionReducer(initialSession, {
+      type: "ports_listed",
+      devId: "remote",
+      ports: [
+        row("COM3", { device: { id: "local", label: "本地", via: "local" } }),
+        row("sshU::shell", { kind: "ssh", device: { id: "sshU", label: "测试机", via: "ssh" } }),
+        row("devB::devC::COM7", { device: { id: "devC", label: "origin", via: "remote", online: true } }),
+      ],
+    });
+    // server 自家串口归 remote 桶;SSH 归属主;级联归 origin(绝对属主)
+    expect(Object.keys(s.portsByDev).sort()).toEqual(["devC", "remote", "sshU"]);
+    // pid 单源:wireToPid(域, 线名) = 事件回流键
+    expect(s.portsByDev.remote[0].pid).toBe("remote::COM3");
+    expect(s.portsByDev.sshU[0].pid).toBe("remote::sshU::shell");
+    expect(s.portsByDev.devC[0].pid).toBe("remote::devB::devC::COM7");
+  });
+
+  it("本地 transport:本机行归 local 桶,SSH 行归属主桶", () => {
+    const s = sessionReducer(initialSession, {
+      type: "ports_listed",
+      devId: "local",
+      ports: [
+        row("COM3", { device: { id: "local", label: "本地", via: "local" } }),
+        row("sshU::shell", { kind: "ssh", device: { id: "sshU", label: "t", via: "ssh" } }),
+      ],
+    });
+    expect(s.portsByDev.local?.[0].pid).toBe("COM3");
+    expect(s.portsByDev.sshU?.[0].pid).toBe("sshU::shell");
+  });
+
+  it("老 server(缺 device)回退旧分桶:本地按首段,远程整桶", () => {
+    const sLocal = sessionReducer(initialSession, {
+      type: "ports_listed",
+      devId: "local",
+      ports: [row("COM3"), row("sshU::shell"), row("devB::COM7")],
+    });
+    expect(Object.keys(sLocal.portsByDev).sort()).toEqual(["COM3 所属 local", "devB", "sshU"].map((k) => (k.includes("local") ? "local" : k)).sort());
+    expect(sLocal.portsByDev.local[0].pid).toBe("COM3");
+    expect(sLocal.portsByDev.sshU[0].pid).toBe("sshU::shell");
+
+    const sRemote = sessionReducer(initialSession, {
+      type: "ports_listed",
+      devId: "remote",
+      ports: [row("sshU::shell")],
+    });
+    expect(Object.keys(sRemote.portsByDev)).toEqual(["remote"]);
+    expect(sRemote.portsByDev.remote[0].pid).toBe("remote::sshU::shell");
+  });
+});
+
+describe("ports_listed 桶随列表消失(设备删除)", () => {
+  it("新列表缺少的桶被清除——删除设备后侧栏不再显示", () => {
+    const withSsh = sessionReducer(initialSession, {
+      type: "ports_listed",
+      devId: "remote",
+      ports: [
+        { name: "COM3", opened: false, holders: 0, device: { id: "local", label: "本地", via: "local" } },
+        { name: "sshU::shell", opened: false, holders: 0, kind: "ssh", device: { id: "sshU", label: "t", via: "ssh" } },
+      ],
+    });
+    expect(Object.keys(withSsh.portsByDev).sort()).toEqual(["remote", "sshU"]);
+    // 删除设备后的下一份列表:仅剩串口——sshU 桶必须消失(否则被补充卡捞成幽灵设备)
+    const afterDelete = sessionReducer(withSsh, {
+      type: "ports_listed",
+      devId: "remote",
+      ports: [
+        { name: "COM3", opened: false, holders: 0, device: { id: "local", label: "本地", via: "local" } },
+      ],
+    });
+    expect(Object.keys(afterDelete.portsByDev)).toEqual(["remote"]);
+  });
+});

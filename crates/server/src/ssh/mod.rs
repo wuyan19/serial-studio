@@ -275,6 +275,16 @@ impl SshManager {
             .cloned()
     }
 
+    /// 惰性回收实例别名:按 manager 快照(已开端口全集)retain——已关实例的别名
+    /// 不再驻留内存表/寻址索引(实现"关闭即失"语义;回收时机为下一次列表合并,
+    /// 非事件驱动,陈旧窗口只到下次 list)。
+    pub fn retain_instance_aliases(&self, open_full_keys: &std::collections::HashSet<String>) {
+        self.instance_aliases
+            .lock()
+            .unwrap()
+            .retain(|k, _| open_full_keys.contains(k));
+    }
+
     /// 设置别名(端点优先,实例兜底)。端点命中写注册表(落盘);实例命中写内存表
     /// (运行时生灭)。二者都 miss 时报错(调用方 set_alias_and_notify 的 ssh 分支)。
     pub fn set_ssh_alias(

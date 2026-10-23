@@ -1,6 +1,6 @@
 /** 命令面板族：宏（Ctrl+O）、脚本（Ctrl+B）、串口（Ctrl+I）。模糊搜索 + 键盘导航。 */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Macro, PortId, PortInfo, Script } from "../types";
+import type { Macro, PortId, PortRow, Script } from "../types";
 import { displayPortName } from "../lib";
 import { PortLabel, useDialogA11y } from "./primitives";
 
@@ -265,16 +265,18 @@ export function ScriptPalette({
 
 /** 串口选择面板：模糊搜索端口，方向键选择，回车打开（onSelect 走与点端口行同一流程）。
  *  复合键端口(SSH 端点/远程口)的端点名可能跨设备重名(两台设备各有 shell)——
- *  deviceOf 给出设备标注,渲染为条目第二行(同宏/脚本面板的 desc 位)并纳入搜索词。 */
+ *  deviceOf 给出设备标注,渲染为条目第二行(同宏/脚本面板的 desc 位)并纳入搜索词;
+ *  条目 tooltip 附原始完整键(别名优先展示下的原始名可查入口)。 */
 export function PortPalette({
   ports,
   deviceOf,
   onSelect,
   onClose,
 }: {
-  ports: (PortInfo & { pid: PortId })[];
-  /** 服务端原始端口名的设备标注(复合键首段=属主设备);裸串口名返回 undefined 不显示。 */
-  deviceOf?: (name: string) => string | undefined;
+  ports: PortRow[];
+  /** 行 → 设备标注(结构化 device 优先,App 侧含老 server 回退);裸本机口返回
+   *  undefined 不显示。 */
+  deviceOf?: (row: PortRow) => string | undefined;
   onSelect: (pid: PortId) => void;
   onClose: () => void;
 }) {
@@ -288,8 +290,8 @@ export function PortPalette({
   const filtered = useMemo(() => {
     const matched: { pid: PortId; dev?: string; score: number; first: number }[] = [];
     for (const p of ports) {
-      const dev = deviceOf?.(p.name);
-      const hay = [p.name, p.alias, dev].filter(Boolean).join(" ");
+      const dev = deviceOf?.(p);
+      const hay = [p.name, p.alias, dev, p.device?.detail].filter(Boolean).join(" ");
       const m = fuzzyMatch(query, hay);
       if (m) matched.push({ pid: p.pid, dev, score: m.score, first: m.first });
     }
@@ -307,7 +309,7 @@ export function PortPalette({
   }, []);
 
   const byPid = useMemo(() => {
-    const m: Record<string, PortInfo> = {};
+    const m: Record<string, PortRow> = {};
     for (const p of ports) m[p.pid] = p;
     return m;
   }, [ports]);
@@ -355,6 +357,7 @@ export function PortPalette({
               className={"palette__item" + (i === selected ? " palette__item--selected" : "")}
               onMouseEnter={() => setSelected(i)}
               onClick={() => commit(pid)}
+              title={dev ? `${dev} · ${byPid[pid]?.name ?? pid}` : byPid[pid]?.name ?? pid}
             >
               <span className="palette__name">
                 <PortLabel name={displayPortName(byPid[pid]?.name ?? pid)} alias={byPid[pid]?.alias} />

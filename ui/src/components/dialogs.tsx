@@ -961,24 +961,38 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }:
   );
 }
 
-/** 远程设备详情：只读信息卡（地址/昵称/设备 ID/连接状态/远端端口），地址与 ID 可一键复制。
- *  数据由 App 每 render 注入（按 id 实时查找）——弹窗开着时昵称/在线态/端口变化即时刷新；
- *  设备被删除时 App 侧查无此 id 即不再渲染，弹窗自然消失。 */
-export function RemoteDetailDialog({ dev, online, ports, onClose }: {
-  dev: RemoteDevice;
-  /** WS 就绪三态：undefined=连接中（与侧栏设备卡状态点同源）。 */
+/** 通用设备详情（remote ss / SSH / 本机）：只读信息卡，值可复制。
+ *  数据由 App 每 render 归一化注入（按 id 实时查找）——弹窗开着时变化即时刷新；
+ *  设备被删时 App 侧查无此 id 即不再渲染，弹窗自然消失。 */
+export interface DeviceDetailInfo {
+  icon: "globe" | "ssh" | "plug";
+  /** 弹窗副标题（设备名）。 */
+  label: string;
+  /** 信息行（copy=true 的行带复制按钮）。 */
+  rows: { label: string; value: string; copy?: boolean }[];
+  /** 就绪三态：undefined=连接中（与侧栏设备卡状态点同源）；本机恒 true。
+   *  SSH 等无连接态语义的设备用 statusNode 覆盖，不落此三态。 */
   online?: boolean;
+  /** 状态行覆盖（SSH：空闲/活动会话；级联设备：透传 online）。提供则忽略 online 三态。 */
+  statusNode?: React.ReactNode;
   ports: PortInfo[];
+  /** 端口行文本覆盖。提供则忽略 online 三态推导（连接中/未连接）。 */
+  portsText?: string;
+  hint?: string;
+}
+
+export function DeviceDetailDialog({ info, onClose }: {
+  info: DeviceDetailInfo;
   onClose: () => void;
 }) {
   useEscClose(onClose);
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
-  const [copied, setCopied] = useState<"addr" | "id" | null>(null);
-  // 双按钮共用一个 copied 态:后点的清掉前一个的定时器,否则旧 timer 提前抹掉新按钮的"已复制"
+  const [copied, setCopied] = useState<number | null>(null);
+  // 多按钮共用一个 copied 态:后点的清掉前一个的定时器,否则旧 timer 提前抹掉新按钮的"已复制"
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(copyTimer.current ?? undefined), []);
-  const copy = async (tag: "addr" | "id", text: string) => {
+  const copy = async (tag: number, text: string) => {
     // copyText 带 execCommand 兜底(Web-LAN 形态 http 非安全上下文无 navigator.clipboard);
     // 失败仍静默:值区已入 user-select 白名单,可手动选文复制
     if (!(await copyText(text))) return;
@@ -986,7 +1000,7 @@ export function RemoteDetailDialog({ dev, online, ports, onClose }: {
     clearTimeout(copyTimer.current ?? undefined);
     copyTimer.current = setTimeout(() => setCopied(null), 1500);
   };
-  const copyBtn = (tag: "addr" | "id", text: string, title: string) => (
+  const copyBtn = (tag: number, text: string, title: string) => (
     <button
       className="btn btn--ghost"
       onClick={() => void copy(tag, text)}
@@ -998,50 +1012,107 @@ export function RemoteDetailDialog({ dev, online, ports, onClose }: {
   );
   // 三态与侧栏设备卡状态点同构:在线=绿 / 离线=红 / 连接中=灰
   const status =
-    online === true ? (
+    info.online === true ? (
       <><span className="dot on" /> 在线</>
-    ) : online === false ? (
+    ) : info.online === false ? (
       <><span className="dot off" /> 离线</>
     ) : (
       <><span className="dot" /> 连接中…</>
     );
-  // 端口可见性与侧栏设备卡空态同一套语义：离线=未连接，连接中无快照，在线列出远端口名
+  // 端口可见性与侧栏设备卡空态同一套语义：离线=未连接，连接中无快照，在线列出端口名
   const portsText =
-    online === undefined
+    info.online === undefined
       ? "连接中…"
-      : online === false
+      : info.online === false
         ? "未连接"
-        : ports.length === 0
+        : info.ports.length === 0
           ? "无可用端口"
-          : ports.map((p) => displayPortName(p.name)).join(" · ");
+          : info.ports.map((p) => displayPortName(p.name)).join(" · ");
+  const icon =
+    info.icon === "globe" ? <IconGlobe /> : info.icon === "ssh" ? <IconSsh /> : <IconPlug />;
   return (
     /* 遮罩按下关闭（纯只读信息，无输入；Esc 同） */
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`设备详情 ${dev.nickname?.trim() || `${dev.host}:${dev.port}`}`} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`设备详情 ${info.label}`} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
-          <IconGlobe /> 设备详情
+          {icon} 设备详情
         </h3>
-        <div className="dialog__sub">{dev.nickname?.trim() || `${dev.host}:${dev.port}`}</div>
-        <ConfigRow label="地址">
-          <span className="detail-row">
-            <span className="detail-row__value">{dev.host}:{dev.port}</span>
-            {copyBtn("addr", `${dev.host}:${dev.port}`, "复制地址")}
-          </span>
-        </ConfigRow>
-        <ConfigRow label="昵称">
-          <span className="detail-row">
-            <span className="detail-row__value">{dev.nickname?.trim() || "未设置"}</span>
-          </span>
-        </ConfigRow>
-        <ConfigRow label="设备 ID">
-          <span className="detail-row">
-            <span className="detail-row__value">{dev.id}</span>
-            {copyBtn("id", dev.id, "复制设备 ID")}
-          </span>
-        </ConfigRow>
-        <ConfigRow label="状态">{status}</ConfigRow>
-        <ConfigRow label="端口">{portsText}</ConfigRow>
-        <p className="dialog__hint">设备 ID 是该设备的稳定标识（MCP 寻址等用途），重连/改名不变。</p>
+        <div className="dialog__sub">{info.label}</div>
+        {info.rows.map((r, i) => (
+          <ConfigRow key={r.label} label={r.label}>
+            <span className="detail-row">
+              <span className="detail-row__value">{r.value}</span>
+              {r.copy === true && copyBtn(i, r.value, `复制${r.label}`)}
+            </span>
+          </ConfigRow>
+        ))}
+        <ConfigRow label="状态">{info.statusNode ?? status}</ConfigRow>
+        <ConfigRow label="端口">{info.portsText ?? portsText}</ConfigRow>
+        {info.hint && <p className="dialog__hint">{info.hint}</p>}
+        <div className="btn-row">
+          <button className="btn btn--primary" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 端口/端点详情：只读信息卡（端口键/属主设备/类别/状态/配置），值可复制。
+ *  数据由 App 每 render 归一化注入（按 pid 实时查行）——弹窗开着时状态变化即时
+ *  刷新；行消失（设备删除）时 App 侧查无即不再渲染，弹窗自然消失。 */
+export interface PortDetailInfo {
+  icon: "plug" | "ssh";
+  /** 弹窗副标题（端点显示名）。 */
+  label: string;
+  /** 信息行（copy=true 的行带复制按钮）。 */
+  rows: { label: string; value: string; copy?: boolean }[];
+  hint?: string;
+}
+
+export function PortDetailDialog({ info, onClose }: {
+  info: PortDetailInfo;
+  onClose: () => void;
+}) {
+  useEscClose(onClose);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
+  const [copied, setCopied] = useState<number | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => clearTimeout(copyTimer.current ?? undefined), []);
+  const copy = async (tag: number, text: string) => {
+    if (!(await copyText(text))) return;
+    setCopied(tag);
+    clearTimeout(copyTimer.current ?? undefined);
+    copyTimer.current = setTimeout(() => setCopied(null), 1500);
+  };
+  const copyBtn = (tag: number, text: string, title: string) => (
+    <button
+      className="btn btn--ghost"
+      onClick={() => void copy(tag, text)}
+      title={title}
+      aria-label={copied === tag ? `已复制：${text}` : `${title}（${text}）`}
+    >
+      <IconCopy /> {copied === tag ? "已复制 ✓" : "复制"}
+    </button>
+  );
+  return (
+    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`端口详情 ${info.label}`} className="dialog dialog--med" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          {info.icon === "ssh" ? <IconSsh /> : <IconPlug />} 端口详情
+        </h3>
+        <div className="dialog__sub">{info.label}</div>
+        {info.rows.map((r, i) => (
+          <ConfigRow key={r.label} label={r.label}>
+            <span className="detail-row">
+              <span className="detail-row__value">{r.value}</span>
+              {r.copy === true && copyBtn(i, r.value, `复制${r.label}`)}
+            </span>
+          </ConfigRow>
+        ))}
+        {info.hint && <p className="dialog__hint">{info.hint}</p>}
         <div className="btn-row">
           <button className="btn btn--primary" onClick={onClose}>
             关闭

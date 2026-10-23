@@ -2,9 +2,9 @@
  * 次侧栏三个活动面板：端口列表 / 宏库 / 脚本库。
  * 纯展示 + 回调上行——数据与操作全部由 App 注入，面板自身无状态（折叠态也由 App 持有持久化）。
  */
-import type { RefObject } from "react";
-import type { PortId, PortInfo, RemoteDevice } from "../types";
-import { bucketPidOf, displayPortName, getMode, groupBy } from "../lib";
+import { useState, type RefObject } from "react";
+import type { DeviceView, PortId, PortInfo, PortRow, RemoteDevice } from "../types";
+import { displayPortName, getMode, groupBy } from "../lib";
 import {
   IconClose,
   IconEdit,
@@ -15,20 +15,35 @@ import {
   IconRefresh,
   IconTrash,
 } from "../icons";
+import { ContextMenu, type ContextMenuItem } from "./context-menu";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
 
-/** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡）。 */
+/** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡 + 补充卡）。 */
 export interface PortGroupView {
   devId: string;
   label: string;
   online?: boolean;
-  ports: PortInfo[];
+  /** 桶内行带 ingest 定型的 pid（与事件回流键同源）。 */
+  ports: PortRow[];
   /** SSH 设备卡：带 "SSH" 徽标、无在线点（lazy 连接，状态在 shell 行）、
    *  隐藏强关按钮（终端关闭用实例行 ✕），右键菜单为 SSH 动作。 */
   kind?: "ssh";
   /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
   detail?: string;
+  /** 级联补充卡：属主注册在远程 server 上（本机 remotes/sshHosts 查无），
+   *  动作类菜单（新建终端/编辑/删除/断开）对它无处派发——只给「设备详情」。 */
+  external?: boolean;
+  /** 补充卡的设备元数据（行上 device，详情弹窗数据源）。 */
+  meta?: DeviceView;
 }
+
+/** 设备详情入口目标（通用详情弹窗的卡类）。meta = 级联补充卡（无本地注册表
+ *  条目，详情直接用行上 device 元数据）。 */
+export type DeviceDetailTarget =
+  | { kind: "local" }
+  | { kind: "remote"; dev: RemoteDevice }
+  | { kind: "ssh"; devId: string }
+  | { kind: "meta"; device: DeviceView };
 
 /** 端口面板：设备分组卡 + 端口行（点开/附加/重连、别名 inline 编辑、强制关闭）。 */
 export function PortsPanel({
@@ -47,9 +62,11 @@ export function PortsPanel({
   onDisconnectRemote,
   onRemoveRemote,
   onRenameRemote,
-  onShowRemoteDetail,
+  onShowDeviceDetail,
   onSshAction,
   onClosePort,
+  onCopyPortKey,
+  onShowPortDetail,
   onRefresh,
 }: {
   portGroups: PortGroupView[];
@@ -69,14 +86,27 @@ export function PortsPanel({
   onRemoveRemote: (dev: RemoteDevice) => void;
   /** 设备卡改名(空串=清除昵称,标题回退 host:port)。仅本地桌面形态传入。 */
   onRenameRemote: (dev: RemoteDevice, nickname: string) => void;
-  /** 右键菜单「设备详情」:打开该设备的只读详情弹窗。 */
-  onShowRemoteDetail: (dev: RemoteDevice) => void;
+  /** 右键菜单「设备详情」:打开该设备的只读详情弹窗(远程/SSH/本机三类卡)。 */
+  onShowDeviceDetail: (target: DeviceDetailTarget) => void;
   /** SSH 设备卡菜单动作（connect=新建终端 / edit=打开管理弹窗编辑 / delete=删除）。 */
   onSshAction: (devId: string, action: "connect" | "edit" | "delete") => void;
   /** SSH 实例行 ✕:关闭该终端(本地 release;多人共享时他人不受影响)。 */
   onClosePort: (pid: PortId) => void;
+  /** 右键「复制端口键」:复制服务端侧键(row.name——脚本/MCP 的寻址值,web 形态
+   *  不带连接桶前缀)。App 侧负责写剪贴板 + toast 反馈。 */
+  onCopyPortKey: (row: PortRow) => void;
+  /** 右键「端口详情」:打开该端点的只读详情弹窗(端口键/属主设备/状态等)。 */
+  onShowPortDetail: (pid: PortId) => void;
   onRefresh: () => void;
 }) {
+  /** 端口行右键菜单锚点(一次一个;编辑别名进行中放行原生右键)。 */
+  const [keyMenu, setKeyMenu] = useState<{ x: number; y: number; row: PortRow } | null>(null);
+  const keyMenuItems: ContextMenuItem[] = keyMenu
+    ? [
+        { label: "端口详情", onSelect: () => onShowPortDetail(keyMenu.row.pid) },
+        { label: "复制端口键", onSelect: () => onCopyPortKey(keyMenu.row) },
+      ]
+    : [];
   return (
     <>
       <div className="section-head">
@@ -87,6 +117,9 @@ export function PortsPanel({
       </div>
       {portGroups.map((grp) => {
         const isSsh = grp.kind === "ssh";
+        // 级联补充卡:本机无注册表条目,动作菜单无处派发,只给详情
+        const isExternal = grp.external === true && !!grp.meta;
+        const isLocalCard = !isSsh && grp.devId === "local";
         const dev = !isSsh && grp.devId !== "local" ? remotes.find((r) => r.id === grp.devId) : null;
         // 设备卡重命名仅本地桌面形态(remotes.json 持久化;web/远程窗口 connConfig 派生不落盘)
         const canRename = dev !== null && getMode() === "local";
@@ -107,25 +140,30 @@ export function PortsPanel({
               renameLabel="重命名设备"
               renameInitial={dev?.nickname ?? ""}
               renamePlaceholder="设备昵称(留空显示地址)"
-              menuHidden={!dev && !isSsh}
+              menuHidden={!dev && !isSsh && !isLocalCard && !isExternal}
               extraMenuItems={
                 dev
                   ? [
                       // 附加项首位(整菜单序:重命名设备→详情→断开/重连→删除)
-                      { label: "设备详情", onSelect: () => { if (dev) onShowRemoteDetail(dev); } },
+                      { label: "设备详情", onSelect: () => { if (dev) onShowDeviceDetail({ kind: "remote", dev }); } },
                       // 在线可断开;离线/连接中可重连(状态相关项)
                       grp.online === true
                         ? { label: "断开设备", onSelect: () => { if (dev) onDisconnectRemote(dev); } }
                         : { label: "重连设备", onSelect: () => { if (dev) onReconnectRemote(dev); } },
                       { label: "删除设备", danger: true, onSelect: () => { if (dev) onRemoveRemote(dev); } },
                     ]
-                  : isSsh
-                    ? [
-                        { label: "新建终端", onSelect: () => onSshAction(grp.devId, "connect") },
-                        { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
-                        { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
-                      ]
-                    : undefined
+                  : isExternal
+                    ? [{ label: "设备详情", onSelect: () => { if (grp.meta) onShowDeviceDetail({ kind: "meta", device: grp.meta }); } }]
+                    : isSsh
+                      ? [
+                          { label: "新建终端", onSelect: () => onSshAction(grp.devId, "connect") },
+                          { label: "设备详情", onSelect: () => onShowDeviceDetail({ kind: "ssh", devId: grp.devId }) },
+                          { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
+                          { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
+                        ]
+                      : isLocalCard
+                        ? [{ label: "设备详情", onSelect: () => onShowDeviceDetail({ kind: "local" }) }]
+                        : undefined
               }
             />
             {!portCollapsed.has(grp.devId) &&
@@ -133,15 +171,15 @@ export function PortsPanel({
                 <p className="sidebar__empty">
                   {grp.online === false
                     ? "未连接"
-                    : grp.online === undefined && grp.devId !== "local"
-                      ? "连接中…"
-                      : "无可用端口"}
+                    : isSsh
+                      ? "无端点"
+                      : grp.online === undefined && grp.devId !== "local"
+                        ? "连接中…"
+                        : "无可用端口"}
                 </p>
               ) : (
                 grp.ports.map((p) => {
-                  // 条目键首段已是桶 devId(本地合并视图的完整 pid)则直通;
-                  // 远程 transport 的远端侧键则加桶前缀。幂等。
-                  const pid = bucketPidOf(grp.devId, p.name);
+                  const pid = p.pid; // ingest 定型(与事件回流键同源),不再反算
                   const shown = displayPortName(p.name); // 展示剥设备前缀,只留串口名/端点名
                   const isActive = pid === activePort;
                   const editingThis = aliasEditPort === pid;
@@ -149,12 +187,28 @@ export function PortsPanel({
                   // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
                   // SSH 卡无此语义(用实例行 ✕ 关闭终端),同样隐藏。
                   const canForce = !isSsh && getMode() === "local" && p.opened;
-                  // SSH 实例行(名含 @,如 shell@2)挂 ✕:关闭该终端(临时产物,删除语义);
-                  // 端点定义行(shell)不挂——它代表能力,不是会话。data-closable 让铅笔
-                  // 左移让位(✕ 与铅笔同在 right:4px,不移开则 ✕ 后到 DOM 压住铅笔)。
-                  const isSshInstance = isSsh && p.name.includes("@");
+                  // SSH 实例行挂 ✕:关闭该终端(临时产物,删除语义);端点定义行(shell)
+                  // 不挂——它代表能力,不是会话。判据线上 instance(老 server 回退嗅探 @)。
+                  // data-closable 让铅笔左移让位(✕ 与铅笔同在 right:4px,不移开则
+                  // ✕ 后到 DOM 压住铅笔)。
+                  const isSshInstance = isSsh && (p.instance != null || p.name.includes("@"));
                   return (
-                    <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-closable={isSshInstance ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
+                    <div
+                      key={p.name}
+                      className="port-item-row"
+                      data-active={isActive}
+                      data-opened={p.opened ? "true" : undefined}
+                      data-force={canForce ? "true" : undefined}
+                      data-closable={isSshInstance ? "true" : undefined}
+                      data-editing={editingThis ? "true" : undefined}
+                      // 悬停可见服务端键(与右键复制同值;别名/昵称是展示层,键才是寻址身份)
+                      title={`端口键：${p.name}`}
+                      onContextMenu={(e) => {
+                        if (editingThis) return; // 别名编辑中放行原生右键(输入框剪切/粘贴)
+                        e.preventDefault();
+                        setKeyMenu({ x: e.clientX, y: e.clientY, row: p });
+                      }}
+                    >
                       <div
                         className="port-item"
                         role="button"
@@ -222,6 +276,9 @@ export function PortsPanel({
           </div>
         );
       })}
+      {keyMenu && (
+        <ContextMenu x={keyMenu.x} y={keyMenu.y} items={keyMenuItems} onClose={() => setKeyMenu(null)} />
+      )}
     </>
   );
 }

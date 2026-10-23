@@ -260,6 +260,17 @@ impl DeviceClientManager {
             .collect()
     }
 
+    /// 全部注册设备 (RemoteDevice, online)——list 合并的 device 改写数据源
+    /// (远端桶行的属主元数据按直连设备注册表翻译,含昵称)。
+    pub fn device_views(&self) -> Vec<(RemoteDevice, bool)> {
+        self.devices
+            .lock()
+            .unwrap()
+            .values()
+            .map(|c| (c.device().clone(), c.online()))
+            .collect()
+    }
+
     /// 设备 id 是否已注册(完整键首段甄别:id 恒权威,昵称只在非 id 时尝试)。
     pub fn is_registered(&self, dev_id: &str) -> bool {
         self.devices.lock().unwrap().contains_key(dev_id)

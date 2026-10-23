@@ -6,6 +6,17 @@ import { SearchAddon } from "@xterm/addon-search";
  *  靠 devId 区分；编解码见 lib.ts 的 portIdOf / parsePortId。运行时即 string，此处仅语义化。 */
 export type PortId = string;
 
+/** 端口行的属主设备视图(与后端 DeviceView 对齐;老 server 缺省整体 absent)。
+ *  id=稳定主键, label=已解析展示名(昵称优先), detail=完整地址(悬停/详情),
+ *  via=hub 够到该设备的途径("local"|"remote"|"ssh"), online 仅 remote 有值。 */
+export interface DeviceView {
+  id: string;
+  label: string;
+  detail?: string;
+  via: string;
+  online?: boolean | null;
+}
+
 export interface PortInfo {
   name: string;
   opened: boolean;
@@ -15,7 +26,18 @@ export interface PortInfo {
   alias?: string;
   /** 设备已断开(USB 拔出)但占有权保留、可重连(后端 PortInfo.disconnected)。 */
   disconnected?: boolean;
+  /** 端点类别："serial"|"ssh"(字符串枚举,后端为 exec/tcp 留空间)。缺省 = 老
+   *  server,消费方回退字符串推断(见 App 的 isNonSerialPid 等)。 */
+  kind?: string;
+  /** 运行实例序号(n = shell@N 实例行)；缺省 = 端点定义行/串口行。 */
+  instance?: number;
+  /** 属主设备(原始属主,非连接桶;级联经后端改写恒为绝对属主)。 */
+  device?: DeviceView;
 }
+
+/** 列表桶内条目：PortInfo + ingest 定型的 pid(单源——事件回流键同源,
+ *  消费方不再各自 bucketPidOf 反算)。 */
+export type PortRow = PortInfo & { pid: PortId };
 
 /** 宏步骤（判别联合，与后端 MacroStep 对齐） */
 export type MacroStep =
