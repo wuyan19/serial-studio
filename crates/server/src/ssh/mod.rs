@@ -144,6 +144,17 @@ impl SshManager {
         self.registry.lock().unwrap().iter().any(|r| r.id == host_id)
     }
 
+    /// 注册表全部设备昵称(撞词检查用)。
+    pub fn registry_nicknames(&self) -> Vec<String> {
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty()))
+            .map(str::to_string)
+            .collect()
+    }
+
     /// 设备昵称查询(AddressResolver::nickname_of 双来源之一)。
     pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
         self.registry

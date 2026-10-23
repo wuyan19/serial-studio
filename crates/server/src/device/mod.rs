@@ -276,6 +276,16 @@ impl DeviceClientManager {
             .collect()
     }
 
+    /// 注册表全部设备昵称(AddressResolver 撞词检查用)。
+    pub fn nicknames(&self) -> Vec<String> {
+        self.devices
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|c| c.nickname())
+            .collect()
+    }
+
     /// 设备 id → 昵称(serial_list / MCP 展示用)。
     pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
         let devices = self.devices.lock().unwrap();

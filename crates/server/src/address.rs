@@ -270,6 +270,17 @@ impl Inner {
         for (alias, key) in self.ssh.alias_pairs() {
             map.entry(alias).or_default().push(key);
         }
+        // 撞词警告:设备昵称 ∈ 别名索引 → 裸名(走别名)与 昵称::(走设备)可能指向
+        // 不同目标——解析各自确定,但同一词两种形式含义分叉,起名撞词时留痕提醒。
+        let mut nicks: std::collections::HashSet<String> = self.devices.nicknames().into_iter().collect();
+        nicks.extend(self.ssh.registry_nicknames());
+        for n in nicks {
+            if map.contains_key(&n) {
+                tracing::warn!(
+                    "设备昵称「{n}」与端口/端点别名撞词:裸名 {n} 走别名,作用域 {n}:: 走设备——两者可能指向不同目标"
+                );
+            }
+        }
         *self.real_names.write().unwrap() = real;
         *self.port_aliases.write().unwrap() = map;
         *self.device_real_names.write().unwrap() = device_real;

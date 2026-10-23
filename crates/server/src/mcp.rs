@@ -299,15 +299,18 @@ async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
         // 消费者是 agent——中点分隔的一层结构最易解析(此前三层嵌套括号)。
         // 键保留完整复合键:open 需要机器可用的精确名。
         let mut parts = vec![v.info.name.clone()];
-        if let Some(a) = &v.alias {
-            parts.push(format!("别名 {a}"));
-        }
         let dev_id = ss_core::split_port_key(&v.info.name).0;
+        let is_ssh = dev_id != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev_id);
+        if let Some(a) = &v.alias {
+            // SSH 行标"端点别名"——与设备昵称说破两个身份(裸名=端点别名,前缀=设备昵称)
+            let label = if is_ssh { "端点别名" } else { "别名" };
+            parts.push(format!("{label} {a}"));
+        }
         if dev_id != ss_core::LOCAL_DEVICE_ID {
             // 提示用裸后缀(目标机上的端口名),拼出的 昵称::<后缀> 才是可解析寻址;
             // SSH 标记让 agent 一眼区分终端会话与串口(交互方式不同)
             let suffix = ss_core::split_port_key(&v.info.name).1;
-            let kind = if state.ssh.has_host(dev_id) { "SSH 设备" } else { "设备" };
+            let kind = if is_ssh { "SSH 设备" } else { "设备" };
             match state.addresses.nickname_of(dev_id) {
                 Some(nick) => {
                     parts.push(format!("{kind} {nick}"));
@@ -1383,7 +1386,7 @@ mod ssh_display_tests {
         let resp = handle_request(req, &state).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let line1 = text.lines().find(|l| l.starts_with("ssh-x1::shell")).unwrap();
-        assert!(line1.contains("别名 控制台"), "{line1}");
+        assert!(line1.contains("端点别名 控制台"), "{line1}");
         assert!(line1.contains("SSH 设备 车间网关") && line1.contains("寻址 车间网关::shell"), "{line1}");
         assert!(line1.ends_with("closed") && !line1.contains('('), "扁平无括号: {line1}");
         let line2 = text.lines().find(|l| l.starts_with("ssh-x2::shell")).unwrap();
