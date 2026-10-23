@@ -154,8 +154,8 @@ export type SshEndpoint = { name: string; type: "shell"; alias?: string };
 
 /** SSH 设备：远程主机的终端会话提供方（像串口一样打开的"端口"来源）。
  *  每台设备一张卡，卡内端点各占一行。
- *  当前为 UI 预览版：localStorage 持久化、连接为前端模拟；
- *  后端接入后注册表迁至 server 侧（凭据不落前端），本类型形态不变。 */
+ *  注册表在 server 侧（ssh_hosts.json，凭据不落前端存储），UI 经 transport 的
+ *  sshList/sshSave 读写全量；线格式与后端 SshHostRecord 对齐（camelCase）。 */
 export interface SshHost {
   /** 稳定主键（UUID），作为 devId 用于端口复合键。 */
   id: string;
@@ -165,7 +165,7 @@ export interface SshHost {
   /** 可选昵称；空则 UI 回退 user@host。 */
   nickname?: string;
   auth: SshAuth;
-  /** 端点列表（至少含 shell；加载时归一化兜底，见 lib.ts::loadSshHosts）。 */
+  /** 端点列表（至少含 shell；空缺兜底在 server 侧 ensure_default_endpoints）。 */
   endpoints: SshEndpoint[];
 }
 

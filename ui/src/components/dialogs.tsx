@@ -1072,7 +1072,7 @@ export function SshManagerDialog({
   seedEditId,
 }: {
   hosts: SshHost[];
-  /** 测试连接结果（预览模拟）：testing=测试中 / ok=可达 / undefined=未测。 */
+  /** 测试连接结果（真实 ssh_test 回执）：testing=测试中 / ok=可达 / fail=失败(行内 ✗) / undefined=未测。 */
   testOf: (id: string) => "testing" | "ok" | "fail" | undefined;
   /** 保存设备（isNew 区分添加/编辑；新建时 id 为空串，App 负责生成 UUID）。 */
   onCommit: (host: SshHost, isNew: boolean) => void;
@@ -1356,16 +1356,15 @@ function SshHostForm({
 
 // ===== SSH open 失败交互闭环（认证重输 / 指纹确认） =====
 
-/** 认证失败重输闭环:密码方式→输入+更新勾选+立即重试;密钥/Agent 方式→提示+编辑入口。 */
+/** 认证失败重输闭环:密码方式→输入+更新勾选+立即重试;密钥/Agent 方式→提示+编辑入口。
+ *  失败详情不上(标题+host 身份已足);method 差异等诊断信息留在 App 的 toast 里。 */
 export function SshAuthDialog({
   host,
-  error,
   onRetryPassword,
   onEdit,
   onCancel,
 }: {
   host: SshHost;
-  error: SshOpenError;
   onRetryPassword: (password: string, updateSaved: boolean) => void;
   onEdit: () => void;
   onCancel: () => void;
@@ -1417,9 +1416,6 @@ export function SshAuthDialog({
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
               <button className="btn btn--primary" onClick={onEdit}>编辑设备</button>
-            </div>
-            <div className="btn-row" style={{ marginTop: 0 }}>
-              <button className="btn btn--ghost" onClick={onCancel} style={{ visibility: "hidden" }} aria-hidden>占位</button>
             </div>
           </>
         )}
@@ -1479,7 +1475,7 @@ export function SshTrustDialog({
             <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并重连。</p>
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-              <button className="btn btn--danger" onClick={onTrust}>仍要信任并连接</button>
+              <button className="btn btn--danger-solid" onClick={onTrust}>仍要信任并连接</button>
             </div>
           </>
         ) : (

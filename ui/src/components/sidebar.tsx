@@ -150,10 +150,11 @@ export function PortsPanel({
                   // SSH 卡无此语义(用实例行 ✕ 关闭终端),同样隐藏。
                   const canForce = !isSsh && getMode() === "local" && p.opened;
                   // SSH 实例行(名含 @,如 shell@2)挂 ✕:关闭该终端(临时产物,删除语义);
-                  // 端点定义行(shell)不挂——它代表能力,不是会话。
+                  // 端点定义行(shell)不挂——它代表能力,不是会话。data-closable 让铅笔
+                  // 左移让位(✕ 与铅笔同在 right:4px,不移开则 ✕ 后到 DOM 压住铅笔)。
                   const isSshInstance = isSsh && p.name.includes("@");
                   return (
-                    <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
+                    <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-closable={isSshInstance ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
                       <div
                         className="port-item"
                         role="button"

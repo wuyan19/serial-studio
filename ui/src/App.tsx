@@ -2359,7 +2359,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           return (
             <SshAuthDialog
               host={host}
-              error={error}
               onRetryPassword={(pw, save) => void retrySshAuth(pid, pw, save)}
               onEdit={() => {
                 setSshIssue(null);
