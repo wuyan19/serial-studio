@@ -45,6 +45,8 @@ pub struct AddressResolver {
 
 struct Inner {
     devices: Arc<DeviceClientManager>,
+    /// SSH 设备池(注册表来源之二:设备昵称首段、端点/实例别名索引)。
+    ssh: Arc<crate::ssh::SshManager>,
     /// 本机实例 id(透传谓词语义判据用)。非 'static 硬编码,由装配点注入。
     self_id: Arc<str>,
     /// 别名 → 候选完整键列表。含本机(裸名键)与远端(compose 键)。
@@ -86,12 +88,14 @@ impl AddressResolver {
     /// 再惰性拉起订阅循环。
     pub fn new(
         devices: Arc<DeviceClientManager>,
+        ssh: Arc<crate::ssh::SshManager>,
         meta_bus: broadcast::Sender<()>,
         self_id: Arc<str>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 devices,
+                ssh,
                 self_id,
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),
@@ -128,6 +132,11 @@ impl AddressResolver {
     pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
         self.inner.devices.nickname_of(dev_id)
     }
+
+    /// 集成测试入口:同 key_resolver_fn 的解析语义(内部 resolve),供测试断言。
+    pub fn resolve_for_test(&self, key: &str) -> String {
+        self.inner.resolve(key)
+    }
 }
 
 impl Inner {
@@ -152,14 +161,18 @@ impl Inner {
         }
     }
 
-    /// 完整键的首段甄别:设备 id 原样;唯一昵称重写为 id;其余原样(下游报未注册)。
+    /// 完整键的首段甄别:设备 id 原样;唯一昵称重写为 id(远程设备表 + SSH 注册表
+    /// 两个来源,同名歧义时不擅自选择);其余原样(下游报未注册)。
     /// 首段落定后,末段叶别名(后缀不含 `::`)在该设备作用域内唯一命中则一并重写。
     fn resolve_device_scope(self: &Arc<Self>, key: &str) -> String {
         let (first, rest) = split_port_key(key);
         let dev = if self.devices.is_registered(first) {
             first.to_string()
         } else {
-            match self.devices.ids_by_nickname(first) {
+            // 远程设备昵称与 SSH 设备昵称合并判重——同昵称跨来源即歧义
+            let mut ids = self.devices.ids_by_nickname(first);
+            ids.extend(self.ssh.ids_by_nickname(first));
+            match ids {
                 ids if ids.len() == 1 => ids[0].clone(),
                 ids if ids.len() > 1 => {
                     tracing::warn!("设备昵称「{first}」匹配多台设备 {ids:?},不擅自选择");
@@ -209,7 +222,8 @@ impl Inner {
         }
     }
 
-    /// 全量重建别名索引:本机真实枚举名 + 本地 ports.json(裸名键)+ 各在线设备缓存(归一线名)。
+    /// 全量重建别名索引:本机真实枚举名 + 本地 ports.json(裸名键)+ 各在线设备缓存(归一线名)
+    /// + SSH 注册表(端点别名)/内存实例别名。
     fn rebuild(&self) {
         // 真实端口名(优先级最高——真实名输入恒透传,别名不得遮蔽)
         let mut real = RealNames::default();
@@ -244,6 +258,13 @@ impl Inner {
                     }
                 }
             }
+        }
+        // SSH 来源:端点真实叶名(判据)+ 端点/实例别名(索引)
+        for (dev_id, leaves) in self.ssh.device_real_leaves() {
+            device_real.entry(dev_id).or_default().extend(leaves);
+        }
+        for (alias, key) in self.ssh.alias_pairs() {
+            map.entry(alias).or_default().push(key);
         }
         *self.real_names.write().unwrap() = real;
         *self.port_aliases.write().unwrap() = map;
@@ -312,7 +333,7 @@ mod tests {
             port: 1,
             nickname: Some("test".into()),
         }]);
-        AddressResolver::new(Arc::clone(&devices), meta_tx, "inst-self".into())
+        AddressResolver::new(Arc::clone(&devices), Arc::new(crate::ssh::SshManager::empty()), meta_tx, "inst-self".into())
     }
 
     fn real_names_of(names: &[&str]) -> RealNames {
@@ -410,6 +431,7 @@ mod tests {
         AddressResolver {
             inner: Arc::new(Inner {
                 devices,
+                ssh: Arc::new(crate::ssh::SshManager::empty()),
                 self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::from([("GPS".to_string(), gps_candidates)])),
                 real_names: RwLock::new(RealNames::default()),
@@ -441,6 +463,7 @@ mod tests {
         let r = AddressResolver {
             inner: Arc::new(Inner {
                 devices,
+                ssh: Arc::new(crate::ssh::SshManager::empty()),
                 self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::from([(
                     "COM9".to_string(),
@@ -521,6 +544,7 @@ mod tests {
         let r = AddressResolver {
             inner: Arc::new(Inner {
                 devices,
+                ssh: Arc::new(crate::ssh::SshManager::empty()),
                 self_id: "inst-self".into(),
                 port_aliases: RwLock::new(HashMap::new()),
                 real_names: RwLock::new(RealNames::default()),

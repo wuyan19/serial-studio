@@ -29,6 +29,10 @@ use std::time::Duration;
 use port_io::{SshPortIo, SshSharedIo};
 use session::{run_session, SshCommand, SshSession};
 
+fn compose_key(host_id: &str, name: &str) -> String {
+    format!("{host_id}{}{name}", ss_core::PORT_KEY_SEP)
+}
+
 /// open 命令回执等待上限:覆盖 连接(15s) + 通道/PTY 建立。
 const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -38,6 +42,9 @@ pub struct SshManager {
     registry: Mutex<Vec<SshHostRecord>>,
     /// hostId → 会话(懒建;dead 会话在下次 open 时替换)。
     sessions: Mutex<Vec<(String, Arc<SshSession>)>>,
+    /// 实例别名(运行时,内存):实例全键 → 别名。实例是运行时产物,别名随实例
+    /// 生灭——关闭/断开即失,不落盘(区别于端点定义别名,后者在注册表)。
+    instance_aliases: Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl SshManager {
@@ -46,12 +53,17 @@ impl SshManager {
         Self {
             registry: Mutex::new(store::load().into_iter().map(store::ensure_default_endpoints).collect()),
             sessions: Mutex::new(Vec::new()),
+            instance_aliases: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// 空管理器(测试)。
     pub fn empty() -> Self {
-        Self { registry: Mutex::new(Vec::new()), sessions: Mutex::new(Vec::new()) }
+        Self {
+            registry: Mutex::new(Vec::new()),
+            sessions: Mutex::new(Vec::new()),
+            instance_aliases: Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     /// 全量替换注册表(ssh_save 后调用)。端点缺失兜底默认 shell。
@@ -69,23 +81,85 @@ impl SshManager {
         self.registry.lock().unwrap().iter().any(|r| r.id == host_id)
     }
 
-    /// 设置端点别名(set_alias_and_notify 的 ssh 分支——别名归注册表,不进 ports.json)。
-    pub fn set_endpoint_alias(&self, host_id: &str, endpoint: &str, alias: Option<String>) -> Result<(), String> {
-        let mut list = self.registry.lock().unwrap().clone();
-        let rec = list
-            .iter_mut()
-            .find(|r| r.id == host_id)
-            .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
-        let ep = rec
-            .endpoints
-            .iter_mut()
-            .find(|e| e.name == endpoint)
-            .ok_or_else(|| format!("SSH 设备 {host_id} 无端点 {endpoint}(实例行 shell@N 不设别名)"))?;
-        ep.alias = alias.filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
-        store::save(&list)?;
-        *self.registry.lock().unwrap() = list;
-        Ok(())
+    /// 设备昵称 → id 列表(AddressResolver 首段甄别;与 DeviceClientManager 同构)。
+    pub fn ids_by_nickname(&self, nick: &str) -> Vec<String> {
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.nickname.as_deref().map(str::trim) == Some(nick))
+            .map(|r| r.id.clone())
+            .collect()
     }
+
+    /// 注册表端点+内存实例别名的快照(AddressResolver 索引构建用)。
+    /// 返回 (别名, 完整键) 对;实例别名是运行时的,随 rebuild 周期可见。
+    pub fn alias_pairs(&self) -> Vec<(String, String)> {
+        let reg = self.registry.lock().unwrap();
+        let inst = self.instance_aliases.lock().unwrap();
+        let mut pairs: Vec<(String, String)> = reg
+            .iter()
+            .flat_map(|r| {
+                r.endpoints
+                    .iter()
+                    .filter_map(|ep| ep.alias.as_ref().map(|a| (a.clone(), compose_key(&r.id, &ep.name))))
+            })
+            .collect();
+        pairs.extend(inst.iter().map(|(k, a)| (a.clone(), k.clone())));
+        pairs
+    }
+
+    /// 各设备端点真实名集合(小写)——别名"真实名恒优先"判据(AddressResolver 用)。
+    pub fn device_real_leaves(&self) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.id.clone(),
+                    r.endpoints.iter().map(|e| e.name.to_lowercase()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// 实例别名查询(list 合并注入)。
+    pub fn instance_alias_of(&self, instance_full_key: &str) -> Option<String> {
+        self.instance_aliases.lock().unwrap().get(instance_full_key).cloned()
+    }
+
+    /// 设置别名(端点优先,实例兜底)。端点命中写注册表(落盘);实例命中写内存表
+    /// (运行时生灭)。二者都 miss 时报错(调用方 set_alias_and_notify 的 ssh 分支)。
+    pub fn set_ssh_alias(&self, host_id: &str, name: &str, alias: Option<String>) -> Result<bool, String> {
+        let trimmed = alias.filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
+        // 先试端点(注册表)
+        {
+            let mut list = self.registry.lock().unwrap().clone();
+            if let Some(rec) = list.iter_mut().find(|r| r.id == host_id) {
+                if let Some(ep) = rec.endpoints.iter_mut().find(|e| e.name == name) {
+                    ep.alias = trimmed.clone();
+                    store::save(&list)?;
+                    *self.registry.lock().unwrap() = list;
+                    return Ok(true);
+                }
+            }
+        }
+        // 再试实例(内存)
+        let key = compose_key(host_id, name);
+        let mut inst = self.instance_aliases.lock().unwrap();
+        match trimmed {
+            Some(a) => {
+                inst.insert(key, a);
+                Ok(true)
+            }
+            None => {
+                inst.remove(&key);
+                Ok(true) // 清除别名幂等成功(不存在也 OK)
+            }
+        }
+    }
+
 
     /// CompositeOpener 入口(同步阻塞,manager 的 spawn_blocking 里调)。
     /// `rest` = 端点名或实例名(shell / shell@2);全键 `${hostId}::${rest}` 是命令路由键。

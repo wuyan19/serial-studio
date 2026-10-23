@@ -6,6 +6,7 @@ import type { RefObject } from "react";
 import type { PortId, PortInfo, RemoteDevice } from "../types";
 import { bucketPidOf, displayPortName, getMode, groupBy } from "../lib";
 import {
+  IconClose,
   IconEdit,
   IconExport,
   IconImport,
@@ -23,10 +24,8 @@ export interface PortGroupView {
   online?: boolean;
   ports: PortInfo[];
   /** SSH 设备卡：带 "SSH" 徽标、无在线点（lazy 连接，状态在 shell 行）、
-   *  隐藏别名/强关按钮，右键菜单为 SSH 动作（编辑/测试/删除）。 */
+   *  隐藏强关按钮（终端关闭用实例行 ✕），右键菜单为 SSH 动作。 */
   kind?: "ssh";
-  /** SSH 端点名白名单：铅笔别名只对端点定义行开放（实例行 shell@N 不挂铅笔）。 */
-  aliasableNames?: string[];
   /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
   detail?: string;
 }
@@ -50,6 +49,7 @@ export function PortsPanel({
   onRenameRemote,
   onShowRemoteDetail,
   onSshAction,
+  onClosePort,
   onRefresh,
 }: {
   portGroups: PortGroupView[];
@@ -73,6 +73,8 @@ export function PortsPanel({
   onShowRemoteDetail: (dev: RemoteDevice) => void;
   /** SSH 设备卡菜单动作（connect=新建终端 / edit=打开管理弹窗编辑 / delete=删除）。 */
   onSshAction: (devId: string, action: "connect" | "edit" | "delete") => void;
+  /** SSH 实例行 ✕:关闭该终端(本地 release;多人共享时他人不受影响)。 */
+  onClosePort: (pid: PortId) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -145,10 +147,11 @@ export function PortsPanel({
                   const editingThis = aliasEditPort === pid;
                   // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
                   // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
-                  // SSH 卡无此语义(会话即本卡 shell 行),同样隐藏。
+                  // SSH 卡无此语义(用实例行 ✕ 关闭终端),同样隐藏。
                   const canForce = !isSsh && getMode() === "local" && p.opened;
-                  // SSH 实例行（shell@N）不挂铅笔：别名属于端点定义
-                  const canAlias = !isSsh || !grp.aliasableNames || grp.aliasableNames.includes(p.name);
+                  // SSH 实例行(名含 @,如 shell@2)挂 ✕:关闭该终端(临时产物,删除语义);
+                  // 端点定义行(shell)不挂——它代表能力,不是会话。
+                  const isSshInstance = isSsh && p.name.includes("@");
                   return (
                     <div key={p.name} className="port-item-row" data-active={isActive} data-opened={p.opened ? "true" : undefined} data-force={canForce ? "true" : undefined} data-editing={editingThis ? "true" : undefined}>
                       <div
@@ -181,16 +184,24 @@ export function PortsPanel({
                         </span>
                         {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
                       </div>
-                      {/* 别名编辑:串口与 SSH 端点定义行同交互(SSH 分流在 App::commitAlias) */}
-                      {canAlias && (
+                      {/* 别名编辑:串口与 SSH 行同交互(端点别名落注册表,实例别名走内存表) */}
+                      <button
+                        className="port-item__edit"
+                        title={`设置 ${shown} 别名`}
+                        aria-label={`设置 ${shown} 别名`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => onSetAliasEdit(pid)}
+                      >
+                        <IconEdit />
+                      </button>
+                      {isSshInstance && (
                         <button
-                          className="port-item__edit"
-                          title={`设置 ${shown} 别名`}
-                          aria-label={`设置 ${shown} 别名`}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => onSetAliasEdit(pid)}
+                          className="port-item__force"
+                          title={`关闭终端 ${shown}`}
+                          aria-label={`关闭终端 ${shown}`}
+                          onClick={() => onClosePort(pid)}
                         >
-                          <IconEdit />
+                          <IconClose />
                         </button>
                       )}
                       {canForce && (

@@ -284,7 +284,8 @@ use ss_server::{create_router, AppState};
 use tokio_tungstenite::tungstenite::Message;
 
 /// 起 server(空设备表 + 真 SshManager,无 opener 需要——SSH 动作不触 open)。
-async fn boot_ws() -> String {
+/// 返回 (ws_url, ssh 管理器)——测试驱动注册表/别名。
+async fn boot_ws() -> (String, Arc<SshManager>) {
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(
         event_bus.clone(),
@@ -306,6 +307,7 @@ async fn boot_ws() -> String {
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         addresses: Arc::new(ss_server::address::AddressResolver::new(
             Arc::clone(&devices),
+            Arc::new(ss_server::ssh::SshManager::empty()),
             meta_tx,
             "inst-ssh-ws".into(),
         )),
@@ -319,12 +321,12 @@ async fn boot_ws() -> String {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    format!("ws://{}/ws", addr)
+    (format!("ws://{}/ws", addr), ssh)
 }
 
 #[tokio::test]
 async fn ws_ssh_save_list_next_roundtrip() {
-    let url = boot_ws().await;
+    let (url, _ssh) = boot_ws().await;
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     // save:全量写两台(密钥+密码,camelCase 线格式) → 应回 ssh_hosts
@@ -375,4 +377,130 @@ async fn ws_ssh_save_list_next_roundtrip() {
         }
     }).await.unwrap();
     assert!(fixed.contains("\"name\":\"shell\""), "端点缺失走默认兜底: {fixed}");
+}
+
+/// Bug 回归 1:新建终端后实例行(shell@2)必须出现在 list(此前只有 tab 没有
+/// 侧栏行——list 合并未把 manager 快照中的 SSH 实例合入)。
+/// 用 FakeOpener 直开(绕过真实 russh,验证的是 list 合并逻辑而非连接)。
+#[tokio::test]
+async fn instance_rows_visible_in_list() {
+    use ss_core::{PortIo, PortOpener};
+
+    struct FakePort;
+    impl std::io::Read for FakePort {
+        fn read(&mut self, _b: &mut [u8]) -> std::io::Result<usize> {
+            // 真实串口语义:阻塞到超时才返回(瞬间返回的桩与 core 读循环的组合未经测试验证)
+            std::thread::sleep(Duration::from_millis(50));
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+        }
+    }
+    impl std::io::Write for FakePort {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { Ok(b.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    impl PortIo for FakePort {
+        fn try_clone(&self) -> std::io::Result<Box<dyn PortIo>> { Ok(Box::new(FakePort)) }
+    }
+    struct FakeOpen;
+    impl PortOpener for FakeOpen {
+        fn open(&self, _p: &str, _c: &SerialConfig) -> Result<Box<dyn PortIo>, ss_core::SerialError> {
+            Ok(Box::new(FakePort))
+        }
+    }
+
+    let event_bus = Arc::new(EventBus::new(64));
+    let manager = Arc::new(SerialManager::new(event_bus.clone(), Arc::new(FakeOpen)));
+    let (meta_tx, _) = tokio::sync::broadcast::channel(16);
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(meta_tx.clone(), "inst-ssh-list"));
+    let ssh = Arc::new(SshManager::empty());
+    ssh.update_registry(vec![record("hlist", "192.0.2.50", 22)]);
+    let state = AppState {
+        manager: manager.clone(),
+        event_bus,
+        meta_bus: Arc::new(meta_tx.clone()),
+        script_bus: Arc::new(tokio::sync::broadcast::channel(16).0),
+        enable_scripting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        script_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        closers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        addresses: Arc::new(ss_server::address::AddressResolver::new(
+            devices.clone(),
+            Arc::clone(&ssh) as Arc<SshManager>,
+            meta_tx,
+            "inst-ssh-list".into(),
+        )),
+        devices,
+        ssh: Arc::clone(&ssh),
+        instance_id: "inst-ssh-list".into(),
+    };
+    // open 两个实例(shell + shell@2)——占有权进 manager 快照。session 留到结尾
+    // release:port_task 读线程是 spawn_blocking 死循环,不 release 则 runtime drop
+    // 等不到读线程退出,测试进程挂死(ws_session 同款 FakePort 皆以 close 收尾,故不挂)。
+    let sess1 = ss_core::SessionId::next();
+    let sess2 = ss_core::SessionId::next();
+    let s1 = manager.acquire("hlist::shell".into(), SerialConfig::default(), sess1).await;
+    assert!(s1.is_ok(), "{s1:?}");
+    let s2 = manager.acquire("hlist::shell@2".into(), SerialConfig::default(), sess2).await;
+    assert!(s2.is_ok(), "{s2:?}");
+
+    // list 合并:端点行 + 两个实例行都在
+
+    let views = ss_server::list_ports_with_meta(&state).await;
+
+    let names: Vec<&str> = views.iter().map(|v| v.info.name.as_str()).collect();
+    assert!(names.contains(&"hlist::shell"), "端点行存在: {names:?}");
+    assert!(names.contains(&"hlist::shell@2"), "实例行存在(bug1): {names:?}");
+    let inst = views.iter().find(|v| v.info.name == "hlist::shell@2").unwrap();
+    assert!(inst.info.opened && inst.info.holders >= 1, "实例行是真实态: {:?}", inst.info);
+    // 基端点行 holders 回填(用户 bug:首开 shell 行不显数字)
+    let base = views.iter().find(|v| v.info.name == "hlist::shell").unwrap();
+    assert_eq!(base.info.holders, 1, "基端点行应回填本地 holders");
+    assert!(base.info.opened, "基端点行 opened 由快照覆盖");
+
+    // 收尾:释放两端点,读线程退出,runtime 才能关闭
+    let _ = manager.release("hlist::shell", sess1).await;
+    let _ = manager.release("hlist::shell@2", sess2).await;
+}
+
+/// Bug 回归 2:脚本寻址「设备昵称::shell」必须解析到 SSH 设备 id(此前 SSH 昵称
+/// 不在首段甄别来源,透传后报"未打开")。直测 resolver。
+/// tokio::test:resolver 惰性 watcher 在无 runtime 的同步测试里 tokio::spawn 会 panic。
+#[tokio::test]
+async fn ssh_nickname_resolves_in_addressing() {
+    let (tx, _) = tokio::sync::broadcast::channel(4);
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(tx.clone(), "self"));
+    let ssh = Arc::new(SshManager::empty());
+    ssh.update_registry(vec![SshHostRecord {
+        id: "uuid-ssh-1".into(),
+        host: "192.0.2.60".into(),
+        port: 22,
+        username: "root".into(),
+        nickname: Some("switch-dev".into()),
+        auth: SshAuthRecord::Agent,
+        endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+    }]);
+    let r = ss_server::address::AddressResolver::new(devices, Arc::clone(&ssh), tx.clone(), "self".into());
+    let resolved = r.resolve_for_test("switch-dev::shell");
+    assert_eq!(resolved, "uuid-ssh-1::shell", "SSH 设备昵称应解析为 id(bug2)");
+
+    // 端点别名(裸名寻址):「控制台」→ uuid-ssh-1::shell
+    ssh.set_ssh_alias("uuid-ssh-1", "shell", Some("控制台".into())).unwrap();
+    let r2 = ss_server::address::AddressResolver::new(
+        Arc::new(ss_server::device::DeviceClientManager::empty(tx.clone(), "self")),
+        Arc::clone(&ssh),
+        tokio::sync::broadcast::channel(4).0,
+        "self".into(),
+    );
+    let resolved2 = r2.resolve_for_test("控制台");
+    assert_eq!(resolved2, "uuid-ssh-1::shell", "SSH 端点别名应解析(bug2)");
+
+    // 实例别名(内存表):set_alias 到 shell@2 后解析
+    ssh.set_ssh_alias("uuid-ssh-1", "shell@2", Some("tmp".into())).unwrap();
+    let r3 = ss_server::address::AddressResolver::new(
+        Arc::new(ss_server::device::DeviceClientManager::empty(tokio::sync::broadcast::channel(4).0, "self")),
+        ssh,
+        tokio::sync::broadcast::channel(4).0,
+        "self".into(),
+    );
+    assert_eq!(r3.resolve_for_test("tmp"), "uuid-ssh-1::shell@2", "实例别名应解析");
 }

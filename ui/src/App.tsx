@@ -1617,7 +1617,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       label: h.nickname?.trim() || `${h.username}@${h.host}`,
       detail: `${h.username}@${h.host}:${h.port}`,
       kind: "ssh" as const,
-      aliasableNames: h.endpoints.map((e) => e.name),
       ports: portsByDev[h.id] ?? [],
     })),
   ];
@@ -1869,6 +1868,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onRenameRemote={renameRemote}
               onShowRemoteDetail={(dev) => setRemoteDetailId(dev.id)}
               onSshAction={onSshAction}
+              onClosePort={(pid) => closePort(pid)}
               onRefresh={() => refreshPorts()}
             />
           )}

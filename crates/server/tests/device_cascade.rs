@@ -113,6 +113,7 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
         script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         addresses: Arc::new(ss_server::address::AddressResolver::new(
             Arc::clone(&devices),
+            Arc::new(ss_server::ssh::SshManager::empty()),
             meta_tx,
             inst.into(),
         )),

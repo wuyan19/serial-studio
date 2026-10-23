@@ -122,6 +122,7 @@ pub fn create_state() -> AppState {
     let ssh = Arc::new(ssh::SshManager::from_registry());
     let addresses = Arc::new(address::AddressResolver::new(
         Arc::clone(&devices),
+        Arc::clone(&ssh),
         meta_tx.clone(),
         instance_id.clone(),
     ));
@@ -239,8 +240,10 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             });
         }
     }
-    // SSH 桶(第三来源):注册表端点 + manager 占有权快照里的已开实例(shell@N)。
-    // 端点行 = 静态定义(opened=false/由快照覆盖);实例行 = 运行时产物,列表即时可见。
+    // SSH 桶(第三来源):注册表端点行 + manager 快照中的已开实例行(shell@N)。
+    // 端点行是静态定义(opened 由下方快照覆盖);实例行是运行时产物——从快照按
+    // 设备前缀补入(快照是唯一真相:opened/holders/disconnected 直接可用),
+    // 别名取内存实例别名表。reopen 的 disconnected 实例同样在快照 → 同样可见。
     for rec in state.ssh.registry_snapshot() {
         for ep in &rec.endpoints {
             views.push(PortView {
@@ -254,7 +257,6 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
             });
         }
     }
-    // 本地占有权覆盖远端桶的运行时状态(见函数头注释第 3 条)
     let snap: HashMap<String, ss_core::PortInfo> = state
         .manager
         .snapshot_open_states()
@@ -262,6 +264,28 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         .into_iter()
         .map(|p| (p.name.clone(), p))
         .collect();
+    let ssh_ids: std::collections::HashSet<String> = state
+        .ssh
+        .registry_snapshot()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    for (name, info) in &snap {
+        let (first, _) = ss_core::split_port_key(name);
+        if ssh_ids.contains(first) {
+            match views.iter_mut().find(|v| v.info.name == *name) {
+                // 端点定义行已占此名(shell 基端点):回填 holders——apply_local_override
+                // 刻意不覆盖 holders(远端桶权威在远端 hub),SSH 行的权威恰是本地快照
+                Some(existing) => existing.info.holders = info.holders,
+                None => views.push(PortView {
+                    info: info.clone(),
+                    alias: state.ssh.instance_alias_of(name),
+                }),
+            }
+        }
+    }
+    // 本地占有权覆盖远端桶/SSH 端点行的运行时状态(见函数头注释第 3 条;snap 已在
+    // SSH 实例行补入前计算——实例行本身来自快照,无需覆盖)
     apply_local_override(&mut views, &snap);
     views
 }
@@ -296,7 +320,8 @@ pub fn set_alias_and_notify(
             Ok(())
         }
         (dev, rest) if state.ssh.has_host(dev) => {
-            state.ssh.set_endpoint_alias(dev, rest, alias)?;
+            // 端点命中写注册表(落盘);实例命中写内存表(运行时生灭)
+            state.ssh.set_ssh_alias(dev, rest, alias)?;
             let _ = state.meta_bus.send(());
             Ok(())
         }

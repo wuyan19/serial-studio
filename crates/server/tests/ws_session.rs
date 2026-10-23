@@ -81,6 +81,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
                 meta_tx.clone(),
                 "inst-ws-session",
             )),
+            Arc::new(ss_server::ssh::SshManager::empty()),
             meta_tx,
             "inst-ws-session".into(),
         )),
@@ -361,6 +362,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
     devices.bind(Arc::downgrade(&devices));
     let addresses = Arc::new(AddressResolver::new(
         devices.clone(),
+        Arc::new(ss_server::ssh::SshManager::empty()),
         meta_tx.clone(),
         "inst-ws-alias".into(),
     ));

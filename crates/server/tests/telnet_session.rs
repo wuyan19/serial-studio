@@ -85,6 +85,7 @@ async fn boot() -> (
                 tokio::sync::broadcast::channel(16).0,
                 "inst-telnet-session",
             )),
+            Arc::new(ss_server::ssh::SshManager::empty()),
             tokio::sync::broadcast::channel(16).0,
             "inst-telnet-session".into(),
         )),

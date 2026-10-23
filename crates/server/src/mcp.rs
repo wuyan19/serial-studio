@@ -886,6 +886,7 @@ mod tests {
             script_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             addresses: Arc::new(crate::address::AddressResolver::new(
                 Arc::clone(&devices),
+                Arc::new(crate::ssh::SshManager::empty()),
                 meta_tx,
                 "inst-mcp-test".into(),
             )),
