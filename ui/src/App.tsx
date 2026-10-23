@@ -81,6 +81,7 @@ import {
   ShortcutsDialog,
   SshAuthDialog,
   SshManagerDialog,
+  SshEditDialog,
   SshTrustDialog,
   TermView,
   validateMacro,
@@ -250,8 +251,8 @@ export default function App() {
   // ===== SSH 设备（注册表在所连 server 侧；经 transport ssh_* 面读写） =====
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
-  /** 管理弹窗打开时的编辑种子（侧栏卡「编辑设备」直达表单）；null = 列表视图。 */
-  const [sshEditSeed, setSshEditSeed] = useState<string | null>(null);
+  /** 独立编辑弹窗的设备（右键「编辑设备」/认证失败弹窗直达，不经管理列表）；null = 关。 */
+  const [sshEditDirect, setSshEditDirect] = useState<SshHost | null>(null);
   /** 测试连接结果：testing=测试中，ok=可达，fail=失败（原因经 toast）。 */
   const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok" | "fail">>(new Map());
   /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
@@ -1445,8 +1446,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   // ===== SSH 设备动作（注册表/测试/实例分配全走 transport——数据在所连 server 侧） =====
 
-  const openSshManager = (editSeed: string | null = null) => {
-    setSshEditSeed(editSeed);
+  const openSshManager = () => {
     setSshManagerOpen(true);
   };
 
@@ -1545,7 +1545,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
     if (action === "connect") void newShellSession(devId);
-    else if (action === "edit") openSshManager(host.id);
+    else if (action === "edit") setSshEditDirect(host);
     else deleteSshHost(host);
   };
 
@@ -1736,6 +1736,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     portPaletteOpen ||
     remoteDetail ||
     sshManagerOpen ||
+    sshEditDirect ||
     sshIssue
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
@@ -2376,7 +2377,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onRetryPassword={(pw, save) => void retrySshAuth(pid, pw, save)}
               onEdit={() => {
                 setSshIssue(null);
-                openSshManager(host.id);
+                setSshEditDirect(host);
               }}
               onCancel={() => setSshIssue(null)}
             />
@@ -2402,7 +2403,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onDelete={deleteSshHost}
           onTest={testSsh}
           onClose={() => setSshManagerOpen(false)}
-          seedEditId={sshEditSeed}
+        />
+      )}
+
+      {/* 独立编辑弹窗：右键/认证失败直达，不经管理列表 */}
+      {sshEditDirect && (
+        <SshEditDialog
+          host={sshEditDirect}
+          existing={sshHosts}
+          onCommit={commitSshHost}
+          onClose={() => setSshEditDirect(null)}
         />
       )}
 

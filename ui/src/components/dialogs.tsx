@@ -1061,6 +1061,7 @@ export function sshAuthLabel(auth: SshAuth): string {
 
 /** SSH 管理弹窗：设备 CRUD + 测试连接（列表视图）⇄ 表单视图（添加/编辑）单弹窗切换。
  *  只管设备，不提供连接——连接（开终端会话）是 PORTS 面板的事。
+ *  右键「编辑设备」等不经列表的直达编辑走 SshEditDialog（独立弹窗），不进这里。
  *  Esc 语义随视图走：列表 = 关闭弹窗，表单 = 返回列表。 */
 export function SshManagerDialog({
   hosts,
@@ -1069,7 +1070,6 @@ export function SshManagerDialog({
   onDelete,
   onTest,
   onClose,
-  seedEditId,
 }: {
   hosts: SshHost[];
   /** 测试连接结果（真实 ssh_test 回执）：testing=测试中 / ok=可达 / fail=失败(行内 ✗) / undefined=未测。 */
@@ -1079,34 +1079,23 @@ export function SshManagerDialog({
   onDelete: (host: SshHost) => void;
   onTest: (host: SshHost) => void;
   onClose: () => void;
-  /** 打开时直达某设备的编辑视图（侧栏卡「编辑设备」入口）；null = 列表视图。 */
-  seedEditId: string | null;
 }) {
-  // 种子只在挂载时生效（App 以 {sshManagerOpen && <SshManagerDialog/>} 控制挂载）。
-  // seeded=右键「编辑设备」直接进入表单:列表不渲染(否则透过表单遮罩仍见列表弹窗,
-  // 双模态叠加),返回/保存/Esc 关闭整个弹窗——用户意图是改这一台,不是浏览列表。
-  const seeded = seedEditId != null;
-  const [form, setForm] = useState<null | { mode: "add" } | { mode: "edit"; host: SshHost }>(() => {
-    const seed = seedEditId ? hosts.find((h) => h.id === seedEditId) : undefined;
-    return seed ? { mode: "edit", host: seed } : null;
-  });
-  // 列表进入:返回 = 回列表;种子直达:返回 = 关闭
-  const exitForm = () => {
-    if (seeded) onClose();
-    else setForm(null);
-  };
-  // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回，对话框栈仲裁）
+  // 表单只在管理列表内部切换(添加/编辑行按钮);右键等直达编辑走独立的 SshEditDialog
+  const [form, setForm] = useState<null | { mode: "add" } | { mode: "edit"; host: SshHost }>(null);
+  // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回列表，对话框栈仲裁）
   useEscClose(() => {
     if (form === null) onClose();
-    else exitForm();
+    else setForm(null);
   });
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogA11y(dialogRef);
 
   return (
     <>
-      {form === null && (
-        <div className="dialog-overlay">
+      {/* 列表常驻挂载,表单作为第二层 overlay 叠上(子页深度感:列表在底下变暗,
+          添加/返回无塌掉重建的闪烁)。右键等直达编辑不经这里,走独立的 SshEditDialog
+          ——双模态叠加的观感问题只存在于直达路径,列表内部叠加是自然的。 */}
+      <div className="dialog-overlay">
         <div
           ref={dialogRef}
           role="dialog"
@@ -1171,20 +1160,48 @@ export function SshManagerDialog({
             </button>
           </div>
         </div>
-        </div>
-      )}
+      </div>
       {form && (
         <SshHostForm
           initial={form.mode === "edit" ? form.host : null}
           existing={hosts}
-          onBack={exitForm}
+          onBack={() => setForm(null)}
+          backLabel="返回"
           onSave={(h) => {
             onCommit(h, form.mode === "add");
-            exitForm(); // 种子直达=保存即关,列表进入=回列表(可见更新后的行)
+            setForm(null); // 回列表,可见更新后的行
           }}
         />
       )}
     </>
+  );
+}
+
+/** 独立 SSH 设备编辑弹窗：右键「编辑设备」/认证失败弹窗的「编辑设备」直达入口。
+ *  表单被两处复用（管理列表内部切换 + 此处的独立打开），故从管理弹窗拆出——
+ *  这里无列表可返，取消 = 关闭，保存 = 提交并关闭；用户意图是改这一台，不是浏览。 */
+export function SshEditDialog({
+  host,
+  existing,
+  onCommit,
+  onClose,
+}: {
+  host: SshHost;
+  existing: SshHost[];
+  onCommit: (host: SshHost, isNew: boolean) => void;
+  onClose: () => void;
+}) {
+  return (
+    <SshHostForm
+      initial={host}
+      existing={existing}
+      onBack={onClose}
+      backLabel="关闭"
+      onSave={(h) => {
+        onCommit(h, false);
+        onClose();
+      }}
+    />
   );
 }
 
@@ -1194,6 +1211,7 @@ function SshHostForm({
   initial,
   existing,
   onBack,
+  backLabel,
   onSave,
 }: {
   /** 编辑时的原设备；添加为 null。 */
@@ -1201,6 +1219,8 @@ function SshHostForm({
   /** 既有设备（重复地址校验；编辑时排除自身）。 */
   existing: SshHost[];
   onBack: () => void;
+  /** 左侧退出按钮文案：落点是回列表传「返回」，直接关弹窗传「关闭」。 */
+  backLabel: string;
   onSave: (host: SshHost) => void;
 }) {
   const isEdit = initial !== null;
@@ -1353,7 +1373,7 @@ function SshHostForm({
         )}
         <div className="btn-row">
           <button className="btn btn--ghost" onClick={onBack}>
-            返回
+            {backLabel}
           </button>
           <button className="btn btn--primary" onClick={save} disabled={invalid} title={host.trim() === "" ? "请填写主机地址" : undefined}>
             保存

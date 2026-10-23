@@ -16,6 +16,7 @@ export {
   ShortcutsDialog,
   SshAuthDialog,
   SshManagerDialog,
+  SshEditDialog,
   SshTrustDialog,
   sshAuthLabel,
 } from "./dialogs";
