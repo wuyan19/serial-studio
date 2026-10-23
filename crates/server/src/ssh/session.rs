@@ -248,7 +248,8 @@ async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecke
     }
 }
 
-fn auth_label(auth: &SshAuthRecord) -> &'static str {
+/// 认证方式短标签(状态展示/MCP serial_status 用)。pub:跨模块消费。
+pub fn auth_label(auth: &SshAuthRecord) -> &'static str {
     match auth {
         SshAuthRecord::Key { .. } => "密钥",
         SshAuthRecord::Agent => "Agent",

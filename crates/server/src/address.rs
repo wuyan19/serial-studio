@@ -128,9 +128,13 @@ impl AddressResolver {
         self.inner.devices.ids_by_nickname(nick)
     }
 
-    /// 设备 id → 昵称(serial_list 展示用)。
+    /// 设备 id → 昵称(serial_list 等展示用)。双来源:远程设备表 + SSH 注册表——
+    /// 与 ids_by_nickname 的首段甄别对齐,展示的寻址词汇必须与解析能力同源。
     pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
-        self.inner.devices.nickname_of(dev_id)
+        self.inner
+            .devices
+            .nickname_of(dev_id)
+            .or_else(|| self.inner.ssh.nickname_of(dev_id))
     }
 
     /// 集成测试入口:同 key_resolver_fn 的解析语义(内部 resolve),供测试断言。

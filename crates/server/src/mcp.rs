@@ -78,7 +78,7 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "serial_list",
-                "description": "列出系统所有串口及其打开状态、别名与所属设备昵称。",
+                "description": "列出所有端口(本机串口/远程设备/SSH 终端):完整键、别名、设备昵称与寻址提示、打开状态,中点分隔的扁平单行。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -295,38 +295,39 @@ async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
     }
     let mut out = Vec::with_capacity(views.len());
     for v in views {
-        // 别名词汇 + 设备昵称都展示出来——agent 由此发现可用寻址形式
-        // (裸名 / 端口别名 / `设备昵称::端口`),与 usage guide 的寻址表呼应
-        let mut notes = Vec::new();
+        // 扁平单行:键 · 别名 · [SSH ]设备 昵称 · 寻址 提示 · 状态 [· N 人]。
+        // 消费者是 agent——中点分隔的一层结构最易解析(此前三层嵌套括号)。
+        // 键保留完整复合键:open 需要机器可用的精确名。
+        let mut parts = vec![v.info.name.clone()];
         if let Some(a) = &v.alias {
-            notes.push(format!("别名 {}", a));
+            parts.push(format!("别名 {a}"));
         }
         let dev_id = ss_core::split_port_key(&v.info.name).0;
         if dev_id != ss_core::LOCAL_DEVICE_ID {
-            // 提示用裸后缀(目标机上的端口名),拼出的 test::<后缀> 才是可解析寻址
+            // 提示用裸后缀(目标机上的端口名),拼出的 昵称::<后缀> 才是可解析寻址;
+            // SSH 标记让 agent 一眼区分终端会话与串口(交互方式不同)
             let suffix = ss_core::split_port_key(&v.info.name).1;
+            let kind = if state.ssh.has_host(dev_id) { "SSH 设备" } else { "设备" };
             match state.addresses.nickname_of(dev_id) {
-                Some(nick) => notes.push(format!("设备 {} (寻址 {}::{})", nick, nick, suffix)),
-                None => notes.push(format!("设备 {}", dev_id)),
+                Some(nick) => {
+                    parts.push(format!("{kind} {nick}"));
+                    parts.push(format!("寻址 {nick}::{suffix}"));
+                }
+                None => parts.push(format!("{kind} {dev_id}")),
             }
         }
-        let label = if notes.is_empty() {
-            v.info.name.clone()
-        } else {
-            format!("{} ({})", v.info.name, notes.join(", "))
-        };
-        let line = if v.info.opened {
+        if v.info.opened {
+            parts.push("open".into());
             if v.info.holders > 0 {
-                format!("{} (open, {} holder(s))", label, v.info.holders)
-            } else {
-                format!("{} (open)", label)
+                parts.push(format!("{} 人", v.info.holders));
             }
         } else {
-            format!("{} (closed)", label)
-        };
-        out.push(line);
+            parts.push("closed".into());
+        }
+        out.push(parts.join(" · "));
     }
-    ok_text(out.join("\n"))
+    ok_text(out.join("
+"))
 }
 
 async fn tool_serial_send(args: Value, state: &AppState) -> Value {
@@ -424,10 +425,30 @@ async fn tool_serial_status(args: Value, state: &AppState) -> Value {
                 Some(a) => format!("Alias: {}\n", a),
                 None => String::new(),
             };
-            ok_text(format!(
-                "Port: {}\n{alias_line}Baud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}\nHolders: {}",
-                port, cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending, holders
-            ))
+            // SSH 端点:串口参数无意义,显示连接身份(设备/认证/端点)——与通道条同语义
+            let (dev, _rest) = ss_core::split_port_key(&port);
+            let body = if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
+                let rec = state.ssh.registry_snapshot().into_iter().find(|r| r.id == dev);
+                match rec {
+                    Some(r) => format!(
+                        "SSH device: {} ({}@{}:{})\nAuth: {}\nEndpoint: {}\nHolders: {}",
+                        r.label(),
+                        r.username,
+                        r.host,
+                        r.port,
+                        crate::ssh::auth_label_of(&r.auth),
+                        _rest,
+                        holders
+                    ),
+                    None => format!("Holders: {}", holders),
+                }
+            } else {
+                format!(
+                    "Baud rate: {}\nData bits: {:?}\nParity: {:?}\nStop bits: {:?}\nFlow control: {:?}\nLine ending: {:?}\nHolders: {}",
+                    cfg.baud_rate, cfg.data_bits, cfg.parity, cfg.stop_bits, cfg.flow_control, cfg.line_ending, holders
+                )
+            };
+            ok_text(format!("Port: {}\n{alias_line}{body}", port))
         }
         None => error_text(format!("Port {} not open", port)),
     }
@@ -835,7 +856,7 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
   作用域内唯一命中时本地即解析(`test::GPS` → 该设备的 GPS 别名端口);多级
   级联后缀逐段透传,由下一跳解析。昵称在设备列表唯一。
 
-serial_list 输出会标注每个端口的别名与所属设备昵称。
+serial_list 输出为扁平单行(键 · 别名 · 设备 · 寻址 · 状态),SSH 终端带 SSH 设备标记。
 
 ## 推荐工作流
 
@@ -860,7 +881,7 @@ mod tests {
 
     /// 测试用 AppState(RealPortOpener + 空设备表;script_bus receiver 丢弃——
     /// 验证广播的测试自建 channel 保留 rx)。
-    fn make_state() -> AppState {
+    pub(super) fn make_state() -> AppState {
         let (tx, _) = broadcast::channel::<()>(16);
         make_state_with_script_bus(tx)
     }
@@ -1307,5 +1328,75 @@ mod tests {
             rx.try_recv().is_err(),
             "delete 幂等未变更不应触发 script_bus"
         );
+    }
+}
+
+#[cfg(test)]
+mod ssh_display_tests {
+    use super::*;
+    use crate::ssh::{SshAuthRecord, SshEndpointRecord, SshHostRecord, SshManager};
+    use std::sync::Arc;
+    use super::tests::make_state;
+
+    fn ssh_with_entries() -> Arc<SshManager> {
+        let m = SshManager::empty();
+        m.update_registry(vec![
+            SshHostRecord {
+                id: "ssh-x1".into(),
+                host: "192.0.2.70".into(),
+                port: 22,
+                username: "root".into(),
+                nickname: Some("车间网关".into()),
+                auth: SshAuthRecord::Password { password: "pw".into() },
+                endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: Some("控制台".into()) }],
+            },
+            SshHostRecord {
+                id: "ssh-x2".into(),
+                host: "192.0.2.71".into(),
+                port: 22,
+                username: "pi".into(),
+                nickname: None,
+                auth: SshAuthRecord::Agent,
+                endpoints: vec![SshEndpointRecord { name: "shell".into(), r#type: "shell".into(), alias: None }],
+            },
+        ]);
+        Arc::new(m)
+    }
+
+    /// serial_list 扁平单行:SSH 标记 + 设备昵称 + 寻址 + 端点别名 + 状态,无嵌套括号。
+    #[tokio::test]
+    async fn serial_list_flat_format_with_ssh() {
+        // 不设 SERIAL_STUDIO_CONFIG_DIR:注册表操作全内存,且进程级 env 会与并行
+        // 的脚本库测试互踩(lib 测试二进制同进程,known hazard)
+        let mut state = make_state();
+        let ssh = ssh_with_entries();
+        state.ssh = Arc::clone(&ssh);
+        // addresses 内持独立的 ssh 引用(make_state 注入的是空表),一并重建
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        state.addresses = Arc::new(crate::address::AddressResolver::new(
+            Arc::new(crate::device::DeviceClientManager::empty(tx, "inst-mcp-ssh")),
+            ssh,
+            tokio::sync::broadcast::channel(16).0,
+            "inst-mcp-ssh".into(),
+        ));
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#;
+        let resp = handle_request(req, &state).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let line1 = text.lines().find(|l| l.starts_with("ssh-x1::shell")).unwrap();
+        assert!(line1.contains("别名 控制台"), "{line1}");
+        assert!(line1.contains("SSH 设备 车间网关") && line1.contains("寻址 车间网关::shell"), "{line1}");
+        assert!(line1.ends_with("closed") && !line1.contains('('), "扁平无括号: {line1}");
+        let line2 = text.lines().find(|l| l.starts_with("ssh-x2::shell")).unwrap();
+        assert!(line2.contains("SSH 设备 ssh-x2") && !line2.contains("寻址"), "无昵称 uuid 兜底: {line2}");
+    }
+
+    /// nickname_of 双来源:SSH 注册表昵称可查(展示与解析同源)。
+    #[tokio::test]
+    async fn nickname_of_includes_ssh_source() {
+        let (tx, _) = tokio::sync::broadcast::channel(4);
+        let devices = Arc::new(crate::device::DeviceClientManager::empty(tx.clone(), "self"));
+        let r = crate::address::AddressResolver::new(devices, ssh_with_entries(), tx, "self".into());
+        assert_eq!(r.nickname_of("ssh-x1").as_deref(), Some("车间网关"));
+        assert_eq!(r.nickname_of("ssh-nope"), None);
     }
 }

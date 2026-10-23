@@ -18,6 +18,7 @@ pub mod port_io;
 pub mod session;
 pub mod store;
 
+pub use session::auth_label as auth_label_of;
 pub use store::{SshAuthRecord, SshEndpointRecord, SshHostRecord};
 
 use serde::{Deserialize, Serialize};
@@ -141,6 +142,19 @@ impl SshManager {
     /// 复合键首段是否为已注册 SSH 设备(CompositeOpener 路由判定)。
     pub fn has_host(&self, host_id: &str) -> bool {
         self.registry.lock().unwrap().iter().any(|r| r.id == host_id)
+    }
+
+    /// 设备昵称查询(AddressResolver::nickname_of 双来源之一)。
+    pub fn nickname_of(&self, dev_id: &str) -> Option<String> {
+        self.registry
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == dev_id)
+            .and_then(|r| r.nickname.as_deref())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
     }
 
     /// 设备昵称 → id 列表(AddressResolver 首段甄别;与 DeviceClientManager 同构)。
