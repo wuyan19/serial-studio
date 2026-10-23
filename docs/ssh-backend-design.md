@@ -32,7 +32,7 @@ CompositeOpener (server/src/device/mod.rs)
 
 **实例模型**:端点(定义,如 `shell`)在注册表,实例(运行时,`shell@N`)是运行产物。`next_instance_key` 取最小空闲序号(复用已关实例的号,manager 占有权快照为唯一依据)。实例行在 list 输出中由 manager 快照自然出现(已开端口),端点行由注册表桶输出。holders 数字恒为"共享该流的人数"——与串口心智一致,实例数即行数。
 
-**Host key(TOFU)**:首连指纹记入 `ssh_known_hosts.json` 并放行;已记录且不匹配 → 拒绝连接(日志带两端指纹),直到人工删除该条目。指纹变更的确认对话框属 UI 侧后续工作,v1 语义为拒绝并留痕。
+**Host key(确认制,三态)**:首连不自动信任——open 回执分类 `HostKeyUnknown{fingerprint,keyType}`,前端弹确认框(显示 SHA256 指纹+算法),用户「信任并连接」→ `ssh_trust_host` 动作(直连记录即断,不进会话池)→ 自动重开。已记录且匹配 → 放行。已记录但不匹配 → `HostKeyChanged{known,received,keyType}`,前端弹红色严重警告(对照 OpenSSH 的 REMOTE HOST IDENTIFICATION HAS CHANGED),确认后覆盖指纹并重连。错误分类经 `SerialError::OpenFailed.detail`(core 新增的机器可读 JSON 字段,serde 兼容)穿越 core,WS 回执 `Error.ssh` 字段下发。
 
 **认证**:密钥文件(`~` 展开)、SSH Agent(Windows=Pageant 管道,其余=SSH_AUTH_SOCK,逐身份尝试)、密码。凭据明文存 `ssh_hosts.json`(见安全边界)。
 
@@ -66,5 +66,5 @@ open/write/close 复用既有 `open`/`write`/`close` action——SSH 实例对 m
 - **keepalive**:russh `inactivity_timeout=None`,空闲连接依赖 TCP;后续可加协议层 keepalive(对齐 device/ 的 10s/20s 心跳)。
 - **exec/serial 端点**:`SshEndpointRecord.type` 已留判别空间;落地时 open_pty_shell 按 type 分支。
 - **多级级联**:SSH 端口随 list 透传(经 `passthrough_port_key` 谓词),理论免费;未专门验证。
-- **认证失败重输闭环**(弹窗更新已存密码)、**TOFU 确认 UI**:与前端联调时补。
+- ~~认证失败重输闭环、TOFU 确认 UI~~:已落地——open 失败分类 `AuthFailed` 前端弹重输框(勾选更新已存密码,立即重试);指纹确认见上。通道条对 SSH 端口显示 `user@host:port · PTY`(替代波特率)。
 - **UI 对接**:前端预览的 localStorage 数据层换成上述 WS action(`loadSshHosts/persistSshHosts/connectSsh/testSsh` 四个替换点已预埋)。

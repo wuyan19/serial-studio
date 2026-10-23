@@ -3354,3 +3354,51 @@ button {
   color: var(--ink);
   box-shadow: var(--card-glow);
 }
+
+/* ---------- SSH open 失败交互闭环（认证重输 / 指纹确认） ---------- */
+
+/* 指纹等宽展示（选中复制友好） */
+.ssh-trust__fp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-dim);
+  word-break: break-all;
+  user-select: text;
+}
+
+/* 指纹变更：严重警告形态（红色描边 + 警示文案带） */
+.ssh-trust--danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 30%, transparent),
+    0 18px 48px rgba(0, 0, 0, 0.45);
+}
+.ssh-trust__warn {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border-radius: var(--r-btn);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+/* 危险主按钮（仍要信任并连接） */
+.btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+.btn--danger:hover {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+}
+
+/* 认证弹窗勾选行 */
+.ssh-dialog__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+  font-size: var(--fs-sm);
+  color: var(--ink-dim);
+  cursor: pointer;
+}

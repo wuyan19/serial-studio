@@ -191,6 +191,7 @@ impl DeviceClient {
             return Err(SerialError::OpenFailed {
                 port: format!("{}::{}", self.inner.dev.id, port),
                 message: format!("设备 {}({}) 未连接", self.inner.dev.id, self.inner.dev.host),
+                detail: None,
             });
         }
         let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<String, String>>();
@@ -204,6 +205,7 @@ impl DeviceClient {
             .map_err(|_| SerialError::OpenFailed {
                 port: port.clone(),
                 message: "设备连接已断开".into(),
+                detail: None,
             })?;
         match reply_rx.recv_timeout(RPC_TIMEOUT) {
             Ok(Ok(wire)) => {
@@ -223,6 +225,7 @@ impl DeviceClient {
             Ok(Err(msg)) => Err(SerialError::OpenFailed {
                 port: format!("{}::{}", self.inner.dev.id, port),
                 message: format!("远端打开失败: {}", msg),
+                detail: None,
             }),
             Err(_) => {
                 // 超时:挂起的回执可能晚到,清掉防泄漏(晚到的 acquired 找不到就丢弃)
@@ -230,6 +233,7 @@ impl DeviceClient {
                 Err(SerialError::OpenFailed {
                     port,
                     message: "远端打开超时".into(),
+                    detail: None,
                 })
             }
         }
@@ -645,7 +649,7 @@ impl DeviceClient {
                     self.route_legacy_ok();
                 }
             },
-            ServerMsg::Error { message, port, req } => {
+            ServerMsg::Error { message, port, req, .. } => {
                 // open/write/set_alias 失败都走 Error;有 port 按 req/端口路由,
                 // 无 port(旧版服务端)按 FIFO 兜底,都没有只留痕
                 match port {

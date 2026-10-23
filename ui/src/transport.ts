@@ -1,4 +1,4 @@
-import type { Macro, PortInfo, Script, SerialConfig, SshHost } from "./types";
+import type { Macro, PortInfo, Script, SerialConfig, SshHost, SshOpenError } from "./types";
 import { Channel } from "@tauri-apps/api/core";
 import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
 
@@ -11,6 +11,12 @@ export interface AcquiredResult {
   config: SerialConfig;
   /** 当前持有者数（含自己） */
   holders: number;
+}
+
+/** open 失败的结构化载荷:ssh 分类存在时前端弹交互闭环(重输密码/指纹确认)。 */
+export interface OpenError {
+  message: string;
+  ssh?: SshOpenError;
 }
 
 /** 数据面传输抽象：屏蔽 IPC/WS 协议差异。组件只懂领域（port/bytes/macro）。 */
@@ -76,6 +82,8 @@ export interface Transport {
   sshTest(hostId: string): Promise<{ ok: boolean; message: string }>;
   /** 分配下一个空闲实例名（shell / shell@N，最小空闲）。 */
   sshNextInstance(hostId: string, base: string): Promise<string>;
+  /** 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。 */
+  sshTrustHost(hostId: string): Promise<string>;
   /** PTY 尺寸变更（SSH 实例消费；其它端口后端静默成功）。 */
   resize(port: string, cols: number, rows: number): Promise<void>;
   dispose(): void;
@@ -220,6 +228,10 @@ abstract class TransportEventBase {
 export class RemoteTransport extends TransportEventBase implements Transport {
   private host: string;
   private portNum: number;
+  /** 本 transport 所属的远程设备 id(${ownerId}:: 前缀的口属于远端 ss 本机,线上
+   *  剥此前缀;其它首段(如 SSH 设备键 sshUuid::shell)是远端 server 内部键,整键
+   *  透传——此前无条件剥首段,web 形态的 SSH 端口 open 会打到裸名上查无此口)。 */
+  private ownerId: string;
   private ws!: WebSocket;
   /** open 回复按 port 路由：并发 open（重连后重放多端口）各取各的回复，不串台。
    *  旧实现是单槽，并发 open 时后写覆盖前写 → 只末个 caller 拿到结果、其余 Promise 永悬。 */
@@ -241,10 +253,11 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(host: string, port: number) {
+  constructor(host: string, port: number, ownerId: string) {
     super();
     this.host = host;
     this.portNum = port;
+    this.ownerId = ownerId;
     this.connect();
   }
 
@@ -329,9 +342,21 @@ export class RemoteTransport extends TransportEventBase implements Transport {
         case "scripts_changed":
           this.handlers.scriptsChanged.forEach((cb) => cb());
           break;
-        case "error":
+        case "error": {
+          const openErr: OpenError = {
+            message: msg.message as string,
+            ssh: msg.ssh as SshOpenError | undefined,
+          };
           this.handlers.error.forEach((cb) => cb(msg.message));
+          // 在途 open 的失败回执(port 匹配 wire name)→ reject 该 open(此前 Promise
+          // 永悬,认证失败只 toast 不闭环)
+          const wire = typeof msg.port === "string" ? msg.port : null;
+          if (wire && this.openResolvers.has(wire)) {
+            this.openResolvers.get(wire)!.reject(Object.assign(new Error(openErr.message), openErr));
+            this.openResolvers.delete(wire);
+          }
           break;
+        }
         case "macro_result":
           this.handlers.macroResult.forEach((cb) =>
             cb(msg.run_id, msg.name, msg.success, msg.message)
@@ -445,11 +470,11 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     this.ws.send(payload);
   }
 
-  /** 完整 pid → 远端侧线名（egress 剥首段设备前缀；无前缀的旧值原样）。
-   *  本 transport 的端口键模型：App 层统一用完整 pid（`devId::...`），线上只说远端侧键。 */
+  /** 完整 pid → 远端侧线名：仅剥本 transport 所属设备(ownerId)的前缀;其余整键
+   *  透传(远端 server 的 SSH 端口键、级联键由远端自己解析)。 */
   private wireName(pid: string): string {
-    const idx = pid.indexOf("::");
-    return idx < 0 ? pid : pid.slice(idx + 2);
+    const prefix = `${this.ownerId}::`;
+    return pid.startsWith(prefix) ? pid.slice(prefix.length) : pid;
   }
 
   async list() {
@@ -541,6 +566,12 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     });
     await this.send(JSON.stringify({ action: "ssh_next_instance", host_id: hostId, base }));
     return result;
+  }
+  async sshTrustHost(hostId: string) {
+    // 成功回执 Ok(message="trusted <fp>"),失败走 error(onError toast);此处以
+    // 发送成功为准,指纹回显取 message 前缀——简化:等 Ok 需新增路由,收益低。
+    await this.send(JSON.stringify({ action: "ssh_trust_host", host_id: hostId }));
+    return "";
   }
   async resize(port: string, cols: number, rows: number) {
     await this.send(JSON.stringify({ action: "resize", port: this.wireName(port), cols, rows }));
@@ -674,10 +705,20 @@ export class LocalTransport extends TransportEventBase implements Transport {
     this.streamChannels.set(port, chan);
     // 后端返回 AcquireResult 枚举：{kind:"opened"|"attached",config,holders,resolved}
     // (resolved=服务端解析后的 map 键;本地 UI 恒传真键,resolved≈port,此处不用)
-    const r = await tauriInvoke<{ kind: string; config: SerialConfig; holders?: number }>(
-      "open_port_stream",
-      { port, config, onEvent: chan }
-    );
+    let r: { kind: string; config: SerialConfig; holders?: number };
+    try {
+      r = await tauriInvoke<{ kind: string; config: SerialConfig; holders?: number }>(
+        "open_port_stream",
+        { port, config, onEvent: chan }
+      );
+    } catch (e) {
+      // 结构化错误载荷 {message, ssh?}(非 open 命令的其它 reject 保持纯文本兼容)
+      const openErr: OpenError =
+        typeof e === "object" && e !== null && "message" in (e as Record<string, unknown>)
+          ? (e as unknown as OpenError)
+          : { message: String(e) };
+      throw Object.assign(new Error(openErr.message), openErr);
+    }
     if (r.kind === "opened") {
       return { port, opened: true, config: r.config, holders: r.holders ?? 1 };
     }
@@ -742,6 +783,9 @@ export class LocalTransport extends TransportEventBase implements Transport {
   async sshNextInstance(hostId: string, base: string) {
     return tauriInvoke<string>("ssh_next_instance", { hostId, base });
   }
+  async sshTrustHost(hostId: string) {
+    return tauriInvoke<string>("ssh_trust_host", { hostId });
+  }
   async resize(port: string, cols: number, rows: number) {
     await tauriInvoke("resize_port", { port, cols, rows });
   }
@@ -765,5 +809,5 @@ export class LocalTransport extends TransportEventBase implements Transport {
 export function createTransport(): Transport {
   if (getMode() === "local") return new LocalTransport();
   const { host, port } = getRemoteFromUrl() ?? loadConn();
-  return new RemoteTransport(host, port);
+  return new RemoteTransport(host, port, "remote");
 }

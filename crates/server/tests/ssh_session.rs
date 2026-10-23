@@ -76,10 +76,16 @@ impl server::Handler for EchoSshServer {
 
 /// 起回显 SSH 服务器，返回 (host, port)。
 async fn spawn_echo_ssh_server() -> (String, u16) {
+    let (host, port, _abort) = spawn_echo_ssh_server_abortable().await;
+    (host, port)
+}
+
+/// 可中止版:指纹变更测试需要停掉旧 server 再于同端口起新 key 的 server。
+async fn spawn_echo_ssh_server_abortable() -> (String, u16, tokio::task::AbortHandle) {
     let config = Arc::new(server_config());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let Ok((socket, _)) = listener.accept().await else { break };
             let config = Arc::clone(&config);
@@ -88,7 +94,7 @@ async fn spawn_echo_ssh_server() -> (String, u16) {
             });
         }
     });
-    (addr.ip().to_string(), addr.port())
+    (addr.ip().to_string(), addr.port(), task.abort_handle())
 }
 
 fn server_config() -> server::Config {
@@ -134,6 +140,18 @@ fn read_until(io: &mut Box<dyn PortIo>, want: usize, timeout: Duration) -> Vec<u
 }
 
 // ===== 测试 =====
+/// 测试辅助:信任指定设备的 host key(新策略:首连不自动 TOFU,须显式确认)。
+/// trust_host_key 是同步阻塞(block_on),须在 spawn_blocking 里调。
+async fn trust(mgr: &SshManager, host_id: &str) {
+    let rec = mgr.registry_snapshot().into_iter().find(|r| r.id == host_id).unwrap();
+    let fp = tokio::task::spawn_blocking(move || ssh::session::trust_host_key(rec))
+        .await
+        .unwrap()
+        .expect("trust 失败");
+    assert!(fp.starts_with("SHA256:"), "指纹形态: {fp}");
+}
+
+
 
 /// 端到端主干：open（建连+认证+PTY+shell）→ write → 回显 read → drop 关闭。
 #[tokio::test]
@@ -145,6 +163,7 @@ async fn open_write_read_roundtrip() {
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![record("sshdev1", &host, port)]);
+    trust(&mgr, "sshdev1").await;
 
     let m = Arc::clone(&mgr);
     let mut io = tokio::task::spawn_blocking(move || {
@@ -176,6 +195,7 @@ async fn multiple_instances_isolated() {
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![record("sshdev2", &host, port)]);
+    trust(&mgr, "sshdev2").await;
 
     let m = Arc::clone(&mgr);
     let mut io1 = tokio::task::spawn_blocking(move || {
@@ -218,6 +238,7 @@ async fn wrong_password_reports_auth_failure() {
     rec.auth = SshAuthRecord::Password { password: "wrong".into() };
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![rec]);
+    trust(&mgr, "sshdev3").await;
 
     let m = Arc::clone(&mgr);
     let result = tokio::task::spawn_blocking(move || {
@@ -226,8 +247,14 @@ async fn wrong_password_reports_auth_failure() {
     .await
     .unwrap();
     match result {
-        Err(ss_core::SerialError::OpenFailed { message, .. }) => {
+        Err(ss_core::SerialError::OpenFailed { message, detail, .. }) => {
             assert!(message.contains("认证失败"), "错误信息应含认证失败: {message}");
+            let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail);
+            assert_eq!(
+                cls,
+                Some(ssh::SshOpenError::AuthFailed { method: "密码".into() }),
+                "detail 应分类为 AuthFailed(重输闭环触发器)"
+            );
         }
         Err(other) => panic!("应报 OpenFailed 认证失败,得到: {other:?}"),
         Ok(_) => panic!("错误密码不应 open 成功"),
@@ -244,6 +271,7 @@ async fn resize_is_idempotent_noop() {
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![record("sshdev4", &host, port)]);
+    trust(&mgr, "sshdev4").await;
 
     let m = Arc::clone(&mgr);
     let mut io = tokio::task::spawn_blocking(move || {
@@ -503,4 +531,108 @@ async fn ssh_nickname_resolves_in_addressing() {
         "self".into(),
     );
     assert_eq!(r3.resolve_for_test("tmp"), "uuid-ssh-1::shell@2", "实例别名应解析");
+}
+
+/// 指纹生命周期(bug 回归+新策略):首连拒绝(HostKeyUnknown,带指纹) → 信任后可开
+/// → 服务器换 key 后再开拒绝(HostKeyChanged,带新旧指纹)。
+/// 同端口换 key:先 abort 旧 server 任务,再用新 key 在同端口起新 server。
+#[tokio::test]
+async fn host_key_lifecycle_unknown_then_changed() {
+    let dir = std::env::temp_dir().join(format!("ss-ssh-test-hk-{}", std::process::id()));
+    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 起第一台(随机端口,key1,可中止——第三步同端口换 key 需要)
+    let (host, port, server1) = spawn_echo_ssh_server_abortable().await;
+    let mgr = Arc::new(SshManager::empty());
+    mgr.update_registry(vec![record("hk", &host, port)]);
+
+    // 1) 首连:拒绝 + 分类 HostKeyUnknown(带指纹与算法)
+    let m1 = Arc::clone(&mgr);
+    let r1 = tokio::task::spawn_blocking(move || m1.open_blocking("hk", "shell", &SerialConfig::default()))
+        .await
+        .unwrap();
+    match &r1 {
+        Err(ss_core::SerialError::OpenFailed { detail, .. }) => {
+            let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail).unwrap();
+            match cls {
+                ssh::SshOpenError::HostKeyUnknown { fingerprint, key_type } => {
+                    assert!(fingerprint.starts_with("SHA256:"), "{fingerprint}");
+                    assert!(!key_type.is_empty());
+                }
+                other => panic!("应分类 HostKeyUnknown,得到 {other:?}"),
+            }
+        }
+        _ => panic!("首连应被拒(确认制)"),
+    }
+
+    // 2) 信任后:可开可读写
+    trust(&mgr, "hk").await;
+    let m2 = Arc::clone(&mgr);
+    let mut io = tokio::task::spawn_blocking(move || m2.open_blocking("hk", "shell", &SerialConfig::default()))
+        .await
+        .unwrap()
+        .expect("信任后应可开");
+    // PortIo 阻塞接口须 spawn_blocking(直接调会冻结 current_thread runtime,写回执永不到达)
+    let echoed = tokio::task::spawn_blocking(move || {
+        io.write_all(b"hi\n").unwrap();
+        read_until(&mut io, 3, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(echoed, b"hi\n");
+
+    // 3) 同端口换 key(新 server):先停旧 server 释放端口,再起新 key 的 server。
+    //    旧 manager 的会话池仍持活连接(abort 只停 accept)——换新 manager 实例驱动
+    //    新建连:known_hosts 落盘共享,新连即对上新 key → HostKeyChanged。
+    server1.abort();
+    tokio::time::sleep(Duration::from_millis(300)).await; // 端口释放窗口
+    let server2 = tokio::net::TcpListener::bind(format!("{host}:{port}")).await.unwrap();
+    let cfg2 = Arc::new(server_config());
+    let t2 = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = server2.accept().await else { break };
+            let cfg = Arc::clone(&cfg2);
+            tokio::spawn(async move {
+                let _ = server::run_stream(cfg, socket, EchoSshServer).await;
+            });
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let m3 = Arc::new(SshManager::empty());
+    m3.update_registry(vec![record("hk", &host, port)]);
+    let r3 = tokio::task::spawn_blocking(move || m3.open_blocking("hk", "shell", &SerialConfig::default()))
+        .await
+        .unwrap();
+    match &r3 {
+        Err(ss_core::SerialError::OpenFailed { detail, .. }) => {
+            let cls = detail.as_deref().and_then(ssh::SshOpenError::from_detail).unwrap();
+            match cls {
+                ssh::SshOpenError::HostKeyChanged { known, received, .. } => {
+                    assert!(known.starts_with("SHA256:") && received.starts_with("SHA256:"));
+                    assert_ne!(known, received, "新旧指纹应不同");
+                }
+                other => panic!("应分类 HostKeyChanged,得到 {other:?}"),
+            }
+        }
+        _ => panic!("指纹变更应被拒"),
+    }
+    t2.abort();
+}
+
+/// 线格式契约:SshOpenError 的 serde 形态(camelCase/蛇形 tag)与 detail 往返。
+#[test]
+fn ssh_open_error_wire_shape() {
+    let e = ssh::SshOpenError::HostKeyUnknown {
+        fingerprint: "SHA256:abc".into(),
+        key_type: "ED25519".into(),
+    };
+    let json = e.to_detail();
+    assert!(json.contains(r#""kind":"host_key_unknown""#), "{json}");
+    assert!(json.contains(r#""keyType":"ED25519""#), "{json}");
+    assert_eq!(ssh::SshOpenError::from_detail(&json), Some(e));
+    // 兼容:detail 缺失的 OpenFailed(外 tag 枚举形)仍可反序列化,detail=None
+    let legacy = r#"{"OpenFailed":{"port":"COM5","message":"x"}}"#;
+    let e: ss_core::SerialError = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(e, ss_core::SerialError::OpenFailed { detail: None, .. }));
 }

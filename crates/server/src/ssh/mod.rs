@@ -20,6 +20,7 @@ pub mod store;
 
 pub use store::{SshAuthRecord, SshEndpointRecord, SshHostRecord};
 
+use serde::{Deserialize, Serialize};
 use ss_core::{PortIo, SerialConfig, SerialError};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -33,8 +34,69 @@ fn compose_key(host_id: &str, name: &str) -> String {
     format!("{host_id}{}{name}", ss_core::PORT_KEY_SEP)
 }
 
+/// 分类错误 → SerialError::OpenFailed(message=文案,detail=JSON)。
+fn open_failed(instance: &str, e: SshOpenError) -> SerialError {
+    SerialError::OpenFailed {
+        port: instance.to_string(),
+        message: e.message(),
+        detail: Some(e.to_detail()),
+    }
+}
+
 /// open 命令回执等待上限:覆盖 连接(15s) + 通道/PTY 建立。
 const OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// SSH open 失败的结构化分类(线格式 tag=kind/字段 camelCase,前端据此弹对应交互:
+/// auth_failed → 重输密码闭环;host_key_unknown → 首连指纹确认;
+/// host_key_changed → 红色警告确认)。经 SerialError::OpenFailed.detail(JSON 文本)
+/// 穿越 core,server 层回执时解析为 ServerMsg::Error.ssh 字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum SshOpenError {
+    /// 认证失败(密码错/密钥不被接受)。method = 设备配置的认证方式。
+    AuthFailed { method: String },
+    /// 首连:服务器指纹未登记(需用户确认后 ssh_trust_host 记录再重开)。
+    HostKeyUnknown { fingerprint: String, key_type: String },
+    /// 指纹变更(合法重装或中间人——由用户核对决断,UI 走严重警告样式)。
+    HostKeyChanged {
+        known: String,
+        received: String,
+        key_type: String,
+    },
+    /// 其它失败(网络/超时/通道)——freeform 文本,前端按普通错误 toast。
+    Other { message: String },
+}
+
+impl SshOpenError {
+    /// 人类可读文案(SerialError::OpenFailed.message 用;日志/Telnet/MCP 消费)。
+    pub fn message(&self) -> String {
+        match self {
+            SshOpenError::AuthFailed { method } => format!("认证失败(方式={method})"),
+            SshOpenError::HostKeyUnknown { fingerprint, key_type } => {
+                format!("首次连接,服务器指纹未确认({key_type} {fingerprint})")
+            }
+            SshOpenError::HostKeyChanged { known, received, key_type } => format!(
+                "服务器指纹已变更({key_type}):已信任 {known},现收到 {received}——若非你方重装请勿继续"
+            ),
+            SshOpenError::Other { message } => message.clone(),
+        }
+    }
+
+    /// 构造 Other 变体的便捷方法。
+    pub fn into_freeform(message: String) -> Self {
+        SshOpenError::Other { message }
+    }
+
+    /// detail 字段编码(core 的 OpenFailed 只收不透明 JSON 字符串)。
+    pub fn to_detail(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// detail 字段解码(server 回执侧)。
+    pub fn from_detail(json: &str) -> Option<Self> {
+        serde_json::from_str(json).ok()
+    }
+}
 
 /// SSH 设备管理器。挂在 AppState(跨 ServiceSupervisor 热重启保留)。
 pub struct SshManager {
@@ -172,58 +234,62 @@ impl SshManager {
         // 端点校验:实例名剥 @N 后必须是已定义端点
         let base = rest.split('@').next().unwrap_or(rest);
         if !record.endpoints.iter().any(|e| e.name == base) {
-            return Err(SerialError::OpenFailed {
-                port: format!("{host_id}::{rest}"),
-                message: format!("SSH 设备 {} 没有端点 {base}", record.label()),
-            });
+            return Err(open_failed(
+                &format!("{host_id}::{rest}"),
+                SshOpenError::into_freeform(format!("SSH 设备 {} 没有端点 {base}", record.label())),
+            ));
         }
         let instance = format!("{host_id}::{rest}");
         let session = self.ensure_session(&record);
 
         let shared = Arc::new(SshSharedIo::new(port_io::read_timeout_of(config)));
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<(), SshOpenError>>();
         session
             .cmd_tx
             .send(SshCommand::Open { instance: instance.clone(), shared: Arc::clone(&shared), reply: reply_tx })
-            .map_err(|_| SerialError::OpenFailed {
-                port: instance.clone(),
-                message: "SSH 会话任务已退出".into(),
-            })?;
-        // 分片等待:每 200ms 检查 dead(连接失败快速失败,不等满 20s——排空回执
-        // 可能与 send 竞态落在等待之后)。deadline 兜底整体超时。
+            .map_err(|_| open_failed(&instance, SshOpenError::into_freeform("SSH 会话任务已退出".into())))?;
+        // 分片等待:每 200ms 检查 dead(连接失败快速失败,不等满 20s)。deadline 兜底。
         let deadline = std::time::Instant::now() + OPEN_REPLY_TIMEOUT;
         loop {
             match reply_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(Ok(())) => return Ok(Box::new(SshPortIo::new(shared, session.cmd_tx.clone(), instance))),
-                Ok(Err(msg)) => {
+                Ok(Err(e)) => {
                     if session.dead.load(Ordering::Acquire) {
                         self.drop_session(host_id); // 连接级失败:清池,下次重建
                     }
-                    return Err(SerialError::OpenFailed { port: instance, message: msg });
+                    return Err(open_failed(&instance, e));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if session.dead.load(Ordering::Acquire) {
                         self.drop_session(host_id);
-                        return Err(SerialError::OpenFailed {
-                            port: instance,
-                            message: "SSH 连接失败(认证错误或不可达,详见服务端日志)".into(),
-                        });
+                        return Err(open_failed(&instance, SshOpenError::into_freeform(
+                            "SSH 连接失败(不可达或握手错误,详见服务端日志)".into(),
+                        )));
                     }
                     if std::time::Instant::now() >= deadline {
-                        return Err(SerialError::OpenFailed {
-                            port: instance,
-                            message: format!("打开超时({}秒)", OPEN_REPLY_TIMEOUT.as_secs()),
-                        });
+                        return Err(open_failed(&instance, SshOpenError::into_freeform(
+                            format!("打开超时({}秒)", OPEN_REPLY_TIMEOUT.as_secs()),
+                        )));
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(SerialError::OpenFailed {
-                        port: instance,
-                        message: "SSH 会话任务退出(回执通道关闭)".into(),
-                    });
+                    return Err(open_failed(&instance, SshOpenError::into_freeform(
+                        "SSH 会话任务退出(回执通道关闭)".into(),
+                    )));
                 }
             }
         }
+    }
+
+    /// 信任服务器指纹(确认弹窗的"信任并连接"):直连一次,记录指纹即断,不动会话池。
+    /// 返回记录的指纹(供 UI 回显)。
+    pub fn trust_host_key_blocking(&self, host_id: &str) -> Result<String, String> {
+        let rec = self
+            .registry_snapshot()
+            .into_iter()
+            .find(|r| r.id == host_id)
+            .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
+        session::trust_host_key(rec)
     }
 
     /// PTY 尺寸变更(WS resize 动作 → 这里)。找不到会话/实例则静默(幂等)。

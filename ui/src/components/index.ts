@@ -14,7 +14,9 @@ export {
   SerialConfigDialog,
   SettingsPanel,
   ShortcutsDialog,
+  SshAuthDialog,
   SshManagerDialog,
+  SshTrustDialog,
   sshAuthLabel,
 } from "./dialogs";
 export { MacroPalette, PortPalette, ScriptPalette } from "./palettes";

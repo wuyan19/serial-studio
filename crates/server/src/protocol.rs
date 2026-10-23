@@ -61,6 +61,10 @@ pub enum ServerMsg {
         port: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         req: Option<u64>,
+        /// SSH open 失败的结构化分类(认证/host key)——前端据此弹交互闭环而非纯
+        /// toast。缺省 = 非 SSH 来源或旧版服务端。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh: Option<crate::ssh::SshOpenError>,
     },
     /// 命令成功回复(close/write/set_alias)。port 可选,作用同 Error。
     /// `req` = 请求关联 id(回带);缺省 = 旧版服务端(其写回执无 port,
@@ -233,6 +237,8 @@ pub enum ClientMsg {
     SshNextInstance { host_id: String, base: String },
     /// PTY 尺寸变更(xterm fit → window_change;当前仅 SSH 实例消费,串口忽略)。
     Resize { port: String, cols: u32, rows: u32 },
+    /// 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断,不动会话池。
+    SshTrustHost { host_id: String },
 }
 
 fn default_encoding() -> String {

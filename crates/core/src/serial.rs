@@ -105,6 +105,7 @@ fn convert_open_error(port: &str, e: serialport::Error) -> SerialError {
         _ => SerialError::OpenFailed {
             port: port.to_string(),
             message: msg,
+            detail: None,
         },
     }
 }

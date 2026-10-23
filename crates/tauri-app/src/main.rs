@@ -353,7 +353,7 @@ async fn open_port_stream(
     port: String,
     config: ss_core::SerialConfig,
     on_event: Channel<InvokeResponseBody>,
-) -> Result<ss_core::AcquireResult, String> {
+) -> Result<ss_core::AcquireResult, OpenErrorView> {
     let session = sessions.get_or_create(window.label());
     let label = window.label().to_string();
     // 端口键规范化(剥遗留 local::;UI 传真实键,恒等兜底):channel 注册键与事件转发的 map 键恒一致。
@@ -365,9 +365,25 @@ async fn open_port_stream(
         Ok(result) => Ok(result),
         Err(e) => {
             channels.remove_port(&label, &port);
-            Err(e.to_string())
+            // 结构化错误:invoke reject 载荷为 {message, ssh?}(SSH 认证/host key 分类,
+            // 前端弹交互闭环);非 SSH 来源 ssh=None
+            let ssh = match &e {
+                ss_core::SerialError::OpenFailed { detail: Some(json), .. } => {
+                    ss_server::ssh::SshOpenError::from_detail(json)
+                }
+                _ => None,
+            };
+            Err(OpenErrorView { message: e.to_string(), ssh })
         }
     }
+}
+
+/// open_port_stream 的结构化错误(序列化为 invoke reject 载荷)。
+#[derive(serde::Serialize)]
+struct OpenErrorView {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh: Option<ss_server::ssh::SshOpenError>,
 }
 
 /// 关闭订阅并释放持有。先 release 再 remove：
@@ -463,7 +479,7 @@ async fn ssh_test(
         .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
     match ss_server::ssh::session::test_connection(rec).await {
         Ok(()) => Ok((true, String::new())),
-        Err(e) => Ok((false, e)),
+        Err(e) => Ok((false, e.message())),
     }
 }
 
@@ -482,6 +498,15 @@ async fn ssh_next_instance(
         .map(|p| p.name)
         .collect();
     Ok(ss_server::ssh::next_instance_key(&host_id, &base, &occupied))
+}
+
+/// 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。
+#[tauri::command]
+async fn ssh_trust_host(state: tauri::State<'_, AppState>, host_id: String) -> Result<String, String> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || st.ssh.trust_host_key_blocking(&host_id))
+        .await
+        .map_err(|e| format!("join 错误: {e}"))?
 }
 
 /// PTY 尺寸变更（xterm fit → window_change）。SSH 实例消费；其它端口静默成功。
@@ -1139,6 +1164,7 @@ fn run_gui() {
             ssh_list,
             ssh_save,
             ssh_test,
+            ssh_trust_host,
             ssh_next_instance,
             resize_port,
             write_port,

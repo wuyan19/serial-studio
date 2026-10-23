@@ -16,6 +16,7 @@ import type {
   SerialConfig,
   SrvSettings,
   SshHost,
+  SshOpenError,
   TermInstance,
 } from "./types";
 import { leafGroupIds } from "./pane-tree";
@@ -53,7 +54,7 @@ import {
   type LibrarySpec,
   useNamedLibrary,
 } from "./library";
-import { LocalTransport, RemoteTransport, type Transport } from "./transport";
+import { LocalTransport, RemoteTransport, type OpenError, type Transport } from "./transport";
 import {
   AboutDialog,
   ActivityIcon,
@@ -77,7 +78,9 @@ import {
   SerialConfigDialog,
   SettingsPanel,
   ShortcutsDialog,
+  SshAuthDialog,
   SshManagerDialog,
+  SshTrustDialog,
   TermView,
   validateMacro,
 } from "./components";
@@ -250,6 +253,8 @@ export default function App() {
   const [sshEditSeed, setSshEditSeed] = useState<string | null>(null);
   /** 测试连接结果：testing=测试中，ok=可达，fail=失败（原因经 toast）。 */
   const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok" | "fail">>(new Map());
+  /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
+  const [sshIssue, setSshIssue] = useState<{ pid: PortId; error: SshOpenError } | null>(null);
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
@@ -543,7 +548,14 @@ export default function App() {
       }
       return res;
     } catch (e) {
-      libError(String(e));
+      // SSH 分类错误(auth/host key)→ 交互闭环弹窗;其余原样 toast。
+      // setSshIssue 是稳定 setter,不破坏 openPort 身份链(勿引入状态依赖)。
+      const ssh = (e as OpenError).ssh;
+      if (ssh && ssh.kind !== "other") {
+        setSshIssue({ pid, error: ssh });
+      } else {
+        libError(String(e instanceof Error ? e.message : e));
+      }
       return undefined;
     }
   }, [libNotify, libError, cmdTransport]);
@@ -976,7 +988,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       dispatch({ type: "teardown_dev", devId: id });
     };
     const create = (d: RemoteDevice) => {
-      const t = new RemoteTransport(d.host, d.port);
+      const t = new RemoteTransport(d.host, d.port, d.id);
       map.set(d.id, t);
       addrMap.set(d.id, `${d.host}:${d.port}`);
       unsubsByDev.current.set(d.id, bindTransport(d.id, t));
@@ -1503,6 +1515,30 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }
   };
 
+  /** 认证重输确认:更新保存的密码并立即重开(失败会再次进入闭环弹窗)。 */
+  const retrySshAuth = async (pid: PortId, password: string, updateSaved: boolean) => {
+    const host = sshHosts.find((h) => h.id === parsePortId(pid).devId);
+    setSshIssue(null);
+    if (!host) return;
+    if (updateSaved) {
+      await commitSshHost({ ...host, auth: { type: "password", password } }, false);
+    }
+    await openPort(pid, DEFAULT_CONFIG);
+  };
+
+  /** 指纹信任确认:记录指纹(直连即断)并立即重开。 */
+  const trustSshHost = async (pid: PortId) => {
+    const hostId = parsePortId(pid).devId;
+    setSshIssue(null);
+    try {
+      await cmdTransport()?.sshTrustHost(hostId);
+    } catch (e) {
+      libError(`信任指纹失败：${String(e)}`);
+      return;
+    }
+    await openPort(pid, DEFAULT_CONFIG);
+  };
+
   /** 侧栏 SSH 卡菜单动作分发。 */
   const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
@@ -1685,7 +1721,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     scriptPaletteOpen ||
     portPaletteOpen ||
     remoteDetail ||
-    sshManagerOpen
+    sshManagerOpen ||
+    sshIssue
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
@@ -2133,7 +2170,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               {activePortLabel}
             </span>
             <span className="channel-strip__sep">·</span>
-            <span className="channel-strip__config">{formatConfig(activeConfig)}</span>
+            <span className="channel-strip__config">
+              {sshHosts.some((h) => h.id === activeDevId)
+                ? (() => {
+                    const h = sshHosts.find((x) => x.id === activeDevId)!;
+                    return `${h.username}@${h.host}:${h.port} · PTY`;
+                  })()
+                : formatConfig(activeConfig)}
+            </span>
             {activeHolders > 0 && (
               <>
                 <span className="channel-strip__sep">·</span>
@@ -2296,6 +2340,36 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onClose={() => setRemoteDetailId(null)}
         />
       )}
+      {sshIssue && (() => {
+        const host = sshHosts.find((h) => h.id === parsePortId(sshIssue.pid).devId);
+        if (!host) return null;
+        const { error, pid } = sshIssue;
+        if (error.kind === "auth_failed") {
+          return (
+            <SshAuthDialog
+              host={host}
+              error={error}
+              onRetryPassword={(pw, save) => void retrySshAuth(pid, pw, save)}
+              onEdit={() => {
+                setSshIssue(null);
+                openSshManager(host.id);
+              }}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        if (error.kind === "host_key_unknown" || error.kind === "host_key_changed") {
+          return (
+            <SshTrustDialog
+              host={host}
+              error={error}
+              onTrust={() => void trustSshHost(pid)}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        return null;
+      })()}
       {sshManagerOpen && (
         <SshManagerDialog
           hosts={sshHosts}

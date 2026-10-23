@@ -1,7 +1,7 @@
 /** 对话框族：串口配置、宏/脚本批量导出、设置面板、快捷键改键、关于（含在线更新）、
 脚本指南、添加远程设备、远程设备详情、脚本运行参数收集、通用确认弹窗。 */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost } from "../types";
+import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost, SshOpenError } from "../types";
 import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
@@ -1295,6 +1295,151 @@ function SshHostForm({
             保存
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== SSH open 失败交互闭环（认证重输 / 指纹确认） =====
+
+/** 认证失败重输闭环:密码方式→输入+更新勾选+立即重试;密钥/Agent 方式→提示+编辑入口。 */
+export function SshAuthDialog({
+  host,
+  error,
+  onRetryPassword,
+  onEdit,
+  onCancel,
+}: {
+  host: SshHost;
+  error: SshOpenError;
+  onRetryPassword: (password: string, updateSaved: boolean) => void;
+  onEdit: () => void;
+  onCancel: () => void;
+}) {
+  const isPassword = host.auth.type === "password";
+  const [password, setPassword] = useState("");
+  const [updateSaved, setUpdateSaved] = useState(true);
+  const canRetry = isPassword && password !== "";
+  const confirm = () => {
+    if (canRetry) onRetryPassword(password, updateSaved);
+  };
+  useDialogKeys({ onClose: onCancel, onEnter: confirm });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
+  return (
+    <div className="dialog-overlay">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="SSH 认证失败" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog__title">
+          <IconSsh /> SSH 认证失败
+        </h3>
+        <div className="dialog__sub">{host.username}@{host.host}:{host.port}</div>
+        {isPassword ? (
+          <>
+            <ConfigRow label="密码">
+              <input
+                autoFocus
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="重新输入密码"
+                className="field"
+                autoComplete="new-password"
+              />
+            </ConfigRow>
+            <label className="ssh-dialog__check">
+              <input type="checkbox" checked={updateSaved} onChange={(e) => setUpdateSaved(e.target.checked)} />
+              同时更新已保存的密码
+            </label>
+            <p className="dialog__hint">重试成功前不会写盘;仅勾选更新时保存新密码。</p>
+          </>
+        ) : (
+          <>
+            <p className="dialog__hint">
+              {host.auth.type === "key"
+                ? `密钥认证被服务器拒绝(${(host.auth as { keyPath: string }).keyPath})。`
+                : "SSH Agent 中没有该服务器接受的密钥。"}
+              可改用密码认证,或更新密钥后重试。
+            </p>
+            <div className="btn-row">
+              <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+              <button className="btn btn--primary" onClick={onEdit}>编辑设备</button>
+            </div>
+            <div className="btn-row" style={{ marginTop: 0 }}>
+              <button className="btn btn--ghost" onClick={onCancel} style={{ visibility: "hidden" }} aria-hidden>占位</button>
+            </div>
+          </>
+        )}
+        {isPassword && (
+          <div className="btn-row">
+            <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+            <button className="btn btn--primary" onClick={confirm} disabled={!canRetry}>重试连接</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 指纹确认:首连(unknown,普通确认)与变更(changed,红色严重警告)双模式。 */
+export function SshTrustDialog({
+  host,
+  error,
+  onTrust,
+  onCancel,
+}: {
+  host: SshHost;
+  error: Extract<SshOpenError, { kind: "host_key_unknown" | "host_key_changed" }>;
+  onTrust: () => void;
+  onCancel: () => void;
+}) {
+  const changed = error.kind === "host_key_changed";
+  useDialogKeys({ onClose: onCancel });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef);
+  return (
+    <div className="dialog-overlay">
+      <div
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-label={changed ? "SSH 服务器指纹已变更" : "确认 SSH 服务器指纹"}
+        className={`dialog dialog--narrow${changed ? " ssh-trust--danger" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="dialog__title">
+          <IconSsh /> {changed ? "服务器指纹已变更" : "首次连接"}
+        </h3>
+        <div className="dialog__sub">{host.username}@{host.host}:{host.port}</div>
+        {changed ? (
+          <>
+            <p className="ssh-trust__warn">
+              已信任的指纹与本次收到的不一致。若非你方重装/更换了服务器,这可能是中间人攻击——
+              请在服务器上核对指纹后再继续。
+            </p>
+            <ConfigRow label="已信任">
+              <code className="ssh-trust__fp">{error.known}</code>
+            </ConfigRow>
+            <ConfigRow label="本次收到">
+              <code className="ssh-trust__fp">{error.received}</code>
+            </ConfigRow>
+            <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并重连。</p>
+            <div className="btn-row">
+              <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+              <button className="btn btn--danger" onClick={onTrust}>仍要信任并连接</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <ConfigRow label="指纹">
+              <code className="ssh-trust__fp">{error.fingerprint}</code>
+            </ConfigRow>
+            <p className="dialog__hint">算法 {error.keyType}(SHA256)。首次连接需确认服务器身份,信任后本机将记住该指纹。</p>
+            <div className="btn-row">
+              <button className="btn btn--ghost" onClick={onCancel}>取消</button>
+              <button className="btn btn--primary" onClick={onTrust}>信任并连接</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

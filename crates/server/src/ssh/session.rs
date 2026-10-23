@@ -23,6 +23,7 @@ use russh::{Channel, ChannelMsg};
 
 use super::port_io::SshSharedIo;
 use super::store::{self, SshAuthRecord, SshHostRecord};
+use super::SshOpenError;
 
 /// 会话级命令(同步侧 → 命令循环)。实例级操作转发给实例任务(见 InstanceCmd)。
 pub(crate) enum SshCommand {
@@ -31,7 +32,7 @@ pub(crate) enum SshCommand {
     Open {
         instance: String,
         shared: Arc<SshSharedIo>,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
+        reply: std::sync::mpsc::Sender<Result<(), SshOpenError>>,
     },
     Write {
         instance: String,
@@ -70,10 +71,10 @@ pub(crate) async fn run_session(
         Ok(h) => h,
         Err(e) => {
             dead.store(true, Ordering::Release);
-            tracing::warn!("SSH 设备 {}({}) 连接失败: {}", record.label(), record.id, e);
+            tracing::warn!("SSH 设备 {}({}) 连接失败: {}", record.label(), record.id, e.message());
             while let Ok(cmd) = cmd_rx.try_recv() {
                 if let SshCommand::Open { reply, .. } = cmd {
-                    let _ = reply.send(Err(format!("连接失败: {e}")));
+                    let _ = reply.send(Err(e.clone()));
                 }
             }
             return;
@@ -82,11 +83,18 @@ pub(crate) async fn run_session(
     command_loop(handle, record, &mut cmd_rx, dead).await
 }
 
-// ===== host key(TOFU) =====
+// ===== host key(TOFU,三态) =====
+//
+// 策略:已记录且匹配 → 放行;未记录(首连) → 拒绝并报 HostKeyUnknown(前端确认后
+// 经 ssh_trust_host 记录再重开);已记录但不同 → 拒绝并报 HostKeyChanged(合法重装
+// 或中间人,由用户核对决断)。check_server_key 只能返回 bool,分类经共享槽
+// `classified` 带回 connect_and_auth(russh 的 UnknownKey 错误本身不带指纹)。
 
 struct HostKeyChecker {
     host: String,
     port: u16,
+    /// 拒绝原因分类槽(首连/变更时由 check_server_key 写入)。
+    classified: Arc<std::sync::Mutex<Option<SshOpenError>>>,
 }
 
 fn fingerprint_of(pk: &PublicKeyOrCertificate) -> String {
@@ -97,64 +105,147 @@ fn fingerprint_of(pk: &PublicKeyOrCertificate) -> String {
     .to_string()
 }
 
+/// 算法名(展示用,如 ED25519 / RSA)。
+fn key_type_of(pk: &PublicKeyOrCertificate) -> String {
+    let alg = match pk {
+        PublicKeyOrCertificate::PublicKey { key, .. } => key.algorithm(),
+        PublicKeyOrCertificate::Certificate(c) => c.public_key().algorithm(),
+    };
+    alg.as_str().to_string()
+}
+
+/// 信任并记录服务器指纹(确认弹窗的"信任并连接"):无锁定直连一次,记录即断。
+/// 只做 KEX 阶段的 host key 交换,不认证、不开通道。返回指纹供回显。
+pub fn trust_host_key(record: SshHostRecord) -> Result<String, String> {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let rt = tokio::runtime::Handle::try_current()
+        .map_err(|_| "无 tokio 运行时(内部错误)".to_string())?;
+    rt.block_on(async {
+        let config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            ..<_>::default()
+        });
+        let checker = TrustAndRecordChecker {
+            seen: Arc::clone(&seen),
+        };
+        let handle = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(
+            config,
+            (record.host.as_str(), record.port),
+            checker,
+        ))
+        .await
+        .map_err(|_| format!("连接 {}:{} 超时", record.host, record.port))?
+        .map_err(|e| format!("连接失败: {e}"))?;
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "trusted", "Serial Studio")
+            .await;
+        let Some((fp, _kt)) = seen.lock().unwrap().clone() else {
+            return Err("未完成密钥交换(未取得指纹)".to_string());
+        };
+        store::remember_fingerprint(&record.host, record.port, &fp)
+            .map_err(|e| format!("写入 known_hosts 失败: {e}"))?;
+        tracing::info!("SSH {}:{} 指纹已经用户确认并记录: {fp}", record.host, record.port);
+        Ok(fp)
+    })
+}
+
+/// 设备测试连接(管理弹窗「测试」):建连 + host key 校验 + 认证,随即断开。
+/// 不经过会话池(不创建/复用 SshSession)——测试是只读探测,不留连接。
+pub async fn test_connection(record: SshHostRecord) -> Result<(), SshOpenError> {
+    let handle = connect_and_auth(&record).await?;
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "test ok", "Serial Studio")
+        .await;
+    Ok(())
+}
+
 impl client::Handler for HostKeyChecker {
     type Error = russh::Error;
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let fp = fingerprint_of(key);
+        let kt = key_type_of(key);
         match store::known_fingerprint(&self.host, self.port) {
-            None => {
-                tracing::info!("SSH 首连 {}:{} 记住指纹 {fp}(TOFU)", self.host, self.port);
-                let _ = store::remember_fingerprint(&self.host, self.port, &fp);
-                Ok(true)
-            }
             Some(known) if known == fp => Ok(true),
+            None => {
+                tracing::info!("SSH 首连 {}:{} 指纹未登记({kt} {fp}),拒绝待确认", self.host, self.port);
+                *self.classified.lock().unwrap() =
+                    Some(SshOpenError::HostKeyUnknown { fingerprint: fp, key_type: kt });
+                Ok(false)
+            }
             Some(known) => {
                 tracing::error!(
                     "SSH 主机指纹变更(疑似中间人)! {}:{} 已信任 {known},现收到 {fp} —— 拒绝连接",
                     self.host,
                     self.port
                 );
+                *self.classified.lock().unwrap() = Some(SshOpenError::HostKeyChanged {
+                    known,
+                    received: fp,
+                    key_type: kt,
+                });
                 Ok(false)
             }
         }
     }
 }
 
+/// 无条件信任并记录的 checker(ssh_trust_host 用:用户已确认,直连记录即断)。
+struct TrustAndRecordChecker {
+    seen: Arc<std::sync::Mutex<Option<(String, String)>>>, // (fingerprint, key_type)
+}
+
+impl client::Handler for TrustAndRecordChecker {
+    type Error = russh::Error;
+
+    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        *self.seen.lock().unwrap() = Some((fingerprint_of(key), key_type_of(key)));
+        Ok(true)
+    }
+}
+
 // ===== 连接与认证 =====
 
-async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecker>, String> {
-    tokio::time::timeout(CONNECT_TIMEOUT, async {
+async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecker>, SshOpenError> {
+    let classified = Arc::new(std::sync::Mutex::new(None));
+    let r = tokio::time::timeout(CONNECT_TIMEOUT, async {
         let config = Arc::new(client::Config {
             inactivity_timeout: None,
             ..<_>::default()
         });
-        let checker = HostKeyChecker { host: record.host.clone(), port: record.port };
+        let checker = HostKeyChecker {
+            host: record.host.clone(),
+            port: record.port,
+            classified: Arc::clone(&classified),
+        };
         let mut handle = client::connect(config, (record.host.as_str(), record.port), checker)
             .await
-            .map_err(|e| format!("连接 {}:{} 失败: {e}", record.host, record.port))?;
+            .map_err(|e| SshOpenError::into_freeform(format!("连接 {}:{} 失败: {e}", record.host, record.port)))?;
         if !authenticate(&mut handle, &record.username, &record.auth).await? {
-            return Err(format!(
-                "认证失败(user={}, 方式={})",
-                record.username,
-                auth_label(&record.auth)
-            ));
+            return Err(SshOpenError::AuthFailed {
+                method: auth_label(&record.auth).to_string(),
+            });
         }
         Ok(handle)
     })
-    .await
-    .map_err(|_| format!("连接 {}:{} 超时({}秒)", record.host, record.port, CONNECT_TIMEOUT.as_secs()))?
-}
-
-/// 设备测试连接(管理弹窗「测试」):建连 + host key 校验 + 认证,随即断开。
-/// 不经过会话池(不创建/复用 SshSession)——测试是只读探测,不留连接。
-/// pub:tauri-app 的 ssh_test 命令(本地 IPC 出口)同样调用。
-pub async fn test_connection(record: SshHostRecord) -> Result<(), String> {
-    let handle = connect_and_auth(&record).await?;
-    let _ = handle
-        .disconnect(russh::Disconnect::ByApplication, "test ok", "Serial Studio")
-        .await;
-    Ok(())
+    .await;
+    match r {
+        Ok(Ok(h)) => Ok(h),
+        Ok(Err(e)) => {
+            let cls = classified.lock().unwrap().take();
+            Err(cls.unwrap_or(e))
+        }
+        Err(_) => Err(classified
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| SshOpenError::into_freeform(format!(
+                "连接 {}:{} 超时({}秒)",
+                record.host,
+                record.port,
+                CONNECT_TIMEOUT.as_secs()
+            )))),
+    }
 }
 
 fn auth_label(auth: &SshAuthRecord) -> &'static str {
@@ -182,23 +273,23 @@ async fn authenticate(
     handle: &mut Handle<HostKeyChecker>,
     user: &str,
     auth: &SshAuthRecord,
-) -> Result<bool, String> {
+) -> Result<bool, SshOpenError> {
     match auth {
         SshAuthRecord::Password { password } => {
             let r = handle
                 .authenticate_password(user, password.clone())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| SshOpenError::into_freeform(e.to_string()))?;
             Ok(r.success())
         }
         SshAuthRecord::Key { key_path } => {
             let key = load_secret_key(expand_tilde(key_path), None)
-                .map_err(|e| format!("读取密钥 {key_path} 失败: {e}"))?;
-            let hash = handle.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
+                .map_err(|e| SshOpenError::into_freeform(format!("读取密钥 {key_path} 失败: {e}")))?;
+            let hash = handle.best_supported_rsa_hash().await.map_err(|e| SshOpenError::into_freeform(e.to_string()))?.flatten();
             let r = handle
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| SshOpenError::into_freeform(e.to_string()))?;
             Ok(r.success())
         }
         SshAuthRecord::Agent => {
@@ -206,25 +297,25 @@ async fn authenticate(
             #[cfg(windows)]
             let mut agent = AgentClient::connect_pageant()
                 .await
-                .map_err(|e| format!("无法连接 SSH Agent(Pageant): {e}"))?;
+                .map_err(|e| SshOpenError::into_freeform(format!("无法连接 SSH Agent(Pageant): {e}")))?;
             #[cfg(not(windows))]
             let mut agent = AgentClient::connect_env()
                 .await
-                .map_err(|e| format!("无法连接 SSH Agent(SSH_AUTH_SOCK): {e}"))?;
+                .map_err(|e| SshOpenError::into_freeform(format!("无法连接 SSH Agent(SSH_AUTH_SOCK): {e}")))?;
             let identities = agent
                 .request_identities()
                 .await
-                .map_err(|e| format!("Agent 列举身份失败: {e}"))?;
+                .map_err(|e| SshOpenError::into_freeform(format!("Agent 列举身份失败: {e}")))?;
             if identities.is_empty() {
-                return Err("SSH Agent 中没有可用密钥(先 ssh-add)".into());
+                return Err(SshOpenError::into_freeform("SSH Agent 中没有可用密钥(先 ssh-add)".into()));
             }
             for id in identities {
                 let pk = id.public_key().clone().into_owned();
-                let hash = handle.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
+                let hash = handle.best_supported_rsa_hash().await.map_err(|e| SshOpenError::into_freeform(e.to_string()))?.flatten();
                 if handle
                     .authenticate_publickey_with(user, pk, hash, &mut agent)
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| SshOpenError::into_freeform(e.to_string()))?
                     .success()
                 {
                     return Ok(true);
@@ -264,9 +355,9 @@ async fn command_loop(
                             );
                             Ok(())
                         }
-                        Err(e) => Err(format!("请求 PTY/shell 失败: {e}")),
+                        Err(e) => Err(SshOpenError::into_freeform(format!("请求 PTY/shell 失败: {e}"))),
                     },
-                    Err(e) => Err(format!("打开通道失败: {e}")),
+                    Err(e) => Err(SshOpenError::into_freeform(format!("打开通道失败: {e}"))),
                 };
                 let failed = r.is_err();
                 let _ = reply.send(r);

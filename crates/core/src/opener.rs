@@ -30,6 +30,7 @@ impl PortOpener for RealPortOpener {
                     "远程设备 {} 的端口需要 server 层设备后端(本 opener 仅支持本机)",
                     dev
                 ),
+                detail: None,
             }),
         }
     }

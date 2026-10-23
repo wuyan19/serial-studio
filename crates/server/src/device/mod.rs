@@ -235,6 +235,7 @@ impl DeviceClientManager {
             None => Err(SerialError::OpenFailed {
                 port: format!("{}::{}", dev_id, port),
                 message: format!("远程设备 {} 未注册", dev_id),
+                detail: None,
             }),
         }
     }

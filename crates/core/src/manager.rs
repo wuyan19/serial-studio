@@ -245,6 +245,7 @@ impl SerialManager {
                 .map_err(|e| SerialError::OpenFailed {
                     port: port.clone(),
                     message: format!("join 错误: {}", e),
+                    detail: None,
                 })??
         };
 
@@ -1107,6 +1108,7 @@ mod tests {
                 Err(SerialError::OpenFailed {
                     port: port.into(),
                     message: "设备未插回".into(),
+                    detail: None,
                 })
             }
         }

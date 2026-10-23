@@ -169,6 +169,15 @@ export interface SshHost {
   endpoints: SshEndpoint[];
 }
 
+/** SSH open 失败的结构化分类(与后端 ssh::SshOpenError 对齐,tag=kind/字段 camelCase)。
+ *  前端据此弹交互闭环:auth_failed → 重输密码;host_key_unknown → 首连指纹确认;
+ *  host_key_changed → 红色警告确认。 */
+export type SshOpenError =
+  | { kind: "auth_failed"; method: string }
+  | { kind: "host_key_unknown"; fingerprint: string; keyType: string }
+  | { kind: "host_key_changed"; known: string; received: string; keyType: string }
+  | { kind: "other"; message: string };
+
 export interface SrvSettings {
   ws_host: string;
   ws_port: number;
