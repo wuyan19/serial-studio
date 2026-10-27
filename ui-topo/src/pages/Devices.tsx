@@ -72,10 +72,19 @@ export default function Devices() {
     return h ? h.nickname || `${h.username}@${h.host}` : id ?? "?";
   };
 
-  /** 未注册资源：未归属任何设备的端口行 + 未挂设备的 SSH 凭据。 */
+  /** 未注册资源：未归属任何设备的端口行 + 未挂设备的 SSH 凭据。
+   *  端口归属判定与 device.rs Channel::covers 同构：串口通道精确匹配端口键；
+   *  SSH 通道按复合键首段（凭据 id）匹配——否则 SSH 端点行（ref::shell 及
+   *  实例行 ref::shell@N）会漏进未注册清单。 */
   const unregisteredPorts = useMemo(
-    () => ports.filter((p) => !ownedSerial.has(p.name.toLowerCase())),
-    [ports, ownedSerial],
+    () =>
+      ports.filter((p) => {
+        const owned =
+          ownedSerial.has(p.name.toLowerCase()) ||
+          (p.name.includes("::") && ownedSsh.has(p.name.split("::")[0]));
+        return !owned;
+      }),
+    [ports, ownedSerial, ownedSsh],
   );
   const orphanSsh = useMemo(
     () => sshHosts.filter((h) => !ownedSsh.has(h.id)),
