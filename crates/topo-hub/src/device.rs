@@ -372,12 +372,26 @@ pub fn create(input: &DeviceInput, state: &AppState) -> Result<Device, String> {
         name: input.name.trim().into(),
         model: input.model.trim().into(),
         location: input.location.trim().into(),
-        channels: input.channels.clone(),
+        channels: normalize_channels(input.channels.clone()),
     };
     list.push(dev.clone());
     save(&list)?;
     sync_ssh_registry(&list, &[], state);
     Ok(dev)
+}
+
+/// 空 SSH 通道 id → 生成稳定 uuid（UI 新建时传 "" 覆盖了 serde default 的场景）。
+fn normalize_channels(channels: Vec<Channel>) -> Vec<Channel> {
+    channels
+        .into_iter()
+        .map(|c| match c {
+            Channel::Ssh(mut s) if s.id.trim().is_empty() => {
+                s.id = gen_uuid();
+                Channel::Ssh(s)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 pub fn update(id: &str, input: &DeviceInput, state: &AppState) -> Result<Device, String> {
@@ -390,7 +404,7 @@ pub fn update(id: &str, input: &DeviceInput, state: &AppState) -> Result<Device,
     dev.name = input.name.trim().into();
     dev.model = input.model.trim().into();
     dev.location = input.location.trim().into();
-    dev.channels = input.channels.clone();
+    dev.channels = normalize_channels(input.channels.clone());
     let updated = dev.clone();
     save(&list)?;
     sync_ssh_registry(&list, &[], state);

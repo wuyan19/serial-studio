@@ -139,7 +139,6 @@ export default function App() {
       {dialog === "settings" && (
         <SettingsPanel
           settings={settings}
-          onOpenSsh={() => setDialog("ssh")}
           onClose={() => setDialog(null)}
           onSave={(s) => {
             api

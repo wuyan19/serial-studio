@@ -161,13 +161,10 @@ export function SerialConfigDialog({
 export function SettingsPanel({
   settings,
   onSave,
-  onOpenSsh,
   onClose,
 }: {
   settings: SrvSettings | null;
   onSave: (s: SrvSettings) => void;
-  /** 打开 SSH 凭据库（未挂设备的凭据收纳处；设备通道凭据也在此维护）。 */
-  onOpenSsh: () => void;
   onClose: () => void;
 }) {
   const [srv, setSrv] = useState<SrvSettings | null>(settings);
@@ -225,13 +222,6 @@ export function SettingsPanel({
                 />
                 <span>log 输出自动落盘</span>
               </label>
-            </ConfigRow>
-
-            <div className="dialog__group-label">凭据库</div>
-            <ConfigRow label="SSH 凭据">
-              <button className="btn btn--ghost" onClick={onOpenSsh}>
-                打开 SSH 凭据库
-              </button>
             </ConfigRow>
 
             <div className="dialog__group-label">租约（重启进程生效）</div>

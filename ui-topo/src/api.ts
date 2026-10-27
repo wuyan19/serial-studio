@@ -1,12 +1,26 @@
 /** REST + SSE 封装。后端契约见 crates/topo-hub/src/api.rs。 */
+import type { SerialConfig as SerialConfigT } from "./types";
 
-/** 被测设备（device.rs 注册表）：设备=身份，通道=接入方式。 */
-export interface DeviceChannel {
-  type: "serial" | "ssh";
-  /** serial: 端口键（本机裸名或级联键）；ssh: 凭据 id。 */
-  port?: string;
-  ref?: string;
+/** 被测设备（device.rs 注册表）：设备=身份，通道=接入方式（内联完整配置）。 */
+export interface SshChannel {
+  type: "ssh";
+  /** 稳定 id（=端口键首段，服务端生成）。 */
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  nickname?: string;
+  auth: { type: "key"; keyPath: string } | { type: "agent" } | { type: "password"; password: string };
 }
+
+export interface SerialChannel {
+  type: "serial";
+  /** 端口键（本机裸名或级联键）。 */
+  port: string;
+  config?: Partial<SerialConfigT>;
+}
+
+export type DeviceChannel = SerialChannel | SshChannel;
 
 export interface Device {
   id: string;
@@ -192,10 +206,28 @@ export function leaseOfDevice(deviceId: string, leases: LeaseView[]): LeaseView 
   return leases.find((l) => l.grants.some((g) => g.device === deviceId));
 }
 
-/** 通道的终端端口键：serial 直用；ssh 取凭据的 shell 端点。 */
+/** 通道的终端端口键：serial 直用；ssh 取 shell 端点。 */
 export function channelPortKey(ch: DeviceChannel): string {
-  if (ch.type === "serial") return ch.port ?? "";
-  return `${ch.ref}::shell`;
+  if (ch.type === "serial") return ch.port;
+  return `${ch.id}::shell`;
+}
+
+/** 串口通道的完整打开配置（缺省补默认——与设备编辑对话框同源）。 */
+export function channelSerialConfig(ch: SerialChannel): SerialConfigT {
+  return {
+    baud_rate: 115200,
+    data_bits: "eight",
+    stop_bits: "one",
+    parity: "none",
+    flow_control: "none",
+    line_ending: "lf",
+    ...ch.config,
+  };
+}
+
+/** SSH 通道显示名：昵称回退 user@host。 */
+export function sshChannelLabel(ch: SshChannel): string {
+  return ch.nickname?.trim() || `${ch.username}@${ch.host}`;
 }
 
 /** 时间戳显示（iso → 本地短格式）。 */

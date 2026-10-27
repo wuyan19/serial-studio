@@ -4,7 +4,14 @@
  * SSH 失败闭环抄 serial-studio：auth_failed 重输密码、host_key_* 指纹确认。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api, channelPortKey, type Device, type PortView } from "../api";
+import {
+  api,
+  channelPortKey,
+  channelSerialConfig,
+  sshChannelLabel,
+  type Device,
+  type PortView,
+} from "../api";
 import { ws } from "../ws";
 import { useShell } from "../App";
 import TermView, { type TermHandle } from "../components/term";
@@ -120,7 +127,7 @@ export default function Terminal() {
     for (const d of devices)
       for (const c of d.channels) {
         if (c.type === "serial" && c.port) ownedSerial.add(c.port.toLowerCase());
-        if (c.type === "ssh" && c.ref) ownedSsh.add(c.ref);
+        if (c.type === "ssh") ownedSsh.add(c.id);
       }
     return ports.filter(
       (p) =>
@@ -252,13 +259,20 @@ export default function Terminal() {
                       const key = channelPortKey(c);
                       const p = ports.find((x) => x.name === key);
                       setPicker(false);
-                      if (p) startOpen(p);
+                      // 设备通道即点即开：串口用通道存储的完整配置（不弹参数框）
+                      if (c.type === "serial") {
+                        void openPort(
+                          (p ?? { name: key, opened: false, holders: 0 } as PortView),
+                          channelSerialConfig(c) as unknown as SerialConfig,
+                        );
+                      } else if (p) startOpen(p);
                       else void openPort({ name: key, opened: false, holders: 0 } as PortView);
                     }}
                     title={channelPortKey(c)}
                   >
                     <span>
-                      {d.name} · {c.type === "serial" ? `串口 ${c.port}` : "SSH"}
+                      {d.name} ·{" "}
+                      {c.type === "serial" ? `串口 ${c.port} ${channelSerialConfig(c).baud_rate}bps` : `SSH ${sshChannelLabel(c)}`}
                     </span>
                     <span className="muted mono">{channelPortKey(c)}</span>
                   </button>

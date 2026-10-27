@@ -4002,3 +4002,54 @@ button.link {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }
+
+/* ===== 通道卡片（设备编辑对话框内） ===== */
+.chan-card {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface-2);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.chan-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.chan-card__title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink);
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-card__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.chan-card__grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.chan-card__auth {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chan-card__auth .form-label {
+  margin-bottom: 0;
+}

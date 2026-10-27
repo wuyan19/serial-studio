@@ -8,23 +8,21 @@ import {
   channelPortKey,
   fmtTime,
   leaseOfDevice,
+  sshChannelLabel,
   subscribeChanged,
   type Device,
   type LeaseView,
   type PortView,
 } from "../api";
 import { ws } from "../ws";
-import { useShell } from "../App";
 import { DeviceEditDialog } from "../components/device-edit";
 import { ConfirmDialog, DeviceDetailDialog } from "../components/dialogs";
 import type { DeviceDetailInfo } from "../components/dialogs";
 
 export default function Devices() {
   const navigate = useNavigate();
-  const { sshHosts } = useShell();
   const [devices, setDevices] = useState<Device[]>([]);
-  const [leases, setLeases] = useState<LeaseView[]>([]);
-  const [ports, setPorts] = useState<PortView[]>([]);
+  const [leases, setLeases] = useState<LeaseView[]>([]);  const [ports, setPorts] = useState<PortView[]>([]);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Device | null>(null);
   const [creating, setCreating] = useState(false);
@@ -57,20 +55,16 @@ export default function Devices() {
         if (c.type === "serial" && c.port) s.add(c.port.toLowerCase());
     return s;
   }, [devices]);
-  const ownedSsh = useMemo(() => {
-    const s = new Set<string>();
-    for (const d of devices)
-      for (const c of d.channels) if (c.type === "ssh" && c.ref) s.add(c.ref);
-    return s;
-  }, [devices]);
-
-  const portNames = useMemo(() => ports.map((p) => p.name), [ports]);
-
-  /** SSH 凭据显示名：昵称回退 user@host。 */
-  const sshLabel = (id?: string) => {
-    const h = sshHosts.find((x) => x.id === id);
-    return h ? h.nickname || `${h.username}@${h.host}` : id ?? "?";
-  };
+  const portNames = useMemo(
+    () => [
+      ...new Set([
+        // 候选=未归属其它设备的端口（ownedSerial 含本设备现役会被排除，
+        // 但本设备现役端口在编辑对话框里作为"不在位"选项保留）
+        ...ports.map((p) => p.name).filter((n) => !ownedSerial.has(n.toLowerCase())),
+      ]),
+    ],
+    [ports, ownedSerial],
+  );
 
   const save = (input: {
     name: string;
@@ -92,7 +86,7 @@ export default function Devices() {
       const row = ports.find((p) => p.name === c.port);
       return { present: !!row, opened: row?.opened, holders: row?.holders };
     }
-    const rows = ports.filter((p) => p.name.split("::")[0] === c.ref);
+    const rows = ports.filter((p) => p.name.split("::")[0] === c.id);
     return { present: rows.length > 0, opened: rows[0]?.opened, holders: rows[0]?.holders };
   };
 
@@ -117,7 +111,7 @@ export default function Devices() {
       ports: [],
       portsText:
         d.channels
-          .map((c) => (c.type === "serial" ? `串口 ${c.port}` : `SSH ${sshLabel(c.ref)}`))
+          .map((c) => (c.type === "serial" ? `串口 ${c.port}` : `SSH ${sshChannelLabel(c)}`))
           .join(" · ") || "无通道",
       hint: "占用为设备级（全部通道独占）；终端从通道行打开。",
     };
@@ -166,7 +160,7 @@ export default function Devices() {
                     const st = channelState(d, i);
                     const key = channelPortKey(c);
                     const label =
-                      c.type === "serial" ? (c.port ?? "") : sshLabel(c.ref);
+                      c.type === "serial" ? (c.port ?? "") : sshChannelLabel(c);
                     return (
                       <li key={i} className="dev-channel" title={key}>
                         <span className={`dev-badge ${c.type === "serial" ? "dev-badge--serial" : "dev-badge--ssh"}`}>
@@ -223,12 +217,6 @@ export default function Devices() {
         <DeviceEditDialog
           initial={editing}
           ports={portNames}
-          sshHosts={sshHosts.map((h) => ({
-            id: h.id,
-            label: h.nickname || `${h.username}@${h.host}`,
-          }))}
-          ownedSerialPorts={ownedSerial}
-          ownedSshRefs={ownedSsh}
           onConfirm={save}
           onCancel={() => {
             setEditing(null);
