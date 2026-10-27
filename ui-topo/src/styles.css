@@ -3830,3 +3830,175 @@ button.link {
 .port-picker__item:hover {
   background: var(--surface-2);
 }
+
+/* ===== 设备卡片（布局参考 glm-quota：auto-fill 网格 + 三段式卡） ===== */
+.dev-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.dev-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  padding: 16px 16px 12px;
+  background: var(--surface);
+  transition: border-color 0.2s;
+}
+
+.dev-card:hover {
+  border-color: var(--ink-faint);
+}
+
+.dev-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.dev-card__name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-card__sub {
+  font-size: 12px;
+  color: var(--ink-faint);
+  margin-bottom: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 柔和底色徽章（glm-quota 风格：tinted bg + 同色文字） */
+.dev-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.dev-badge--warn {
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  color: var(--warn);
+}
+
+.dev-badge--serial {
+  background: color-mix(in srgb, var(--rx) 14%, transparent);
+  color: var(--rx);
+}
+
+.dev-badge--ssh {
+  background: color-mix(in srgb, var(--tx) 16%, transparent);
+  color: var(--tx);
+}
+
+.dev-card__channels {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dev-channel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  min-width: 0;
+}
+
+.dev-channel:hover {
+  background: var(--surface-2);
+}
+
+.dev-channel__key {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-channel__st {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.dev-channel__term {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-btn);
+  color: var(--rx);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dev-channel__term:hover {
+  border-color: var(--rx);
+}
+
+.dev-channel__empty {
+  font-size: 12px;
+  color: var(--ink-faint);
+  padding: 6px 8px;
+}
+
+.dev-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline-soft);
+}
+
+.dev-card__id {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.dev-card__actions {
+  display: flex;
+  gap: 4px;
+}
+
+.dev-icon-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dev-icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.dev-icon-btn--danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}

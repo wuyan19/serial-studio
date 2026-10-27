@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   channelPortKey,
+  fmtTime,
   leaseOfDevice,
   subscribeChanged,
   type Device,
@@ -158,62 +159,84 @@ export default function Devices() {
       {devices.length === 0 ? (
         <p className="muted">暂无被测设备。点「注册设备」，或让 AI 经 MCP 的 device_create 注册。</p>
       ) : (
-        devices.map((d) => {
-          const lease = leaseOfDevice(d.id, leases);
-          return (
-            <div key={d.id} className="device-card" onContextMenu={() => setDetail(d)}>
-              <div className="device-head">
-                <strong>{d.name}</strong>
-                {lease && (
-                  <span className="badge warn">
-                    占用 · {lease.label} · {lease.remaining_minutes} 分钟
+        <div className="dev-grid">
+          {devices.map((d) => {
+            const lease = leaseOfDevice(d.id, leases);
+            return (
+              <div key={d.id} className="dev-card" onContextMenu={() => setDetail(d)}>
+                <div className="dev-card__head">
+                  <span className="dev-card__name" title={d.name}>
+                    {d.name}
                   </span>
+                  {lease ? (
+                    <span className="dev-badge dev-badge--warn" title={`至 ${fmtTime(lease.expires_at)}`}>
+                      占用 · {lease.label} · {lease.remaining_minutes} 分
+                    </span>
+                  ) : (
+                    <span className="dev-badge">空闲</span>
+                  )}
+                </div>
+                {(d.model || d.location) && (
+                  <div className="dev-card__sub" title={[d.model, d.location].filter(Boolean).join(" · ")}>
+                    {[d.model, d.location].filter(Boolean).join(" · ")}
+                  </div>
                 )}
-                <span className="muted">
-                  {[d.model, d.location].filter(Boolean).join(" · ")}
-                </span>
-                <span style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
-                  <button className="link" onClick={() => setDetail(d)}>
-                    详情
-                  </button>
-                  <button className="link" onClick={() => setEditing(d)}>
-                    编辑
-                  </button>
-                  <button className="link" style={{ color: "var(--danger)" }} onClick={() => setDeleting(d)}>
-                    删除
-                  </button>
-                </span>
+                <ul className="dev-card__channels">
+                  {d.channels.map((c, i) => {
+                    const st = channelState(d, i);
+                    const key = channelPortKey(c);
+                    const label =
+                      c.type === "serial" ? (c.port ?? "") : sshLabel(c.ref);
+                    return (
+                      <li key={i} className="dev-channel" title={key}>
+                        <span className={`dev-badge ${c.type === "serial" ? "dev-badge--serial" : "dev-badge--ssh"}`}>
+                          {c.type === "serial" ? "串口" : "SSH"}
+                        </span>
+                        <span className="dev-channel__key mono">{label}</span>
+                        {st.present ? (
+                          st.opened ? (
+                            <span className="dev-channel__st">使用中 · {st.holders} 人</span>
+                          ) : null
+                        ) : (
+                          <span className="dev-channel__st">不在位</span>
+                        )}
+                        <button
+                          className="dev-channel__term"
+                          onClick={() => navigate(`/terminal?open=${encodeURIComponent(key)}`)}
+                        >
+                          终端
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {d.channels.length === 0 && (
+                    <li className="dev-channel__empty">无通道（编辑添加）</li>
+                  )}
+                </ul>
+                <div className="dev-card__foot">
+                  <span className="dev-card__id mono" title={d.id}>
+                    {d.id.slice(0, 8)}…
+                  </span>
+                  <div className="dev-card__actions">
+                    <button className="dev-icon-btn" title="详情" onClick={() => setDetail(d)}>
+                      ⓘ
+                    </button>
+                    <button className="dev-icon-btn" title="编辑" onClick={() => setEditing(d)}>
+                      ✎
+                    </button>
+                    <button
+                      className="dev-icon-btn dev-icon-btn--danger"
+                      title="删除"
+                      onClick={() => setDeleting(d)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
               </div>
-              <ul>
-                {d.channels.map((c, i) => {
-                  const st = channelState(d, i);
-                  const label =
-                    c.type === "serial"
-                      ? `串口 ${c.port}`
-                      : `SSH ${sshLabel(c.ref)}`;
-                  return (
-                    <li key={i} className="port-row">
-                      <span className="group-badge">{c.type === "serial" ? "串口" : "SSH"}</span>
-                      <span className="mono">{label}</span>
-                      {!st.present && <span className="muted">不在位</span>}
-                      {st.opened && <span className="badge">{st.holders} 人</span>}
-                      <button
-                        className="link"
-                        style={{ marginLeft: "auto" }}
-                        onClick={() =>
-                          navigate(`/terminal?open=${encodeURIComponent(channelPortKey(c))}`)
-                        }
-                      >
-                        终端
-                      </button>
-                    </li>
-                  );
-                })}
-                {d.channels.length === 0 && <li className="muted">无通道（编辑添加）</li>}
-              </ul>
-            </div>
-          );
-        })
+            );
+          })}
+        </div>
       )}
 
       <div style={{ marginTop: 20 }}>
