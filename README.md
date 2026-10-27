@@ -111,8 +111,11 @@ Runtime config lives next to the binary:
 
 ## 🤖 MCP
 
-`POST /mcp` speaks JSON-RPC. Twelve tools: 6 basic (`serial_list`, `serial_send`,
-`serial_read`, `serial_status`, `serial_grep`, `serial_clear`), 2 script execution
+`POST /mcp` speaks JSON-RPC. Fourteen tools: 8 basic (`serial_list`, `serial_send`,
+`serial_read`, `serial_status`, `serial_grep`, `serial_clear`, plus `port_open` /
+`port_close` — open/close a port; requires a session identity, holds are bound to the
+token issued at `initialize`, and you can only close what your session opened),
+2 script execution
 (`serial_debug_script` for ad-hoc JS, `serial_run_script` to run a saved script by name —
 both gated by `enable_scripting`), and 4 script library management (`serial_save_script`,
 `serial_get_script`, `serial_list_scripts`, `serial_delete_script` — data-only, not gated).

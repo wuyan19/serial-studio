@@ -15,6 +15,31 @@ use tokio::sync::broadcast;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// MCP 会话注册表（进程级）：token → manager 会话。port_open 等有状态
+/// MCP 操作的持有主体——同 token 的开/关/写共用一个会话，端口占用按会话计；
+/// topo-hub 强释放租约时经 [`mcp_session_of`] 找到会话，收回该 AI 开的端口。
+/// 进程级 static 而非 AppState 字段：会话是 MCP 层概念，与请求状态无关。
+static MCP_SESSIONS: std::sync::Mutex<Option<std::collections::HashMap<String, ss_core::SessionId>>> =
+    std::sync::Mutex::new(None);
+
+/// 取（或建）token 的 MCP 会话。
+fn session_for(token: &str) -> ss_core::SessionId {
+    let mut g = MCP_SESSIONS.lock().expect("mcp sessions lock poisoned");
+    let map = g.get_or_insert_with(std::collections::HashMap::new);
+    *map.entry(token.to_string())
+        .or_insert_with(ss_core::SessionId::next)
+}
+
+/// 查 token 的 MCP 会话（无则 None，不建）。
+pub fn mcp_session_of(token: &str) -> Option<ss_core::SessionId> {
+    MCP_SESSIONS
+        .lock()
+        .expect("mcp sessions lock poisoned")
+        .as_ref()?
+        .get(token)
+        .copied()
+}
+
 /// axum POST /mcp 入口。读入站 `Mcp-Session-Id` 头（principal 来源之一）；
 /// initialize 时回签同各头（标准 Streamable HTTP 约定），结果体同带一份
 /// `session_token` 供不读头的客户端显式传工具 token 参数。
@@ -259,6 +284,30 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                 }
             },
             {
+                "name": "port_open",
+                "description": "打开端口：串口按给定配置打开；SSH 端点建立 PTY 会话；端口已开则附加共享（首开配置生效，附加者忽略所传配置）。须会话标识（initialize 取 token，标准客户端自动带头）。端口占用挂在本会话上，port_close / 租约强释放都会按会话收回。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "port": { "type": "string", "description": "端口键（本机串口名/SSH 端点键/别名，serial_list 可查）" },
+                        "baud_rate": { "type": "integer", "default": 115200, "description": "波特率（仅串口首开生效）" },
+                        "line_ending": { "type": "string", "enum": ["lf", "crlf"], "default": "lf", "description": "text 模式发送的换行符（仅串口首开生效；连 Windows/AT 设备选 crlf）" }
+                    },
+                    "required": ["port"]
+                }
+            },
+            {
+                "name": "port_close",
+                "description": "关闭本会话持有的端口：是末位持有者则真正关闭，否则仅退出持有（他人继续用）。只能关自己会话开的口。须会话标识。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "port": { "type": "string", "description": "端口键（本会话曾 port_open 的）" }
+                    },
+                    "required": ["port"]
+                }
+            },
+            {
                 "name": "serial_delete_script",
                 "description": "从脚本库删除一个脚本。无此名也不报错（幂等）。",
                 "inputSchema": {
@@ -297,7 +346,13 @@ async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppSta
     // 写类工具的准入钩子（如 topo-hub 写闸）。放行才进正常分发。
     if matches!(
         name,
-        "serial_send" | "serial_read" | "serial_clear" | "serial_debug_script" | "serial_run_script"
+        "serial_send"
+            | "serial_read"
+            | "serial_clear"
+            | "serial_debug_script"
+            | "serial_run_script"
+            | "port_open"
+            | "port_close"
     ) {
         if let Some(denied) =
             crate::mcp_ext::intercept(&state.mcp_extensions, name, arguments.clone(), principal, state)
@@ -319,6 +374,8 @@ async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppSta
         "serial_get_script" => tool_serial_get_script(arguments).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
+        "port_open" => tool_port_open(arguments, principal, state).await,
+        "port_close" => tool_port_close(arguments, principal, state).await,
         other => {
             // 内置未命中 → 委托扩展（topo-hub 等）；扩展也不认得才是真未知。
             match crate::mcp_ext::dispatch(&state.mcp_extensions, other, arguments, principal, state)
@@ -357,6 +414,73 @@ async fn resolve_port(args: &Value, state: &AppState) -> Result<String, String> 
         1 => Ok(open[0].clone()),
         0 => Err("未打开任何串口，请先在 UI 打开或通过 WS 的 open 命令".into()),
         _ => Err(format!("打开了多个串口 {:?}，必须指定 port 参数", open)),
+    }
+}
+
+/// port_open：打开端口（占用挂 token 对应的 MCP 会话上）。已开则附加共享。
+async fn tool_port_open(args: Value, principal: Option<&str>, state: &AppState) -> Value {
+    let Some(port) = args.get("port").and_then(|v| v.as_str()) else {
+        return error_text("缺少参数 port（要打开的端口键，serial_list 可查）".into());
+    };
+    let Some(token) = principal else {
+        return error_text(
+            "打开端口须会话标识：initialize 取 token（标准客户端自动带头），或在工具参数传 token".into(),
+        );
+    };
+    let line_ending = match args.get("line_ending").and_then(|v| v.as_str()) {
+        Some("crlf") => ss_core::LineEnding::CRLF,
+        Some("lf") | None => ss_core::LineEnding::LF,
+        Some(other) => return error_text(format!("line_ending 仅支持 lf/crlf: {other}")),
+    };
+    let config = ss_core::SerialConfig {
+        baud_rate: args.get("baud_rate").and_then(|b| b.as_u64()).unwrap_or(115_200) as u32,
+        line_ending,
+        ..ss_core::SerialConfig::default()
+    };
+    let session = session_for(token);
+    match state.manager.acquire(port.to_string(), config, session).await {
+        Ok(ss_core::AcquireResult::Opened {
+            config,
+            holders,
+            resolved,
+        }) => ok_text(format!(
+            "已打开 {resolved}（{} 波特，{} 人持有，首开配置已生效）",
+            config.baud_rate, holders
+        )),
+        Ok(ss_core::AcquireResult::Attached {
+            config,
+            holders,
+            resolved,
+        }) => ok_text(format!(
+            "已附加 {resolved}（端口已开，{} 人持有，现行配置 {} 波特——附加不改配置）",
+            config.baud_rate, holders
+        )),
+        Err(e) => error_text(format!("打开失败: {e}")),
+    }
+}
+
+/// port_close：仅释放本会话的持有（末位才真正关闭）。
+async fn tool_port_close(args: Value, principal: Option<&str>, state: &AppState) -> Value {
+    let Some(port) = args.get("port").and_then(|v| v.as_str()) else {
+        return error_text("缺少参数 port".into());
+    };
+    let Some(token) = principal else {
+        return error_text("关闭端口须会话标识（token 参数或 Mcp-Session-Id 头）".into());
+    };
+    let Some(session) = mcp_session_of(token) else {
+        return error_text("本会话未曾打开过端口（只能关自己开的口）".into());
+    };
+    match state.manager.release(port, session).await {
+        Ok(ss_core::ReleaseOutcome::Closed) => {
+            ok_text(format!("已关闭 {port}（本会话是末位持有者）"))
+        }
+        Ok(ss_core::ReleaseOutcome::Released { remaining }) => ok_text(format!(
+            "已退出持有 {port}（还有 {remaining} 人，端口保持打开）"
+        )),
+        Ok(ss_core::ReleaseOutcome::NotHeld) => {
+            error_text(format!("本会话未持有 {port}（端口未开或不是你开的）"))
+        }
+        Err(e) => error_text(format!("关闭失败: {e}")),
     }
 }
 
@@ -1024,7 +1148,7 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            12,
+            14,
             "8 个串口工具(含 debug_script/run_script) + 4 个脚本库工具(save/get/list/delete)"
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -1081,7 +1205,7 @@ mod tests {
 
         let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13, "12 内置 + 1 扩展(echo_test)");
+        assert_eq!(tools.len(), 15, "14 内置 + 1 扩展(echo_test)");
         assert!(tools.iter().any(|t| t["name"] == "echo_test"));
 
         let resp = handle_request(
@@ -1144,6 +1268,59 @@ mod tests {
         let ta = a["result"]["session_token"].as_str().unwrap();
         let tb = b["result"]["session_token"].as_str().unwrap();
         assert!(!ta.is_empty() && ta != tb, "每次 initialize 新签: {ta} / {tb}");
+    }
+
+    /// 会话注册表：同 token 复用会话，不同 token 各自建。
+    #[test]
+    fn session_registry_reuses_per_token() {
+        let t = unique_name("sess");
+        let a = session_for(&t);
+        assert_eq!(session_for(&t), a, "同 token 同会话");
+        let other = session_for(&unique_name("sess"));
+        assert_ne!(other, a, "不同 token 不同会话");
+        assert_eq!(mcp_session_of(&t), Some(a));
+        assert_eq!(mcp_session_of("no-such-token"), None);
+    }
+
+    /// port_open/close 的参数与会话校验（真实开合依赖硬件端口，走集成/冒烟）。
+    #[tokio::test]
+    async fn port_open_close_argument_guards() {
+        fn text_of(v: &Value) -> String {
+            v["result"]["content"][0]["text"].as_str().unwrap_or_default().into()
+        }
+        let state = make_state();
+        // 匿名 → 须会话标识
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"port_open","arguments":{"port":"COM99"}}}"#,
+            &state,
+        )
+        .await;
+        assert!(text_of(&resp).contains("会话标识"));
+        // 缺 port → 报参数
+        let resp = handle_request_with(
+            Some("tok-open"),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"port_open","arguments":{}}}"#,
+            &state,
+        )
+        .await;
+        assert!(text_of(&resp).contains("缺少参数 port"));
+        // 无会话记录的 close → 提示只能关自己开的
+        let resp = handle_request_with(
+            Some("tok-never-opened"),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"port_close","arguments":{"port":"COM99"}}}"#,
+            &state,
+        )
+        .await;
+        assert!(text_of(&resp).contains("未曾打开"));
+        // 有会话但端口未开 → 过参数关，落到 manager 的 NotOpen（区别于参数错误）
+        session_for("tok-open");
+        let resp = handle_request_with(
+            Some("tok-open"),
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"port_close","arguments":{"port":"COM99"}}}"#,
+            &state,
+        )
+        .await;
+        assert!(text_of(&resp).contains("关闭失败"), "{}", text_of(&resp));
     }
 
     /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_debug_script 应被拒。

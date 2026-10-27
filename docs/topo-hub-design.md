@@ -81,6 +81,7 @@ Held → Preempted  仅人（Web 占用中心）
 |---|---|
 | `serial_send` / `serial_read` / `serial_clear` | 需持覆盖该端点的租约 |
 | `serial_debug_script` / `serial_run_script` | 启动时按 `port` 参数检查；脚本内跨端口写不二次拦截（局限，P2 下沉 core 再拦） |
+| `port_open` / `port_close`（P1.5 新增，ss-server 内置，serial-studio 同享） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；**强释放租约时顺带收回该会话在租约覆盖范围内开的端口**——这是无人值守全 MCP 流程（申请→开口→调试→释放）的闭环，人开的口不受影响 |
 | `serial_list` / `serial_status` / `serial_grep` | 免闸（非破坏，观察开放） |
 
 被闸拒绝时错误信息引导先 `lease_acquire`，并附当前持有者与到期时间。
@@ -139,6 +140,7 @@ Held → Preempted  仅人（Web 占用中心）
 
 - **P0**（已完成）：topo-hub bin + ui-topo 壳（复用路由、自嵌 SPA）、拓扑 store 与 CRUD（MCP 5 工具 + REST/SSE + UI 管理页）。
 - **P1**（已完成）：session token（initialize 签发，头/参数双通道）、LeaseManager（原子申请/TTL/续租/释放/强释放）、写闸（仅 MCP 来源的 send/read/clear/脚本，拒绝文案附持有者）、审计、占用中心与占用徽章。
+- **P1.5**（已完成）：MCP `port_open` / `port_close`（ss-server 内置）——AI 全流程无人值守补齐；强释放顺带收回该会话开的端口。
 - **P2**：拆 `ss-device` 合回 main、拓扑图、排队通知（需 MCP 上 SSE）、API key、脚本跨端口写拦截下沉。
 
 测试：lease 单元（原子性/冲突矩阵：device×endpoint×实例/TTL 边界/覆盖判定）、token 工具集成、store CRUD；冒烟沿用隔离实例方式（`SERIAL_STUDIO_CONFIG_DIR` + 错峰端口）。

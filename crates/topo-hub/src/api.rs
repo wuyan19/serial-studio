@@ -191,7 +191,7 @@ async fn lease_force_delete(
     State(state): State<TopoState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state.leases.force_release(&id).map_err(|e| {
+    state.leases.force_release(&id, &state.base).await.map_err(|e| {
         if e.contains("不存在") {
             not_found(&id)
         } else {

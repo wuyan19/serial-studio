@@ -39,7 +39,7 @@ async fn topo_tools_listed_alongside_builtin() {
     )
     .await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 21, "12 内置串口/脚本工具 + 5 拓扑 + 4 租约工具");
+    assert_eq!(tools.len(), 23, "14 内置(含 port_open/close) + 5 拓扑 + 4 租约工具");
     for name in [
         "topo_list",
         "topo_get",
@@ -188,6 +188,22 @@ async fn lease_flow_and_write_gate() {
     .await;
     let msg = text(&resp);
     assert!(!msg.contains("租约"), "持租约者写应过闸: {msg}");
+
+    // port_open 同样过闸：持租约 → 工具本体报端口打不开；匿名 → 闸拦
+    let resp = call_as(
+        &state,
+        &token,
+        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"port_open","arguments":{"port":"ssh-x1::shell"}}}"#,
+    )
+    .await;
+    let msg = text(&resp);
+    assert!(!msg.contains("租约") && resp["result"]["isError"] == true, "持租约开口过闸: {msg}");
+    let resp = call(
+        &state,
+        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"port_open","arguments":{"port":"ssh-x1::shell"}}}"#,
+    )
+    .await;
+    assert!(text(&resp).contains("租约"), "匿名开口应被闸拦");
 
     // B 会话（另一 token）写同端口 → 闸拒 + 报出 A 的持有信息
     let resp = call_as(

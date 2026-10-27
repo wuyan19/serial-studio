@@ -108,8 +108,10 @@ release 产物为 `serial-studio.exe`。
 
 ## 🤖 MCP
 
-`POST /mcp`,JSON-RPC 协议。共 12 个工具:6 个基础(`serial_list`、`serial_send`、
-`serial_read`、`serial_status`、`serial_grep`、`serial_clear`),2 个脚本执行
+`POST /mcp`,JSON-RPC 协议。共 14 个工具:8 个基础(`serial_list`、`serial_send`、
+`serial_read`、`serial_status`、`serial_grep`、`serial_clear`,以及 `port_open`、
+`port_close`——开/关端口,须会话标识,占用挂在 initialize 签发的 token 会话上,
+只能关自己开的口),2 个脚本执行
 (`serial_debug_script` 临时执行 JS 代码、`serial_run_script` 按名执行已保存脚本
 ——均受 `enable_scripting` 开关控制),4 个脚本库管理(`serial_save_script`、
 `serial_get_script`、`serial_list_scripts`、`serial_delete_script`——纯数据管理,

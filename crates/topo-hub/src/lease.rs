@@ -303,26 +303,39 @@ impl LeaseManager {
         Ok(removed)
     }
 
-    /// 人工抢占（Web 占用中心）：不验 token。MCP 无常驻连接可踢——写闸即时
-    /// 生效即是收回控制权；端口本身由人开的归人管。
-    pub fn force_release(&self, lease_id: &str) -> Result<Lease, String> {
-        let mut leases = self.leases.lock().expect("lease lock poisoned");
-        self.drop_expired_locked(&mut leases);
-        let pos = leases
-            .iter()
-            .position(|l| l.id == lease_id)
-            .ok_or_else(|| format!("租约不存在: {lease_id}"))?;
-        let removed = leases.remove(pos);
+    /// 人工抢占（Web 占用中心）：不验 token。写闸即时对该会话生效；若该 AI
+    /// 经 MCP port_open 开过端口（占用挂其 token 的 MCP 会话上），顺带收回
+    /// 租约覆盖范围内它开的口——人开/别的会话开的口不受影响。
+    pub async fn force_release(&self, lease_id: &str, state: &AppState) -> Result<Lease, String> {
+        let removed = {
+            let mut leases = self.leases.lock().expect("lease lock poisoned");
+            self.drop_expired_locked(&mut leases);
+            let pos = leases
+                .iter()
+                .position(|l| l.id == lease_id)
+                .ok_or_else(|| format!("租约不存在: {lease_id}"))?;
+            leases.remove(pos)
+        };
+        // 收回该会话在租约覆盖范围内打开的端口（release 只动本会话持有，
+        // 其它持有者继续用；末位才真正关闭）。
+        let mut closed: Vec<String> = Vec::new();
+        if let Some(sid) = ss_server::mcp::mcp_session_of(&removed.token) {
+            for port in state.manager.list_open_ports().await {
+                if removed.grants.iter().any(|g| g.covers(&port)) {
+                    if let Ok(outcome) = state.manager.release(&port, sid).await {
+                        if !matches!(outcome, ss_core::ReleaseOutcome::NotHeld) {
+                            closed.push(port);
+                        }
+                    }
+                }
+            }
+        }
         let keys: Vec<String> = removed.grants.iter().map(|g| g.key.clone()).collect();
-        audit::log(
-            audit::EV_PREEMPT,
-            None,
-            &removed.label,
-            Some(lease_id),
-            &keys,
-            &format!("原持有会话 {}", removed.token),
-        );
-        drop(leases);
+        let mut detail = format!("原持有会话 {}", removed.token);
+        if !closed.is_empty() {
+            detail.push_str(&format!("；顺带收回其打开的端口: {}", closed.join("、")));
+        }
+        audit::log(audit::EV_PREEMPT, None, &removed.label, Some(lease_id), &keys, &detail);
         let _ = self.bus.send(());
         Ok(removed)
     }
@@ -648,8 +661,8 @@ mod tests {
         let renewed = m.renew(&a.id, "token-a", None).unwrap();
         assert!(renewed.expires_at > a.expires_at);
 
-        // 人工强释放不验 token
-        m.force_release(&a.id).unwrap();
+        // 人工强释放不验 token（无 MCP 会话时无口可收）
+        m.force_release(&a.id, &state).await.unwrap();
         assert!(m.list().is_empty());
         assert!(m.release(&a.id, "token-a").is_err(), "释放后租约不存在");
     }
