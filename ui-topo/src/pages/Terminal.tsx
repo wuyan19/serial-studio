@@ -168,7 +168,7 @@ export default function Terminal() {
       )}
 
       {tabs.length === 0 ? (
-        <div className="term-empty">
+        <div className="term-blank">
           <p className="muted">尚无终端。点「打开端口」或到设备页的通道行开终端。</p>
         </div>
       ) : (

@@ -3734,8 +3734,9 @@ button.link {
   fill: var(--ink);
 }
 
-/* 终端页 */
-.term-empty {
+/* 终端页。注意：类名不得与老 CSS 段撞名（.term-empty 即撞上老段的全屏空态层
+   position:absolute;inset:0，盖死整页点击——新增类名前先 grep 老段）*/
+.term-blank {
   flex: 1;
   display: flex;
   align-items: center;
