@@ -16,6 +16,20 @@ pub fn ensure_test_config_dir() {
     std::fs::create_dir_all(&dir).unwrap();
 }
 
+/// 全局 store 测试锁：device/topology/lease 三个模块的测试共享 devices.json /
+/// topologies.json（资源独占校验跨文件生效），必须全局串行；此前各模块各持
+/// 一把锁，跨模块互踩 + 失败泄漏的旧数据毒化下一轮（COM4/ssh-x1 被上个运行
+/// 的残留设备占住）。每测先清两份库。
+pub static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn reset_stores() {
+    let Some(dir) = ss_server::config::config_dir() else {
+        return;
+    };
+    let _ = std::fs::remove_file(dir.join("devices.json"));
+    let _ = std::fs::remove_file(dir.join("topologies.json"));
+}
+
 /// 测试名后缀（进程内自增 + pid，多测试并行不撞名）。
 pub fn unique_name(prefix: &str) -> String {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod device;
 pub mod events;
 pub mod lease;
 pub mod mcp_topo;

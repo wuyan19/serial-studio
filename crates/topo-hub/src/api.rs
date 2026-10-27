@@ -4,8 +4,10 @@
 //! 这是设计文档 §6 的实现修正：命令面 REST、通知面 SSE，拓扑数据变更频率低，
 //! 无需把 ui-topo 绑进串口终端的 WS 词典。
 
+use crate::device::{self, Channel, Device, DeviceInput};
 use crate::lease;
-use crate::topology::{self, LinkInput, MemberInput, MemberKind, Topology};
+use crate::topology::{self, LinkInput, MemberInput, Topology};
+use ss_server::PortView;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -66,19 +68,32 @@ pub struct TopoBody {
     pub links: Option<Vec<LinkInput>>,
 }
 
-/// 成员的展示视图（detail 页/工具输出共用）：键 + 定型 + 设备标签与在线态。
+/// 成员（被测设备）的展示视图：设备 + 通道明细（在线/占用由前端经 leases join）。
+#[derive(Serialize)]
+pub struct ChannelView {
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 通道目标键（串口端口键 / SSH 凭据 id）。
+    pub key: String,
+    /// 展示标签（"串口 COM4" / "SSH 车间网关"）。
+    pub label: String,
+    /// 通道端口当前在端口表中可见（串口在位/SSH 端点行存在）。
+    pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opened: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holders: Option<usize>,
+}
+
 #[derive(Serialize)]
 pub struct MemberView {
-    pub kind: MemberKind,
-    pub key: String,
+    pub device: String,
+    pub name: String,
+    pub model: String,
+    pub location: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// 仅远端设备有值（hub 知道连接状态；SSH 懒连接、本机恒在）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub online: Option<bool>,
+    pub channels: Vec<ChannelView>,
 }
 
 /// 拓扑详情（GET /api/topologies/:id）。成员视图字段名避开 Topology.members
@@ -94,6 +109,8 @@ pub fn routes() -> Router<TopoState> {
     Router::new()
         .route("/api/topologies", get(list).post(create))
         .route("/api/topologies/:id", get(detail).put(update).delete(remove))
+        .route("/api/devices", get(devices_list).post(devices_create))
+        .route("/api/devices/:id", axum::routing::put(devices_update).delete(devices_delete))
         .route("/api/leases", get(leases_list))
         .route("/api/leases/:id", axum::routing::delete(lease_force_delete))
         .route("/api/remotes", get(remotes_list).put(remotes_save))
@@ -108,7 +125,7 @@ fn bad(message: impl Into<String>) -> ApiError {
 }
 
 fn not_found(id: &str) -> ApiError {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": format!("拓扑不存在: {id}") })))
+    (StatusCode::NOT_FOUND, Json(json!({ "error": format!("不存在: {id}") })))
 }
 
 async fn list(State(_state): State<TopoState>) -> Json<Vec<Topology>> {
@@ -125,7 +142,6 @@ async fn create(
         body.description.as_deref().unwrap_or(""),
         body.members.as_deref().unwrap_or(&[]),
         body.links.as_deref().unwrap_or(&[]),
-        &state.base,
     )
     .map_err(bad)?;
     let _ = state.topo_bus.send(());
@@ -155,7 +171,6 @@ async fn update(
         body.description.as_deref(),
         body.members.as_deref(),
         body.links.as_deref(),
-        &state.base,
     )
     .map_err(bad)?;
     let _ = state.topo_bus.send(());
@@ -292,70 +307,110 @@ async fn settings_put(
     }))
 }
 
-/// 成员展示视图：端点按端口表查属主设备，设备查各注册表。
-/// 端点查不到端口行（远端设备离线）时回退键本身——展示降级，不报错。
+/// 成员（被测设备）展示视图：设备注册表 + 端口表实时状态。
+/// 设备已删除（注册表查无）时给占位视图——展示降级，不报错。
 pub async fn member_views(topo: &Topology, state: &AppState) -> Vec<MemberView> {
     let rows = ss_server::list_ports_with_meta(state).await;
     topo.members
         .iter()
-        .map(|m| {
-            let (label, detail, online) = match m.kind {
-                MemberKind::Device => device_labels(&m.key, state),
-                MemberKind::Endpoint => match rows.iter().find(|r| r.info.name == m.key) {
-                    Some(row) => (
-                        format!(
-                            "{} · {}",
-                            row.device.as_ref().map(|d| d.label.as_str()).unwrap_or("?"),
-                            row.alias.as_deref().unwrap_or(ss_core::split_port_key(&m.key).1)
-                        ),
-                        row.device.as_ref().and_then(|d| d.detail.clone()),
-                        row.device.as_ref().and_then(|d| d.online),
-                    ),
-                    None => (m.key.clone(), None, None),
-                },
-            };
-            MemberView {
-                kind: m.kind,
-                key: m.key.clone(),
+        .map(|m| match device::find(&m.device) {
+            Some(d) => {
+                let channels = channel_views(&d, state, &rows);
+                MemberView {
+                    device: d.id,
+                    name: d.name,
+                    model: d.model,
+                    location: d.location,
+                    note: m.note.clone(),
+                    channels,
+                }
+            }
+            None => MemberView {
+                device: m.device.clone(),
+                name: format!("（已删除 {}）", m.device),
+                model: String::new(),
+                location: String::new(),
                 note: m.note.clone(),
-                label,
-                detail,
-                online,
+                channels: Vec::new(),
+            },
+        })
+        .collect()
+}
+
+/// 设备的通道视图：串口通道在端口表精确匹配；SSH 通道取凭据全部端点行
+/// （present = 任一端点行可见，opened/holders 取首个端点行）。
+pub fn channel_views(d: &Device, state: &AppState, rows: &[PortView]) -> Vec<ChannelView> {
+    d.channels
+        .iter()
+        .map(|ch| match ch {
+            Channel::Serial { port } => {
+                let row = rows.iter().find(|r| r.info.name == *port);
+                ChannelView {
+                    kind: "serial".into(),
+                    key: port.clone(),
+                    label: format!("串口 {port}"),
+                    present: row.is_some(),
+                    opened: row.map(|r| r.info.opened),
+                    holders: row.map(|r| r.info.holders),
+                }
+            }
+            Channel::Ssh { r#ref } => {
+                let endpoints: Vec<&PortView> = rows
+                    .iter()
+                    .filter(|r| ss_core::split_port_key(&r.info.name).0 == *r#ref)
+                    .collect();
+                ChannelView {
+                    kind: "ssh".into(),
+                    key: r#ref.clone(),
+                    label: ch.label(state),
+                    present: !endpoints.is_empty(),
+                    opened: endpoints.first().map(|r| r.info.opened),
+                    holders: endpoints.first().map(|r| r.info.holders),
+                }
             }
         })
         .collect()
 }
 
-/// 设备键 → (展示名, 完整地址, 在线态)。local → 本机；SSH/远端查注册表。
-fn device_labels(id: &str, state: &AppState) -> (String, Option<String>, Option<bool>) {
-    if id == ss_core::LOCAL_DEVICE_ID {
-        return ("本机".into(), None, None);
-    }
-    if let Some(rec) = state
-        .ssh
-        .registry_snapshot()
-        .into_iter()
-        .find(|r| r.id == id)
-    {
-        return (
-            rec.label(),
-            Some(format!("{}@{}:{}", rec.username, rec.host, rec.port)),
-            None,
-        );
-    }
-    if let Some((d, online)) = state
-        .devices
-        .device_views()
-        .into_iter()
-        .find(|(d, _)| d.id == id)
-    {
-        let addr = format!("{}:{}", d.host, d.port);
-        let label = d
-            .nickname
-            .clone()
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or(addr.clone());
-        return (label, Some(addr), Some(online));
-    }
-    (id.to_string(), None, None)
+// ===== 被测设备 CRUD =====
+
+async fn devices_list() -> Json<Vec<Device>> {
+    Json(device::load())
+}
+
+async fn devices_create(
+    State(state): State<TopoState>,
+    Json(input): Json<DeviceInput>,
+) -> Result<(StatusCode, Json<Device>), ApiError> {
+    let d = device::create(&input, &state.base).map_err(bad)?;
+    let _ = state.topo_bus.send(());
+    Ok((StatusCode::CREATED, Json(d)))
+}
+
+async fn devices_update(
+    State(state): State<TopoState>,
+    Path(id): Path<String>,
+    Json(input): Json<DeviceInput>,
+) -> Result<Json<Device>, ApiError> {
+    let d = device::update(&id, &input, &state.base).map_err(|e| {
+        if e.contains("不存在") {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": e })))
+        } else {
+            bad(e)
+        }
+    })?;
+    let _ = state.topo_bus.send(());
+    Ok(Json(d))
+}
+
+async fn devices_delete(State(state): State<TopoState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    device::delete(&id).map_err(|e| {
+        if e.contains("不存在") {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": e })))
+        } else {
+            bad(e)
+        }
+    })?;
+    let _ = state.topo_bus.send(());
+    Ok(StatusCode::NO_CONTENT)
 }

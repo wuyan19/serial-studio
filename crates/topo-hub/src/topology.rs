@@ -1,36 +1,15 @@
-//! 拓扑类型、成员定型与 topologies.json 存储。
-//!
-//! 成员引用两种粒度（设备 / 端点），创建与修改时经 [`resolve_member`] 定型——
-//! 类型字段落盘，消费侧（租约覆盖判定、UI 分组）不解析字符串猜语义。
+//! 拓扑类型与 topologies.json 存储（P2.5：成员纯设备引用——设备是被测对象
+//! 的一等实体，见 device.rs；成员不再直接引用端口/SSH 键，连线维度同为设备）。
 //! 存储照 remotes_store 模式：进程内锁串行化 fs、损坏文件回退空、全量读写。
 
 use serde::{Deserialize, Serialize};
-use ss_server::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// 成员引用粒度。设备 = 该设备全部端点及其实例行；端点 = 单端点及其实例行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemberKind {
-    Device,
-    Endpoint,
-}
-
-impl MemberKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            MemberKind::Device => "设备",
-            MemberKind::Endpoint => "端点",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TopologyMember {
-    pub kind: MemberKind,
-    /// 设备 id 或端口复合键（定型后的规范形式，别名/昵称已解析）。
-    pub key: String,
+    /// 被测设备 id（device.rs 注册表）。
+    pub device: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -43,7 +22,7 @@ pub struct Topology {
     pub description: String,
     #[serde(default)]
     pub members: Vec<TopologyMember>,
-    /// 设备间连线（拓扑图渲染用）。from/to 引用成员键（创建/修改时校验）。
+    /// 设备间连线（拓扑图渲染用）。from/to 引用成员设备 id。
     #[serde(default)]
     pub links: Vec<TopologyLink>,
     pub created_at: String,
@@ -58,15 +37,15 @@ pub struct TopologyLink {
     pub label: Option<String>,
 }
 
-/// 创建/修改请求里的原始成员输入（key 未定型，可以是别名/昵称作用域）。
+/// 创建/修改请求里的原始成员输入（device 可传 id 或名称）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemberInput {
-    pub key: String,
+    pub device: String,
     #[serde(default)]
     pub note: Option<String>,
 }
 
-/// 创建/修改请求里的原始连线输入（from/to 未定型，可写别名）。
+/// 创建/修改请求里的原始连线输入（from/to 可传设备 id 或名称）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinkInput {
     pub from: String,
@@ -77,18 +56,10 @@ pub struct LinkInput {
 
 // ===== 存储 =====
 
-/// 进程内串行化所有 topologies.json 的 fs 访问。
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn file_at(dir: &Path) -> PathBuf {
     dir.join("topologies.json")
-}
-
-fn read_locked(p: &Path) -> Vec<Topology> {
-    match std::fs::read_to_string(p) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
 }
 
 fn write_locked(p: &Path, list: &[Topology]) -> Result<(), String> {
@@ -112,11 +83,136 @@ fn validate_names(list: &[Topology]) -> Result<(), String> {
     Ok(())
 }
 
+/// 读 topologies.json。检测到旧形态成员（`{kind,key}`，P2.5 前）时执行一次性
+/// 迁移：每个旧键包装成一台设备（串口端点键→串口通道、SSH 键→SSH 通道，
+/// `local`/无法识别的跳过），迁完重写 topologies.json 与 devices.json。
 pub fn load() -> Vec<Topology> {
     let _g = LOCK.lock().expect("topology store lock poisoned");
-    ss_server::config::config_dir()
-        .map(|d| read_locked(&file_at(&d)))
-        .unwrap_or_default()
+    let Some(dir) = ss_server::config::config_dir() else {
+        return Vec::new();
+    };
+    let path = file_at(&dir);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    // 新形态解析失败且原文含旧成员标记 → 走迁移
+    match serde_json::from_str::<Vec<Topology>>(&raw) {
+        Ok(list) => list,
+        Err(_) => {
+            let (migrated, devices, changed) = migrate_legacy(&raw);
+            if changed {
+                let _ = write_locked(&path, &migrated);
+                // 设备表与拓扑表共用 device store 的锁——此处已持 topology 锁，
+                // device::save 内部锁不同 Mutex，无死锁（两锁无嵌套反向获取）。
+                let mut all = crate::device::load();
+                for d in devices {
+                    if !all.iter().any(|x| x.name == d.name) {
+                        all.push(d);
+                    }
+                }
+                let dev_path = dir.join("devices.json");
+                let _ = std::fs::write(
+                    &dev_path,
+                    serde_json::to_string_pretty(&all).unwrap_or_default(),
+                );
+                tracing::info!("旧拓扑成员已迁移为设备引用（{} 台设备包装）", all.len());
+            }
+            migrated
+        }
+    }
+}
+
+/// 旧文件 → (新拓扑表, 新建设备表, 是否有变化)。命名尽力而为：
+/// SSH 键查凭据库取标签；串口键用端口名；`local` 与未知键跳过该成员。
+fn migrate_legacy(raw: &str) -> (Vec<Topology>, Vec<crate::device::Device>, bool) {
+    #[derive(Deserialize)]
+    struct LegacyMember {
+        kind: String,
+        key: String,
+        #[serde(default)]
+        note: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct LegacyTopology {
+        id: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        members: Vec<LegacyMember>,
+        created_at: String,
+        updated_at: String,
+    }
+    let Ok(legacy) = serde_json::from_str::<Vec<LegacyTopology>>(raw) else {
+        return (Vec::new(), Vec::new(), false);
+    };
+    let ssh_hosts = ss_server::ssh::store::load();
+    let mut devices: Vec<crate::device::Device> = Vec::new();
+    let mut wrap = |kind: &str, key: &str| -> Option<String> {
+        use crate::device::{Channel, Device};
+        let _ = kind;
+        // split_port_key 对裸名返回 (local, 键本身)——设备段按"复合键取首段、
+        // 裸名取键本身"归一，再判 local / SSH / 串口。
+        let first_seg = key
+            .split_once(ss_core::PORT_KEY_SEP)
+            .map(|(f, _)| f)
+            .unwrap_or(key);
+        let channels = if key == ss_core::LOCAL_DEVICE_ID {
+            // local 整机成员（本机全部串口）在新模型无对应——跳过
+            return None;
+        } else if ssh_hosts.iter().any(|h| h.id == first_seg) {
+            // SSH 键（裸设备键或 hostId::shell 端点键）→ 凭据通道
+            vec![Channel::Ssh {
+                r#ref: first_seg.to_string(),
+            }]
+        } else {
+            // 本机串口裸名或级联端口键 → 串口通道（port 存原键）
+            vec![Channel::Serial {
+                port: key.to_string(),
+            }]
+        };
+        let name = match &channels[0] {
+            Channel::Ssh { r#ref } => ssh_hosts
+                .iter()
+                .find(|h| &h.id == r#ref)
+                .map(|h| h.label())
+                .unwrap_or_else(|| format!("SSH {}", r#ref)),
+            Channel::Serial { port } => format!("串口 {port}"),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        devices.push(Device {
+            id: id.clone(),
+            name: name.clone(),
+            model: String::new(),
+            location: String::new(),
+            channels,
+        });
+        Some(id)
+    };
+    let migrated = legacy
+        .into_iter()
+        .map(|t| Topology {
+            id: t.id,
+            name: t.name,
+            description: t.description,
+            members: t
+                .members
+                .iter()
+                .filter_map(|m| {
+                    wrap(&m.kind, &m.key).map(|device| TopologyMember {
+                        device,
+                        note: m.note.clone(),
+                    })
+                })
+                .collect(),
+            links: Vec::new(), // 旧连线引用端口键，设备维度无对应——丢弃（冒烟期数据）
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+        })
+        .collect();
+    let changed = !devices.is_empty();
+    (migrated, devices, changed)
 }
 
 pub fn save(list: &[Topology]) -> Result<(), String> {
@@ -138,14 +234,13 @@ fn now() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
 
-/// 创建拓扑：成员逐个定型（全部合法才落盘），返回错误列出全部非法键。
-/// 连线端点定型后须与成员键精确匹配（成员的子端点不算，写成员键本身）。
+/// 创建拓扑：成员设备逐个解析（须存在于注册表），全部合法才落盘。
+/// 连线 from/to 经设备解析后须与成员设备精确匹配（写成员设备 id 本身）。
 pub fn create(
     name: &str,
     description: &str,
     members: &[MemberInput],
     links: &[LinkInput],
-    state: &AppState,
 ) -> Result<Topology, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -155,9 +250,8 @@ pub fn create(
     if list.iter().any(|t| t.name == name) {
         return Err(format!("拓扑名称「{name}」已存在，请换一个"));
     }
-    let resolved = resolve_all(members, state)?;
-    let keys: Vec<&String> = resolved.iter().map(|m| &m.key).collect();
-    let resolved_links = resolve_links(links, &keys, state)?;
+    let resolved = resolve_members(members)?;
+    let resolved_links = resolve_links(links, &resolved)?;
     let topo = Topology {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.into(),
@@ -179,7 +273,6 @@ pub fn update(
     description: Option<&str>,
     members: Option<&[MemberInput]>,
     links: Option<&[LinkInput]>,
-    state: &AppState,
 ) -> Result<Topology, String> {
     let mut list = load();
     let topo = list
@@ -197,11 +290,10 @@ pub fn update(
         topo.description = d.trim().into();
     }
     if let Some(m) = members {
-        topo.members = resolve_all(m, state)?;
+        topo.members = resolve_members(m)?;
     }
     if let Some(l) = links {
-        let keys: Vec<&String> = topo.members.iter().map(|m| &m.key).collect();
-        topo.links = resolve_links(l, &keys, state)?;
+        topo.links = resolve_links(l, &topo.members)?;
     }
     topo.updated_at = now();
     let updated = topo.clone();
@@ -220,17 +312,20 @@ pub fn delete(id: &str) -> Result<Topology, String> {
     Ok(removed)
 }
 
-/// 批量定型：收集全部错误一次性报告（AI 一次改对，不来回试错）。
-fn resolve_all(inputs: &[MemberInput], state: &AppState) -> Result<Vec<TopologyMember>, String> {
+/// 成员解析：device 可传 id 或名称，须存在于注册表；收集全部错误一次报告。
+fn resolve_members(inputs: &[MemberInput]) -> Result<Vec<TopologyMember>, String> {
     let mut members = Vec::with_capacity(inputs.len());
     let mut errors = Vec::new();
     for input in inputs {
-        match resolve_member(&input.key, state) {
-            Ok(mut m) => {
-                m.note = input.note.clone().filter(|n| !n.trim().is_empty());
-                members.push(m);
-            }
-            Err(e) => errors.push(e),
+        match crate::device::find(&input.device) {
+            Some(d) => members.push(TopologyMember {
+                device: d.id,
+                note: input.note.clone().filter(|n| !n.trim().is_empty()),
+            }),
+            None => errors.push(format!(
+                "设备「{}」不存在（device_list 可查，先 device_create 注册）",
+                input.device
+            )),
         }
     }
     if errors.is_empty() {
@@ -240,33 +335,32 @@ fn resolve_all(inputs: &[MemberInput], state: &AppState) -> Result<Vec<TopologyM
     }
 }
 
-/// 连线定型：from/to 各经成员定型（别名可用），端点须与成员键精确匹配且不自环。
+/// 连线解析：from/to 经设备解析（id 或名称），须是本拓扑成员且不自环。
 fn resolve_links(
     inputs: &[LinkInput],
-    member_keys: &[&String],
-    state: &AppState,
+    members: &[TopologyMember],
 ) -> Result<Vec<TopologyLink>, String> {
+    let resolve_end = |raw: &str| -> Result<String, String> {
+        let d = crate::device::find(raw).ok_or_else(|| format!("连线端点「{raw}」不是已注册设备"))?;
+        if !members.iter().any(|m| m.device == d.id) {
+            return Err(format!(
+                "连线端点「{raw}」（{}）不是本拓扑成员，请先加入成员",
+                d.name
+            ));
+        }
+        Ok(d.id)
+    };
     let mut links = Vec::with_capacity(inputs.len());
     let mut errors = Vec::new();
     for input in inputs {
-        let resolve_end = |raw: &str| -> Result<TopologyMember, String> {
-            let m = resolve_member(raw, state)?;
-            if !member_keys.contains(&&m.key) {
-                return Err(format!(
-                    "连线端点「{raw}」（定型为 {key}）不是本拓扑成员，请先加入成员或改用成员键",
-                    key = m.key
-                ));
-            }
-            Ok(m)
-        };
         match (resolve_end(&input.from), resolve_end(&input.to)) {
             (Ok(f), Ok(t)) => {
-                if f.key == t.key {
-                    errors.push(format!("连线「{} ↔ {}」两端是同一成员", input.from, input.to));
+                if f == t {
+                    errors.push(format!("连线「{} ↔ {}」两端是同一设备", input.from, input.to));
                 } else {
                     links.push(TopologyLink {
-                        from: f.key,
-                        to: t.key,
+                        from: f,
+                        to: t,
                         label: input.label.clone().filter(|l| !l.trim().is_empty()),
                     });
                 }
@@ -281,211 +375,160 @@ fn resolve_links(
     }
 }
 
-/// 单个成员定型：原始键（真名/别名/昵称作用域均可）→ (kind, 规范键)。
-///
-/// 规则：
-/// - `local` → 设备（本机全部串口）；
-/// - 裸名：本机串口（或其别名）→ 端点；已注册设备 id（SSH/远端）→ 设备；
-/// - 复合键：首段须为已注册 SSH/远端设备；SSH 端点须存在于注册表且非实例行
-///   （`shell@2` 拒绝，成员引用端点定义）；远端端点只验设备注册
-///   （设备离线时端口桶为空，端点名不校验，透传）。
-pub fn resolve_member(raw: &str, state: &AppState) -> Result<TopologyMember, String> {
-    let key = raw.trim();
-    if key.is_empty() {
-        return Err("成员键为空".into());
-    }
-    if key == ss_core::LOCAL_DEVICE_ID {
-        return Ok(TopologyMember {
-            kind: MemberKind::Device,
-            key: key.into(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{self, Channel, DeviceInput};
+    use crate::test_support::{ensure_test_config_dir, make_state, unique_name};
+
+    // 全局 store 锁见 test_support::STORE_LOCK 注释（三模块共享两份 JSON）。
+    use crate::test_support::STORE_LOCK as TEST_LOCK;
+
+    fn member(device: &str) -> MemberInput {
+        MemberInput {
+            device: device.into(),
             note: None,
-        });
-    }
-    // 别名/昵称作用域 → 规范键（manager 边界的单点解析，MCP/WS 同源）。
-    let canon = state.manager.canon_key(key);
-    let (first, rest) = ss_core::split_port_key(&canon);
-    let ssh_known = |id: &str| state.ssh.has_host(id);
-    let remote_known =
-        |id: &str| state.devices.device_views().iter().any(|(d, _)| d.id == id);
-
-    // 裸名（canon 后仍在 local 作用域）：真名/别名解析结果命中本机端口表 → 端点；
-    // 命中设备注册表 → 设备键。
-    if first == ss_core::LOCAL_DEVICE_ID {
-        if ss_core::serial::list_port_names()
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(rest))
-        {
-            return Ok(TopologyMember {
-                kind: MemberKind::Endpoint,
-                key: rest.into(),
-                note: None,
-            });
         }
-        if ssh_known(rest) || remote_known(rest) {
-            return Ok(TopologyMember {
-                kind: MemberKind::Device,
-                key: rest.into(),
-                note: None,
-            });
-        }
-        return Err(format!(
-            "「{raw}」既不是本机端口（或其别名），也不是已注册设备"
-        ));
     }
 
-    // 复合键：首段须为已注册 SSH/远端设备。
-    if rest.is_empty() {
-        return Err(format!("「{raw}」缺少端点名（格式应为 设备::端点）"));
+    fn link(from: &str, to: &str) -> LinkInput {
+        LinkInput {
+            from: from.into(),
+            to: to.into(),
+            label: None,
+        }
     }
-    if ssh_known(first) {
+
+    /// 建两台设备返回 (nameA, nameB)。
+    async fn seed_devices(state: &ss_server::AppState) -> (String, String) {
+        let a = unique_name("设备A");
+        let b = unique_name("设备B");
+        device::create(
+            &DeviceInput {
+                name: a.clone(),
+                model: String::new(),
+                location: String::new(),
+                channels: vec![Channel::Serial { port: "COM4".into() }],
+            },
+            state,
+        )
+        .unwrap();
+        device::create(
+            &DeviceInput {
+                name: b.clone(),
+                model: String::new(),
+                location: String::new(),
+                channels: vec![Channel::Ssh {
+                    r#ref: "ssh-x1".into(),
+                }],
+            },
+            state,
+        )
+        .unwrap();
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn member_and_link_device_resolution() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let state = make_state();
+        let (a, b) = seed_devices(&state).await;
+        let n = unique_name("拓扑");
+
+        // 未知设备 → 一次报全
+        let err = create(&n, "", &[member("ghost"), member("ghost2")], &[]).unwrap_err();
+        assert!(err.contains("ghost") && err.contains("ghost2"), "{err}");
+
+        // 正常创建：成员可传名称；连线端点也可传名称（定型为设备 id）
+        let t = create(
+            &n,
+            "测试",
+            &[member(&a), member(&b)],
+            &[link(&a, &b)],
+        )
+        .unwrap();
+        assert_eq!(t.members.len(), 2);
+        assert_eq!(t.links.len(), 1);
+        let dev_b = device::find(&b).unwrap();
+        assert_eq!(t.links[0].to, dev_b.id, "连线定型为设备 id");
+
+        // 自环拒绝
+        let err = create(
+            &unique_name("拓扑"),
+            "",
+            &[member(&a)],
+            &[link(&a, &a)],
+        )
+        .unwrap_err();
+        assert!(err.contains("同一设备"), "{err}");
+
+        // 连线端点不是成员
+        let err = create(
+            &unique_name("拓扑"),
+            "",
+            &[member(&a)],
+            &[link(&a, &b)],
+        )
+        .unwrap_err();
+        assert!(err.contains("不是本拓扑成员"), "{err}");
+
+        // 设备删除被拓扑引用拦截
+        let err = device::delete(&t.members[0].device).unwrap_err();
+        assert!(err.contains(&n), "错误应列出引用拓扑: {err}");
+
+        delete(&t.id).unwrap();
+        device::delete(&dev_b.id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_wraps_devices() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        // 迁移按真实 ssh.json 识别 SSH 键——先落凭据 fixture
+        let state = make_state();
         let rec = state
             .ssh
             .registry_snapshot()
             .into_iter()
-            .find(|r| r.id == first)
-            .expect("has_host 与 registry_snapshot 同源");
-        if rest.contains('@') {
-            return Err(format!(
-                "「{canon}」是运行实例行；成员引用端点定义，请去掉 @N 后缀"
-            ));
+            .find(|r| r.id == "ssh-x1")
+            .unwrap();
+        ss_server::ssh::store::save(&[rec]).unwrap();
+        // 直接写旧形态文件（绕过 save 的新类型）
+        let dir = ss_server::config::config_dir().unwrap();
+        let legacy = serde_json::json!([{
+            "id": "topo-legacy",
+            "name": unique_name("旧拓扑"),
+            "description": "",
+            "members": [
+                { "kind": "endpoint", "key": "COM4", "note": "串口成员" },
+                { "kind": "device", "key": "ssh-x1" },
+                { "kind": "device", "key": "local" }
+            ],
+            "links": [],
+            "created_at": "2026-01-01T00:00:00+08:00",
+            "updated_at": "2026-01-01T00:00:00+08:00"
+        }]);
+        std::fs::write(dir.join("topologies.json"), legacy.to_string()).unwrap();
+
+        let list = load();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].members.len(), 2, "local 整机成员被跳过");
+        // 成员已是设备 id；包装出的设备通道正确
+        let d1 = device::find(&list[0].members[0].device).unwrap();
+        assert!(matches!(d1.channels[0], Channel::Serial { ref port } if port == "COM4"));
+        let d2 = device::find(&list[0].members[1].device).unwrap();
+        assert!(matches!(&d2.channels[0], Channel::Ssh { r#ref } if r#ref == "ssh-x1"));
+        assert!(d2.name.contains("车间网关"), "SSH 设备用凭据标签命名: {}", d2.name);
+        // 重读不再迁移（文件已是新形态）
+        assert_eq!(load().len(), 1);
+
+        // 清理迁移产物
+        delete(&list[0].id).unwrap();
+        for d in crate::device::load() {
+            let _ = device::delete(&d.id);
         }
-        if !rec.endpoints.iter().any(|e| e.name == rest) {
-            let names: Vec<&str> = rec.endpoints.iter().map(|e| e.name.as_str()).collect();
-            return Err(format!(
-                "SSH 设备「{}」没有端点「{rest}」；已有端点: {}",
-                rec.label(),
-                names.join("、")
-            ));
-        }
-    } else if !remote_known(first) {
-        return Err(format!(
-            "「{canon}」的首段不是已注册设备（SSH 或远程设备）"
-        ));
-    }
-    Ok(TopologyMember {
-        kind: MemberKind::Endpoint,
-        key: canon,
-        note: None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::make_state;
-    use std::sync::Mutex as TestMutex;
-
-    /// store 测试串行（共享 SERIAL_STUDIO_CONFIG_DIR 与 topologies.json，防互踩）。
-    static TEST_LOCK: TestMutex<()> = TestMutex::new(());
-
-    fn member(key: &str) -> MemberInput {
-        MemberInput {
-            key: key.into(),
-            note: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn resolve_local_device_and_ssh() {
-        let state = make_state();
-        assert_eq!(
-            resolve_member("local", &state).unwrap().kind,
-            MemberKind::Device
-        );
-        let m = resolve_member("ssh-x1", &state).unwrap();
-        assert_eq!(m.kind, MemberKind::Device);
-        let m = resolve_member("ssh-x1::shell", &state).unwrap();
-        assert_eq!(m.kind, MemberKind::Endpoint);
-        assert_eq!(m.key, "ssh-x1::shell");
-    }
-
-    #[tokio::test]
-    async fn resolve_rejects_unknown_and_instance() {
-        let state = make_state();
-        assert!(resolve_member("no-such-dev", &state).is_err());
-        assert!(resolve_member("no-such-dev::com", &state).is_err());
-        assert!(resolve_member("ssh-x1::shell@2", &state).is_err());
-        assert!(resolve_member("ssh-x1::ttyS9", &state)
-            .unwrap_err()
-            .contains("已有端点"));
-    }
-
-    #[tokio::test]
-    async fn store_roundtrip_and_name_rules() {
-        let _g = TEST_LOCK.lock().unwrap();
-        crate::test_support::ensure_test_config_dir();
-        let state = make_state();
-
-        let t = create("冒烟拓扑", "测试", &[member("ssh-x1")], &[], &state)
-            .expect("创建");
-        assert_eq!(t.members.len(), 1);
-        assert_eq!(find(&t.id).unwrap().name, "冒烟拓扑");
-        assert!(create("冒烟拓扑", "", &[], &[], &state).is_err(), "重名拒绝");
-
-        let t2 = update(&t.id, None, Some("改述"), None, None, &state).unwrap();
-        assert_eq!(t2.description, "改述");
-        assert_eq!(t2.created_at, t.created_at, "未动成员不改 created_at");
-
-        let removed = delete(&t.id).unwrap();
-        assert_eq!(removed.name, "冒烟拓扑");
-        assert!(delete(&t.id).is_err());
-    }
-
-    #[tokio::test]
-    async fn links_resolve_and_validate() {
-        let _g = TEST_LOCK.lock().unwrap();
-        crate::test_support::ensure_test_config_dir();
-        let state = make_state();
-        // 名称唯一化：topologies.json 在共享 tempdir 跨测试运行持久
-        let n = crate::test_support::unique_name("连线");
-
-        let members = vec![member("ssh-x1"), member("ssh-x2")];
-        let links = vec![LinkInput {
-            from: "ssh-x1".into(),
-            to: "ssh-x2::shell".into(), // 端点定型后 ≠ 成员键（成员是设备 ssh-x2）
-            label: Some("console".into()),
-        }];
-        let err = create(&format!("坏-{n}"), "", &members, &links, &state).unwrap_err();
-        assert!(err.contains("不是本拓扑成员"), "{err}");
-
-        // 两端均为成员键 → 通过并定型
-        let links_ok = vec![LinkInput {
-            from: "ssh-x1".into(),
-            to: "ssh-x2".into(),
-            label: None,
-        }];
-        let t = create(&n, "", &members, &links_ok, &state).unwrap();
-        assert_eq!(t.links.len(), 1);
-        assert_eq!(t.links[0].from, "ssh-x1");
-
-        // 自环拒绝
-        let self_loop = vec![LinkInput {
-            from: "ssh-x1".into(),
-            to: "ssh-x1".into(),
-            label: None,
-        }];
-        assert!(create(&format!("环-{n}"), "", &members, &self_loop, &state).is_err());
-
-        // update 整体替换 links；成员未变时按现行成员校验
-        let updated = update(&t.id, None, None, None, Some(&[]), &state).unwrap();
-        assert!(updated.links.is_empty(), "空 links 清空连线");
-
-        delete(&t.id).unwrap();
-    }
-
-    #[tokio::test]
-    async fn create_reports_all_invalid_members() {
-        let _g = TEST_LOCK.lock().unwrap();
-        crate::test_support::ensure_test_config_dir();
-        let state = make_state();
-        let err = create(
-            "全错拓扑",
-            "",
-            &[member("nope-a"), member("nope-b")],
-            &[],
-            &state,
-        )
-        .unwrap_err();
-        assert!(err.contains("nope-a") && err.contains("nope-b"), "一次报全: {err}");
     }
 }

@@ -29,65 +29,51 @@
 
 ## 3. 数据模型
 
-引用键两种粒度，创建时经 `AddressResolver`/端口表校验存在性并**定型**（存类型字段，不靠字符串猜）：
-
-- 设备键：设备 id（`local` / SSH uuid / 远端实例 id），代表该设备全部端点；
-- 端点键：端口复合键（`COM3`、`sshUuid::shell`、`remoteId::COM5`），代表单端点及其运行实例（`shell@N`）。
+**设备是被测对象的一等实体，通道是接入方式**（2026-10-27 定案，P2.5 重构）：一台交换机 = 一台设备，其串口控制台（COM4）与多条 SSH 登录（admin@ip、support@ip）是它的**通道**。此前模型里的"设备"（本机/SSH 主机/远端实例）实为接入源，不再冒充设备——接入源降级为底层资源；"哪些通道属于同一台被测设备"这层领域知识落进注册表，此前只存在于人的备注里。
 
 ```jsonc
-// topologies.json（持久化）
-{ "id": "uuid", "name": "唯一名", "description": "",
-  "members": [{ "kind": "device|endpoint", "key": "sshUuid", "note": "被测主板" }],
-  "links": [{ "from": "成员键", "to": "成员键", "label": "eth0↔port1" }],
-  "created_at": "...", "updated_at": "..." }
+// devices.json（新增：被测设备注册表）
+{ "id": "uuid", "name": "车间交换机#3（同表唯一）", "model": "", "location": "",
+  "channels": [
+    { "type": "serial", "port": "COM4" },     // 本机裸名，或级联端口键 devB::COM4（设备插在另一台 ss 主机）
+    { "type": "ssh", "ref": "ssh-uuid" }      // 引用 SSH 凭据库（admin@ 与 support@ 是两条凭据、一台设备的两条通道）
+  ] }
 
-// 租约（纯内存，不入盘）
+// topologies.json（成员纯设备引用）
+{ "id": "uuid", "name": "唯一名", "description": "",
+  "members": [{ "device": "设备id", "note": "被测主板" }],
+  "links": [{ "from": "设备id", "to": "设备id", "label": "eth0↔port1" }], ... }
+
+// 租约（纯内存；占用=设备级，grant 即设备）
 { "id": "uuid", "holder": { "token": "uuid", "kind": "mcp|web|local", "label": "claude/agent-1" },
-  "grants": [{ "kind": "device|endpoint", "key": "..." }],
+  "grants": [{ "device": "设备id" }],
   "acquired_at": "...", "expires_at": "..." }
 ```
 
-租约纯内存的语义：hub 重启即全部释放（连接本来就断），持久化的只有拓扑定义。
+校验：设备名唯一；串口通道的端口与 SSH 凭据**跨设备不共用**；SSH ref 须存在于凭据库。SSH 凭据库（ssh.json）保留为连接层——管理入口收进设备编辑表单（顺带建/选凭据），未挂设备的凭据收纳在设置里。租约纯内存语义不变。
+
+**一次性迁移**（仅冒烟期数据）：旧成员 `{kind, key}` 每键自动包一台设备（串口端点键→串口通道；SSH 键→SSH 通道；`local`/远端实例整机成员跳过），迁移后重写两份 JSON。
 
 ## 4. 租约机制
 
-**覆盖判定**（grant 是否覆盖一个写入端口键 w）：
+**占用 = 设备级独占**（用户定案）：占用一台设备即锁定其**全部通道**——串口控制台与 SSH 并发操作会互相干扰（SSH 重启设备即打断控制台），设备级语义最干净；分通道观察需求由"读免闸"兜底（grep/attach 本就不拦）。
 
-| grant | 覆盖 w 当且仅当 |
-|---|---|
-| device(key=d) | w 的设备段 == d（裸名 w 视为 `local`） |
-| endpoint(key=e) | w == e，或 w 同设备段且裸名以 `e 的裸名@` 开头（实例行） |
+**覆盖判定**：`device_of_port(端口键) → 属主设备`（串口通道比对端口键；SSH 通道比对复合键首段 == ref），grant 覆盖 w 当且仅当 `device_of_port(w) == grant.device`。冲突判定退化为设备 id 相等。未注册端口的写操作被闸拦时引导 `device_create`——平台纪律：每个在用端口都归属已知设备。
 
-**冲突**：两 grant 覆盖集合相交即冲突（device 与同设备 endpoint 相交；endpoint 与其实例行相交）。申请 = 请求键集合内先自检（重复即 400），再与全部活跃租约两两判定，任一冲突则整体拒绝。
-
-**原子性**：LeaseManager 单锁内"全量冲突检查 + 插入"一次完成，无中间态；不存在逐个拿锁接口，死锁在 API 形态上不可能。
-
-**状态机**：
-
-```
-申请成功 → Held ── renew ──→ Held（顺延 expires_at，受 max_ttl 约束）
-Held → Released   显式释放（持 token 或人）
-Held → Expired    TTL 到期（每分钟定时清扫 + 读取时惰性判定双保险）
-Held → Preempted  仅人（Web 占用中心）
-申请冲突 → Denied（不建立，返回冲突明细）
-```
-
-**TTL**：默认 30 分钟、上限 240 分钟（lease.json 可配），申请与续租可传 `ttl_minutes`。MCP 是短连接 POST，无断连信号，租约生命周期不依赖连接状态，TTL 是崩溃客户端的唯一回收手段。
-
-**抢占不踢连接**（实施修正）：MCP 调用是无状态 POST，AI 没有常驻连接可踢；且 MCP 工具从不开端口（send 对未开端口直接报错，端口由人在 UI/WS 打开）——强释放即收回写权本身（写闸立即对该会话生效），端口归端口的人管。设计初稿的"顺带 force_close"基于错误假设，已删。
+**原子性/状态机/TTL/排队**：不变（见下文与 §6）。**抢占收口**：强释放时收回该会话在租约设备全部通道端口中经 MCP 开的口。
 
 **写闸**（`enable_lease_gate`，默认开，**仅作用于 MCP 来源**；web 用户与本地 Tauri 免闸——闸的管理对象是 AI，人有人工抢占权兜底）：
 
 | 工具 | 闸 |
 |---|---|
-| `serial_send` / `serial_read` / `serial_clear` | 需持覆盖该端点的租约 |
+| `serial_send` / `serial_read` / `serial_clear` | 需持覆盖该端口（经属主设备）的租约 |
 | `serial_debug_script` / `serial_run_script` | 启动时按 `port` 参数检查；脚本内跨端口写不二次拦截（局限，P2 下沉 core 再拦） |
-| `port_open` / `port_close`（P1.5 新增，ss-server 内置，serial-studio 同享） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；**强释放租约时顺带收回该会话在租约覆盖范围内开的端口**——这是无人值守全 MCP 流程（申请→开口→调试→释放）的闭环，人开的口不受影响 |
+| `port_open` / `port_close`（ss-server 内置，serial-studio 同享） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；强释放顺带收回 |
 | `serial_list` / `serial_status` / `serial_grep` | 免闸（非破坏，观察开放） |
 
-被闸拒绝时错误信息引导先 `lease_acquire`，并附当前持有者与到期时间。
+被闸拒绝时错误信息引导先 `lease_acquire`（未注册端口引导 `device_create`），并附当前持有者与到期时间。
 
-**失败返回与排队**：每个冲突端点返回 `{key, holder_label, expires_at}`。`lease_acquire` 带 `wait_timeout_ms`（上限 10 分钟）时服务端 500ms 轮询排队，持有者释放或过期即自动获得，超时仍冲突才拒绝——AI 长等待自行轮询 `lease_status`。
+**失败返回与排队**：每个冲突设备返回 `{device, name, holder_label, expires_at}`。`lease_acquire` 带 `wait_timeout_ms`（上限 10 分钟）时服务端 500ms 轮询排队，持有者释放或过期即自动获得，超时仍冲突才拒绝。
 
 ## 5. MCP 会话与工具
 
@@ -107,7 +93,17 @@ Held → Preempted  仅人（Web 占用中心）
 | `lease_release` | `lease_id`、`token?` | — |
 | `lease_status` | `token?` | 本 principal 全部租约与剩余时间 |
 
-`topo` 展开为成员并集；成员键已失效（设备删除/端点消失）的跳过并在结果标注，不阻塞申请。
+设备工具族（P2.5 新增）：
+
+| 工具 | 入参要点 | 出参要点 |
+|---|---|---|
+| `device_list` | — | 设备行：名称、通道摘要（串口/SSH 各自目标）、占用状态 |
+| `device_get` | `device`（id 或 name） | 通道明细（解析凭据标签/端口在线态）、占用 |
+| `device_create` | `name`、`model?`、`location?`、`channels: [{type:serial,port} \| {type:ssh,ref}]` | 定型后的设备 |
+| `device_update` | `device` + 可变字段（提供才更新） | 同上 |
+| `device_delete` | `device`（被拓扑引用时拒绝并列出） | — |
+
+`lease_acquire` 的 scope 主形态为 `devices: [id或名称]`；`endpoints: [端口键]` 保留为糖——经 `device_of_port` 解析到属主设备，未注册端口报错并引导 `device_create`。`topo` 展开为成员设备并集；成员设备已删除的跳过并标注。
 
 ## 6. 通知通道：SSE（实现修正）
 
@@ -127,13 +123,13 @@ Held → Preempted  仅人（Web 占用中心）
 
 | 页面 | 内容 |
 |---|---|
-| 总览 | 拓扑卡片：成员数、占用徽章（持有者 label + 剩余时间） |
-| 拓扑详情 | 成员列表（在线/占用状态）⇄ 拓扑图（@xyflow/react） |
-| 设备库 | 本机/SSH/远端统一清单（WS 实时）；右键设备/端口详情、铅笔内联别名、双击进终端 |
-| 占用中心 | 活跃租约表 + 人工强释放（Preempted 路径） |
-| 终端 | 端口选择（串口参数对话框/SSH 直开）→ xterm 标签页；SSH 认证/指纹闭环弹窗 |
+| 总览 | 拓扑卡片：成员设备数、占用徽章（持有者 label + 剩余时间） |
+| 拓扑详情 | 成员设备列表（通道/在线/占用）⇄ 拓扑图（@xyflow/react，节点=设备） |
+| 设备管理 | 设备卡（名称/型号/通道清单含在线与占用/每通道"开终端"/编辑/删除）；页底折叠"未注册资源"（未归属端口、未挂设备凭据、级联口）——即资源选择器 |
+| 占用中心 | 活跃租约表（设备级 grant）+ 人工强释放 |
+| 终端 | 设备→通道选择（串口参数对话框/SSH 直开）+ 裸端口兜底 → xterm 标签页；SSH 认证/指纹闭环弹窗 |
 
-侧栏工具区：SSH 设备 / 添加远端 / 设置（服务器+租约）/ 关于 / 主题选择。设置中 enable_scripting 热生效，监听与租约参数重启生效。
+侧栏工具区：添加远端 / 设置（服务器+租约+SSH 凭据收纳）/ 关于 / 主题选择。设置中 enable_scripting 热生效，监听与租约参数重启生效。
 
 ## 8. 审计与配置
 
@@ -147,6 +143,7 @@ Held → Preempted  仅人（Web 占用中心）
 - **P1**（已完成）：session token（initialize 签发，头/参数双通道）、LeaseManager（原子申请/TTL/续租/释放/强释放）、写闸（仅 MCP 来源的 send/read/clear/脚本，拒绝文案附持有者）、审计、占用中心与占用徽章。
 - **P1.5**（已完成）：MCP `port_open` / `port_close`（ss-server 内置）——AI 全流程无人值守补齐；强释放顺带收回该会话开的端口。
 - **P2 已交付**：拓扑连线（`links` 数据模型 + 成员引用/自环校验 + UI 连线编辑器）与拓扑图视图（@xyflow/react，节点按设备分组、占用高亮、圆形自动布局）；排队等待（`lease_acquire` 的 `wait_timeout_ms`，服务端轮询，无需 transport 升级）。
+- **P2.5**（进行中）：设备一等公民重构——devices.json 注册表（设备=身份、通道=串口/SSH 接入）、拓扑成员纯设备化、租约设备级独占（`device_of_port` 映射）、MCP 设备工具族、UI 信息架构归两区（拓扑/设备管理）+ 设置收纳 SSH 凭据；一次性迁移旧成员数据。
 - **P2 剩余**：拆 `ss-device` 合回 main、API key、脚本跨端口写拦截下沉、图布局持久化。
 
-测试：lease 单元（原子性/冲突矩阵：device×endpoint×实例/TTL 边界/覆盖判定）、token 工具集成、store CRUD；冒烟沿用隔离实例方式（`SERIAL_STUDIO_CONFIG_DIR` + 错峰端口）。
+测试：device store（CRUD/通道跨设备不共用/拓扑引用删除拦截）、迁移（旧成员→设备包装）、lease 设备级（同设备不同通道不冲突/跨会话同设备冲突/未注册端口闸拒）、token 工具集成；冒烟沿用隔离实例方式（`SERIAL_STUDIO_CONFIG_DIR` + 错峰端口）。

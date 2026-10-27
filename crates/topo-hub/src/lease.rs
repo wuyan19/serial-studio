@@ -1,16 +1,17 @@
 //! 租约管理器：排他占用的策略层（连接事实仍在 manager，本模块只有"谁能写"）。
 //!
+//! P2.5 起占用 = **设备级独占**（用户定案）：grant 即设备，覆盖其全部通道
+//! （串口控制台与 SSH 并发操作会互相干扰；分通道观察由"读免闸"兜底）。
+//!
 //! - 原子申请：单锁内"全量冲突检查 + 插入"一次完成，all-or-nothing——
 //!   不存在逐个拿锁接口，死锁在 API 形态上不可能；
-//! - 覆盖判定：grant 两粒度（device = 该设备全部端点及其实例行，
-//!   endpoint = 端点及其实例行），与写入端口键匹配；
+//! - 覆盖判定：`device_of_port(端口键) == grant.device`（device.rs 的通道映射）；
 //! - TTL：默认/上限读 lease.json；到期惰性清扫（读路径 + 每分钟定时）双保险；
-//! - 释放须持 token；人工抢占（Web 占用中心）不验 token。
-//!   MCP 调用是无状态 POST，AI 没有可踢的常驻连接——强释放即收回写权本身
-//!   （写闸立即生效），端口由人开的仍归人管。
+//! - 释放须持 token；人工抢占（Web 占用中心）不验 token，顺带收回该会话
+//!   在租约设备全部通道端口中经 MCP 开的口。
 
 use crate::audit;
-use crate::topology::{self, MemberKind};
+use crate::device;
 use serde::{Deserialize, Serialize};
 use ss_server::AppState;
 use std::sync::{Arc, Mutex};
@@ -72,62 +73,28 @@ pub fn save_config(cfg: &LeaseConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// 一条授权（租约的原子单位）。
+/// 一条授权 = 一台设备（含其全部通道）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Grant {
-    pub kind: MemberKind,
-    pub key: String,
+    pub device: String,
 }
 
 impl Grant {
-    pub fn device(key: impl Into<String>) -> Self {
-        Self {
-            kind: MemberKind::Device,
-            key: key.into(),
-        }
-    }
-
-    /// 覆盖判定：本 grant 是否覆盖写入端口键 w。
-    /// - device：w 的设备段 == key（裸名 w 视为 local）；
-    /// - endpoint：同设备段，且 w 的裸名 == 端点名或以 `端点名@` 开头（实例行）。
+    /// 覆盖判定：端口键的属主设备即本 grant 的设备。
     pub fn covers(&self, w: &str) -> bool {
-        let (dev, rest) = ss_core::split_port_key(w);
-        match self.kind {
-            MemberKind::Device => dev == self.key,
-            MemberKind::Endpoint => {
-                let (gdev, grest) = ss_core::split_port_key(&self.key);
-                gdev == dev && (grest == rest || rest.starts_with(&format!("{grest}@")))
-            }
-        }
+        device::device_of_port(w)
+            .map(|d| d.id == self.device)
+            .unwrap_or(false)
     }
 }
 
-/// 两 grant 覆盖集合是否相交。
-///
-/// 不走 `covers`（它吃的是端口键——裸名按 local 域解析，而 device grant 的键
-/// 是裸设备 id，covers 会把同设备误判为不相交），按结构判定：
-/// device×device 比键；device×endpoint 比端点的设备段；endpoint×endpoint
-/// 同设备且互为基名（实例行不会成为 grant，末条是防御）。
+/// 设备级粒度下冲突判定即设备 id 相等。
 pub fn grants_intersect(a: &Grant, b: &Grant) -> bool {
-    fn dev_seg(k: &str) -> &str {
-        ss_core::split_port_key(k).0
-    }
-    match (a.kind, b.kind) {
-        (MemberKind::Device, MemberKind::Device) => a.key == b.key,
-        (MemberKind::Device, MemberKind::Endpoint) => dev_seg(&b.key) == a.key,
-        (MemberKind::Endpoint, MemberKind::Device) => dev_seg(&a.key) == b.key,
-        (MemberKind::Endpoint, MemberKind::Endpoint) => {
-            let (ad, arest) = ss_core::split_port_key(&a.key);
-            let (bd, brest) = ss_core::split_port_key(&b.key);
-            ad == bd
-                && (arest == brest
-                    || arest.starts_with(&format!("{brest}@"))
-                    || brest.starts_with(&format!("{arest}@")))
-        }
-    }
+    a.device == b.device
 }
 
-/// 申请作用域：三种来源取并集（提供多种则合并）。
+/// 申请作用域：三种来源取并集（提供多种则合并）。endpoints 为糖——
+/// 端口键经属主解析为设备（未注册端口的占用须先 device_create）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Scope {
     #[serde(default)]
@@ -154,10 +121,11 @@ pub struct Lease {
     pub expires_at: chrono::DateTime<chrono::Local>,
 }
 
-/// 申请被拒时的冲突明细（AI 据此决策重试或换拓扑）。
+/// 申请被拒时的冲突明细（AI 据此决策重试或换设备）。
 #[derive(Debug, Clone, Serialize)]
 pub struct Conflict {
-    pub key: String,
+    pub device: String,
+    pub device_name: String,
     pub holder: String,
     pub lease_id: String,
     pub expires_at: chrono::DateTime<chrono::Local>,
@@ -195,15 +163,14 @@ impl LeaseManager {
         label: &str,
         scope: &Scope,
         ttl_minutes: Option<u64>,
-        state: &AppState,
     ) -> Result<Lease, AcquireError> {
-        let outcome = self.try_acquire(token, label, scope, ttl_minutes, state);
+        let outcome = self.try_acquire(token, label, scope, ttl_minutes);
         let ttl = ttl_minutes
             .unwrap_or(self.cfg.ttl_minutes)
             .clamp(1, self.cfg.max_ttl_minutes.max(1));
         match &outcome {
             Ok(lease) => {
-                let keys: Vec<String> = lease.grants.iter().map(|g| g.key.clone()).collect();
+                let keys: Vec<String> = lease.grants.iter().map(|g| g.device.clone()).collect();
                 audit::log(
                     audit::EV_ACQUIRE,
                     Some(token),
@@ -214,7 +181,7 @@ impl LeaseManager {
                 );
             }
             Err(AcquireError::Conflict(cs)) => {
-                let ckeys: Vec<String> = cs.iter().map(|c| c.key.clone()).collect();
+                let ckeys: Vec<String> = cs.iter().map(|c| c.device.clone()).collect();
                 audit::log(
                     audit::EV_DENY,
                     Some(token),
@@ -239,7 +206,6 @@ impl LeaseManager {
         scope: &Scope,
         ttl_minutes: Option<u64>,
         wait_ms: u64,
-        state: &AppState,
     ) -> Result<Lease, AcquireError> {
         const MAX_WAIT_MS: u64 = 600_000;
         let wait_ms = wait_ms.min(MAX_WAIT_MS);
@@ -249,24 +215,27 @@ impl LeaseManager {
             .unwrap_or(self.cfg.ttl_minutes)
             .clamp(1, self.cfg.max_ttl_minutes.max(1));
         loop {
-            let outcome = self.try_acquire(token, label, scope, ttl_minutes, state);
+            let outcome = self.try_acquire(token, label, scope, ttl_minutes);
             match outcome {
                 Ok(lease) => {
-                    let keys: Vec<String> = lease.grants.iter().map(|g| g.key.clone()).collect();
+                    let keys: Vec<String> = lease.grants.iter().map(|g| g.device.clone()).collect();
                     audit::log(
                         audit::EV_ACQUIRE,
                         Some(token),
                         label,
                         Some(&lease.id),
                         &keys,
-                        &format!("等待 {} 秒后获得，TTL {} 分钟", started.elapsed().as_secs(), ttl),
+                        &format!(
+                            "等待 {} 秒后获得，TTL {ttl} 分钟",
+                            started.elapsed().as_secs()
+                        ),
                     );
                     return Ok(lease);
                 }
                 Err(AcquireError::Invalid(e)) => return Err(AcquireError::Invalid(e)),
                 Err(AcquireError::Conflict(cs)) => {
                     if std::time::Instant::now() >= deadline {
-                        let ckeys: Vec<String> = cs.iter().map(|c| c.key.clone()).collect();
+                        let ckeys: Vec<String> = cs.iter().map(|c| c.device.clone()).collect();
                         audit::log(
                             audit::EV_DENY,
                             Some(token),
@@ -294,9 +263,8 @@ impl LeaseManager {
         label: &str,
         scope: &Scope,
         ttl_minutes: Option<u64>,
-        state: &AppState,
     ) -> Result<Lease, AcquireError> {
-        let (grants, _skipped) = expand_scope(scope, state).map_err(AcquireError::Invalid)?;
+        let grants = expand_scope(scope).map_err(AcquireError::Invalid)?;
         let mut leases = self.leases.lock().expect("lease lock poisoned");
         self.drop_expired_locked(&mut leases);
 
@@ -305,12 +273,15 @@ impl LeaseManager {
             for g in &grants {
                 if lease.grants.iter().any(|lg| grants_intersect(lg, g)) {
                     conflicts.push(Conflict {
-                        key: g.key.clone(),
+                        device: g.device.clone(),
+                        device_name: device::find(&g.device)
+                            .map(|d| d.name)
+                            .unwrap_or_else(|| g.device.clone()),
                         holder: lease.label.clone(),
                         lease_id: lease.id.clone(),
                         expires_at: lease.expires_at,
                     });
-                    break; // 每个新 grant 只记一次最浅冲突来源
+                    break;
                 }
             }
         }
@@ -351,7 +322,7 @@ impl LeaseManager {
             .clamp(1, self.cfg.max_ttl_minutes.max(1));
         lease.expires_at = chrono::Local::now() + Duration::from_secs(ttl * 60);
         let renewed = lease.clone();
-        let keys: Vec<String> = renewed.grants.iter().map(|g| g.key.clone()).collect();
+        let keys: Vec<String> = renewed.grants.iter().map(|g| g.device.clone()).collect();
         audit::log(
             audit::EV_RENEW,
             Some(token),
@@ -377,7 +348,7 @@ impl LeaseManager {
             return Err(format!("租约 {} 不属于当前会话（token 不匹配）", lease_id));
         }
         let removed = leases.remove(pos);
-        let keys: Vec<String> = removed.grants.iter().map(|g| g.key.clone()).collect();
+        let keys: Vec<String> = removed.grants.iter().map(|g| g.device.clone()).collect();
         audit::log(
             audit::EV_RELEASE,
             Some(token),
@@ -391,9 +362,8 @@ impl LeaseManager {
         Ok(removed)
     }
 
-    /// 人工抢占（Web 占用中心）：不验 token。写闸即时对该会话生效；若该 AI
-    /// 经 MCP port_open 开过端口（占用挂其 token 的 MCP 会话上），顺带收回
-    /// 租约覆盖范围内它开的口——人开/别的会话开的口不受影响。
+    /// 人工抢占（Web 占用中心）：不验 token。写闸即时对该会话生效；顺带收回
+    /// 该会话在租约设备全部通道端口中经 MCP 开的口（人开的口不受影响）。
     pub async fn force_release(&self, lease_id: &str, state: &AppState) -> Result<Lease, String> {
         let removed = {
             let mut leases = self.leases.lock().expect("lease lock poisoned");
@@ -404,21 +374,22 @@ impl LeaseManager {
                 .ok_or_else(|| format!("租约不存在: {lease_id}"))?;
             leases.remove(pos)
         };
-        // 收回该会话在租约覆盖范围内打开的端口（release 只动本会话持有，
-        // 其它持有者继续用；末位才真正关闭）。
         let mut closed: Vec<String> = Vec::new();
         if let Some(sid) = ss_server::mcp::mcp_session_of(&removed.token) {
-            for port in state.manager.list_open_ports().await {
-                if removed.grants.iter().any(|g| g.covers(&port)) {
-                    if let Ok(outcome) = state.manager.release(&port, sid).await {
-                        if !matches!(outcome, ss_core::ReleaseOutcome::NotHeld) {
-                            closed.push(port);
+            let open = state.manager.list_open_ports().await;
+            for g in &removed.grants {
+                if let Some(dev) = device::find(&g.device) {
+                    for port in device::open_ports_of_device(&dev, &open) {
+                        if let Ok(outcome) = state.manager.release(&port, sid).await {
+                            if !matches!(outcome, ss_core::ReleaseOutcome::NotHeld) {
+                                closed.push(port);
+                            }
                         }
                     }
                 }
             }
         }
-        let keys: Vec<String> = removed.grants.iter().map(|g| g.key.clone()).collect();
+        let keys: Vec<String> = removed.grants.iter().map(|g| g.device.clone()).collect();
         let mut detail = format!("原持有会话 {}", removed.token);
         if !closed.is_empty() {
             detail.push_str(&format!("；顺带收回其打开的端口: {}", closed.join("、")));
@@ -443,8 +414,15 @@ impl LeaseManager {
             .collect()
     }
 
-    /// 写闸：principal 须持覆盖 port_key 的活跃租约。
-    /// Err(文案) 附当前持有者与到期时间，引导先 lease_acquire。
+    /// 覆盖指定设备的活跃租约（占用徽章/详情用）。
+    pub fn lease_of_device(&self, device_id: &str) -> Option<Lease> {
+        self.list()
+            .into_iter()
+            .find(|l| l.grants.iter().any(|g| g.device == device_id))
+    }
+
+    /// 写闸：principal 须持覆盖 port_key（经属主设备）的活跃租约。
+    /// 判定顺序：匿名 → 未注册端口 → 无租约（先回答"你是谁"，再回答"能不能"）。
     pub fn gate(&self, principal: Option<&str>, port_key: &str) -> Result<(), String> {
         let Some(token) = principal else {
             audit::log(
@@ -459,33 +437,42 @@ impl LeaseManager {
                 "写操作「{port_key}」需要租约：当前会话未标识（initialize 获取 token 或在工具参数传 token），先 lease_acquire"
             ));
         };
+        let Some(owner) = device::device_of_port(port_key) else {
+            audit::log(
+                audit::EV_WRITE_DENIED,
+                Some(token),
+                "session",
+                None,
+                &[port_key.to_string()],
+                "端口未归属任何设备",
+            );
+            return Err(format!(
+                "写操作「{port_key}」被租约闸拒绝：该端口未归属任何设备。先 device_create 注册设备（把此端口列为通道），再 lease_acquire"
+            ));
+        };
         let leases = self.list();
         if leases
             .iter()
-            .any(|l| l.token == token && l.grants.iter().any(|g| g.covers(port_key)))
+            .any(|l| l.token == token && l.grants.iter().any(|g| g.device == owner.id))
         {
             return Ok(());
         }
-        let holders: Vec<String> = leases
-            .iter()
-            .filter(|l| l.grants.iter().any(|g| g.covers(port_key)))
-            .map(|l| format!("{}（至 {}）", l.label, lease_fmt(l.expires_at)))
-            .collect();
-        let holder_info = if holders.is_empty() {
-            "当前无人持有".into()
-        } else {
-            format!("当前持有: {}", holders.join("、"))
+        let holder = self.lease_of_device(&owner.id);
+        let holder_info = match &holder {
+            Some(l) => format!("当前持有: {}（至 {}）", l.label, fmt_time(l.expires_at)),
+            None => "当前无人持有".into(),
         };
         audit::log(
             audit::EV_WRITE_DENIED,
             Some(token),
             "session",
-            None,
+            holder.as_ref().map(|l| l.id.as_str()),
             &[port_key.to_string()],
             &holder_info,
         );
         Err(format!(
-            "写操作「{port_key}」被租约闸拒绝：本会话未持覆盖它的租约（{holder_info}）。先 lease_acquire"
+            "写操作「{port_key}」被租约闸拒绝：本会话未持设备「{}」的租约（{holder_info}）。先 lease_acquire",
+            owner.name
         ))
     }
 
@@ -502,7 +489,7 @@ impl LeaseManager {
         while i < leases.len() {
             if leases[i].expires_at <= now {
                 let expired = leases.remove(i);
-                let keys: Vec<String> = expired.grants.iter().map(|g| g.key.clone()).collect();
+                let keys: Vec<String> = expired.grants.iter().map(|g| g.device.clone()).collect();
                 audit::log(
                     audit::EV_EXPIRE,
                     Some(&expired.token),
@@ -527,99 +514,50 @@ impl LeaseManager {
     }
 }
 
-/// 展开作用域为 grant 集。返回 (grants, 跳过的失效成员描述)。
-/// - topology：成员即 grant（失效的跳过——设备删除/端口拔掉不阻塞申请其余）；
-/// - devices：逐个须为已注册设备（local/SSH/远端）；
-/// - endpoints：逐个走成员定型（resolve_member，支持别名/昵称）。
-fn expand_scope(scope: &Scope, state: &AppState) -> Result<(Vec<Grant>, Vec<String>), String> {
+/// 展开作用域为设备 grant 集。返回 grants；成员设备已删除的跳过由调用方文案
+/// 呈现（此处 Invalid 直报）。
+/// - topology：成员设备并集（成员引用已删设备的跳过）；
+/// - devices：逐个须为已注册设备（id 或名称）；
+/// - endpoints：端口键经 device_of_port 解析（未注册报错引导 device_create）。
+fn expand_scope(scope: &Scope) -> Result<Vec<Grant>, String> {
     let mut grants: Vec<Grant> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
 
     if let Some(tid) = &scope.topology {
-        let topo = topology::find(tid)
+        let topo = crate::topology::find(tid)
             .ok_or_else(|| format!("拓扑不存在: {tid}（topo_list 可查）"))?;
         for m in &topo.members {
-            if member_still_valid(m.kind, &m.key, state) {
+            if device::find(&m.device).is_some() {
                 grants.push(Grant {
-                    kind: m.kind,
-                    key: m.key.clone(),
+                    device: m.device.clone(),
                 });
-            } else {
-                skipped.push(m.key.clone());
-            }
+            } // 成员设备已删除：跳过（申请其余不阻塞）
         }
     }
     for id in &scope.devices {
-        if !device_valid(id, state) {
-            return Err(format!(
-                "「{id}」不是已注册设备（local/SSH 设备 id/远端设备 id）"
-            ));
-        }
-        grants.push(Grant::device(id.clone()));
+        let d = device::find(id)
+            .ok_or_else(|| format!("设备「{id}」不存在（device_list 可查，先 device_create）"))?;
+        grants.push(Grant { device: d.id });
     }
     for key in &scope.endpoints {
-        let m = topology::resolve_member(key, state)
-            .map_err(|e| format!("endpoints 项「{key}」无法定型: {e}"))?;
-        grants.push(Grant {
-            kind: m.kind,
-            key: m.key,
-        });
+        let d = device::device_of_port(key).ok_or_else(|| {
+            format!("端口「{key}」未归属任何设备，无法占用——先 device_create 注册（把此端口列为通道）")
+        })?;
+        grants.push(Grant { device: d.id });
     }
 
-    // 自身重复 = 覆盖集合自交（如 devices 传了设备又 endpoints 传它的端口），拒绝。
     for (i, a) in grants.iter().enumerate() {
         if grants[i + 1..].iter().any(|b| grants_intersect(a, b)) {
-            return Err(format!(
-                "申请项覆盖重叠（如同一设备与其端点同时出现）: {}",
-                a.key
-            ));
+            let name = device::find(&a.device).map(|d| d.name).unwrap_or_else(|| a.device.clone());
+            return Err(format!("申请范围内设备重复: {name}"));
         }
     }
     if grants.is_empty() {
-        return Err("申请范围为空（拓扑无成员或全部失效）".into());
+        return Err("申请范围为空（拓扑无成员设备或全部已删除）".into());
     }
-    Ok((grants, skipped))
+    Ok(grants)
 }
 
-/// 设备键是否仍有效（local / SSH / 远端注册表）。
-fn device_valid(id: &str, state: &AppState) -> bool {
-    if id == ss_core::LOCAL_DEVICE_ID {
-        return true;
-    }
-    state.ssh.has_host(id) || state.devices.device_views().iter().any(|(d, _)| d.id == id)
-}
-
-/// 拓扑成员在申请时点是否仍有效：设备查注册表；端点——本机端口须在位，
-/// SSH 端点须在注册表，远端端点验设备注册（端口桶可能离线为空，透传）。
-fn member_still_valid(kind: MemberKind, key: &str, state: &AppState) -> bool {
-    match kind {
-        MemberKind::Device => device_valid(key, state),
-        MemberKind::Endpoint => {
-            let (first, rest) = ss_core::split_port_key(key);
-            if first == ss_core::LOCAL_DEVICE_ID {
-                ss_core::serial::list_port_names()
-                    .iter()
-                    .any(|p| p.eq_ignore_ascii_case(rest))
-            } else if let Some(rec) = state
-                .ssh
-                .registry_snapshot()
-                .into_iter()
-                .find(|r| r.id == first)
-            {
-                rec.endpoints.iter().any(|e| e.name == rest)
-            } else {
-                state
-                    .devices
-                    .device_views()
-                    .iter()
-                    .any(|(d, _)| d.id == first)
-            }
-        }
-    }
-}
-
-/// 展示用时间（去掉时区尾巴，UI/文本场景短些）。
-fn lease_fmt(t: chrono::DateTime<chrono::Local>) -> String {
+fn fmt_time(t: chrono::DateTime<chrono::Local>) -> String {
     t.format("%m-%d %H:%M").to_string()
 }
 
@@ -631,132 +569,127 @@ pub fn remaining_minutes(l: &Lease) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::make_state;
+    use crate::device::{Channel, DeviceInput};
+    use crate::test_support::{ensure_test_config_dir, make_state, unique_name};
+
+    use crate::test_support::STORE_LOCK as TEST_LOCK;
 
     fn manager(cfg: LeaseConfig) -> Arc<LeaseManager> {
         let (tx, _) = broadcast::channel(16);
         LeaseManager::new(cfg, tx)
     }
 
-    fn scope(devices: &[&str]) -> Scope {
+    fn seed_device(state: &AppState, name: &str, channels: Vec<Channel>) -> crate::device::Device {
+        device::create(
+            &DeviceInput {
+                name: name.into(),
+                model: String::new(),
+                location: String::new(),
+                channels,
+            },
+            state,
+        )
+        .unwrap()
+    }
+
+    fn scope_devices(name: &str) -> Scope {
         Scope {
             topology: None,
-            devices: devices.iter().map(|s| s.to_string()).collect(),
+            devices: vec![name.to_string()],
             endpoints: vec![],
         }
     }
 
-    #[test]
-    fn covers_matrix() {
-        let dev_local = Grant::device("local");
-        assert!(dev_local.covers("COM3"), "device local 覆盖裸名");
-        assert!(!dev_local.covers("ssh-x1::shell"), "local 不覆盖其它设备");
-        let dev_ssh = Grant::device("ssh-x1");
-        assert!(dev_ssh.covers("ssh-x1::shell"));
-        assert!(dev_ssh.covers("ssh-x1::shell@2"), "设备覆盖其实例行");
-        assert!(!dev_ssh.covers("ssh-x2::shell"));
-        let ep = Grant {
-            kind: MemberKind::Endpoint,
-            key: "ssh-x1::shell".into(),
-        };
-        assert!(ep.covers("ssh-x1::shell"));
-        assert!(ep.covers("ssh-x1::shell@3"), "端点覆盖实例行");
-        assert!(!ep.covers("ssh-x1::ttyS0"), "同设备其它端点不覆盖");
-        assert!(!ep.covers("ssh-x2::shell"));
-        let ep_local = Grant {
-            kind: MemberKind::Endpoint,
-            key: "COM3".into(),
-        };
-        assert!(ep_local.covers("COM3"), "本机端点覆盖自身");
-        assert!(!ep_local.covers("COM4"));
-    }
-
-    #[test]
-    fn intersect_device_vs_endpoint() {
-        let dev = Grant::device("ssh-x1");
-        let ep = Grant {
-            kind: MemberKind::Endpoint,
-            key: "ssh-x1::shell".into(),
-        };
-        assert!(grants_intersect(&dev, &ep), "设备与同设备端点相交");
-        let other = Grant::device("ssh-x2");
-        assert!(!grants_intersect(&dev, &other));
-        assert!(!grants_intersect(&ep, &other));
+    #[tokio::test]
+    async fn covers_via_device_channels() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let state = make_state();
+        let n = unique_name("设备");
+        let d = seed_device(
+            &state,
+            &n,
+            vec![
+                Channel::Serial { port: "COM4".into() },
+                Channel::Ssh {
+                    r#ref: "ssh-x1".into(),
+                },
+            ],
+        );
+        let g = Grant { device: d.id.clone() };
+        assert!(g.covers("COM4"), "串口通道端口覆盖");
+        assert!(g.covers("ssh-x1::shell"), "SSH 通道端点覆盖");
+        assert!(g.covers("ssh-x1::shell@3"), "SSH 实例行覆盖");
+        assert!(!g.covers("COM5"));
+        assert!(!g.covers("ssh-x2::shell"));
+        device::delete(&d.id).unwrap();
     }
 
     #[tokio::test]
-    async fn acquire_conflict_and_exclusivity() {
+    async fn device_level_exclusivity() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
         let state = make_state();
         let m = manager(LeaseConfig::default());
-        let a = m
-            .acquire("token-a", "agent-a", &scope(&["ssh-x1"]), None, &state)
-            .unwrap();
-        assert_eq!(a.grants.len(), 1);
+        let na = unique_name("设备A");
+        let nb = unique_name("设备B");
+        let a = seed_device(&state, &na, vec![Channel::Serial { port: "COM4".into() }]);
+        let b = seed_device(&state, &nb, vec![Channel::Ssh { r#ref: "ssh-x1".into() }]);
 
-        // 同设备再申请（另一会话）→ 冲突，附持有者明细
-        match m.acquire("token-b", "agent-b", &scope(&["ssh-x1"]), None, &state) {
+        // token-a 持 A
+        let la = m
+            .acquire("token-a", "agent-a", &scope_devices(&na), None)
+            .unwrap();
+        // token-b 再申请 A（经另一条通道的 endpoints 糖）→ 冲突：设备级独占
+        let ep_scope = Scope {
+            topology: None,
+            devices: vec![],
+            endpoints: vec!["COM4".into()],
+        };
+        match m.acquire("token-b", "agent-b", &ep_scope, None) {
             Err(AcquireError::Conflict(cs)) => {
                 assert_eq!(cs.len(), 1);
+                assert_eq!(cs[0].device, a.id);
                 assert_eq!(cs[0].holder, "agent-a");
-                assert_eq!(cs[0].lease_id, a.id);
             }
             other => panic!("应冲突: {other:?}"),
         }
-
-        // 设备被占，其端点也不可得（覆盖集合相交）
-        let ep_scope = Scope {
-            endpoints: vec!["ssh-x1::shell".into()],
-            ..scope(&[])
-        };
-        assert!(matches!(
-            m.acquire("token-b", "agent-b", &ep_scope, None, &state),
-            Err(AcquireError::Conflict(_))
-        ));
-
-        // 其它设备不受影响
+        // B 不受影响
         assert!(
-            m.acquire("token-b", "agent-b", &scope(&["ssh-x2"]), None, &state)
+            m.acquire("token-b", "agent-b", &scope_devices(&nb), None)
                 .is_ok()
         );
-
-        // 自身重叠（设备 + 其端点）→ Invalid
-        let overlap = Scope {
-            endpoints: vec!["ssh-x1::shell".into()],
-            ..scope(&["ssh-x1"])
+        // 同一设备重复出现在 scope → Invalid
+        let dup = Scope {
+            devices: vec![na.clone(), na.clone()],
+            ..scope_devices("")
         };
         assert!(matches!(
-            m.acquire("token-c", "agent-c", &overlap, None, &state),
+            m.acquire("token-c", "c", &dup, None),
             Err(AcquireError::Invalid(_))
         ));
+        // 未注册端口 endpoints → Invalid 引导 device_create
+        let unreg = Scope {
+            endpoints: vec!["COM99".into()],
+            ..scope_devices("")
+        };
+        assert!(
+            matches!(m.acquire("token-c", "c", &unreg, None), Err(AcquireError::Invalid(e)) if e.contains("device_create"))
+        );
+        assert_eq!(m.list().len(), 2, "失败申请不建租约");
 
-        // 拿到前的租约数不受失败申请影响（all-or-nothing）
-        assert_eq!(m.list().len(), 2);
+        m.release(&la.id, "token-a").unwrap();
+        device::delete(&a.id).unwrap();
+        device::delete(&b.id).unwrap();
     }
 
     #[tokio::test]
-    async fn renew_release_auth_and_force() {
-        let state = make_state();
-        let m = manager(LeaseConfig::default());
-        let a = m
-            .acquire("token-a", "agent-a", &scope(&["ssh-x1"]), None, &state)
-            .unwrap();
-
-        // 非 holder 续/放 → 拒
-        assert!(m.renew(&a.id, "token-b", None).is_err());
-        assert!(m.release(&a.id, "token-b").is_err());
-
-        // holder 续租顺延
-        let renewed = m.renew(&a.id, "token-a", None).unwrap();
-        assert!(renewed.expires_at > a.expires_at);
-
-        // 人工强释放不验 token（无 MCP 会话时无口可收）
-        m.force_release(&a.id, &state).await.unwrap();
-        assert!(m.list().is_empty());
-        assert!(m.release(&a.id, "token-a").is_err(), "释放后租约不存在");
-    }
-
-    #[tokio::test]
-    async fn ttl_clamp_and_expiry() {
+    async fn renew_release_auth_force_and_ttl() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
         let state = make_state();
         let cfg = LeaseConfig {
             ttl_minutes: 30,
@@ -764,51 +697,70 @@ mod tests {
             enable_gate: true,
         };
         let m = manager(cfg);
-        // 超上限夹到 60
-        let a = m
-            .acquire("token-a", "a", &scope(&["ssh-x1"]), Some(9999), &state)
-            .unwrap();
-        assert_eq!((a.expires_at - a.acquired_at).num_minutes(), 60);
+        let n = unique_name("设备");
+        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into() }]);
 
-        // 到期 → 惰性清扫 + 闸拒绝
-        assert!(m.gate(Some("token-a"), "ssh-x1::shell").is_ok(), "租约期内的端点写放行");
-        m.force_expire(&a.id);
-        assert!(m.list().is_empty(), "读取路径清扫过期租约");
-        assert!(m.gate(Some("token-a"), "ssh-x1::shell").is_err());
-        // 过期后设备可被他人申请
+        let a = m
+            .acquire("token-a", "a", &scope_devices(&n), Some(9999))
+            .unwrap();
+        assert_eq!((a.expires_at - a.acquired_at).num_minutes(), 60, "超上限夹取");
+
+        assert!(m.renew(&a.id, "token-b", None).is_err());
+        assert!(m.release(&a.id, "token-b").is_err());
+        let renewed = m.renew(&a.id, "token-a", Some(60)).unwrap();
         assert!(
-            m.acquire("token-b", "b", &scope(&["ssh-x1"]), None, &state)
+            renewed.expires_at >= a.expires_at,
+            "等上限续租不早于原到期（默认 30 会提前，续租显式给 60）"
+        );
+
+        // 到期 → 惰性清扫 + 闸拒绝 + 他人可申请
+        assert!(m.gate(Some("token-a"), "COM4").is_ok());
+        m.force_expire(&a.id);
+        assert!(m.list().is_empty());
+        assert!(
+            matches!(m.gate(Some("token-a"), "COM4"), Err(e) if e.contains("未持"))
+        );
+        assert!(
+            m.acquire("token-b", "b", &scope_devices(&n), None)
                 .is_ok()
+        );
+
+        // 人工强释放（无 MCP 会话时无口可收）
+        let lb = m.list()[0].clone();
+        m.force_release(&lb.id, &state).await.unwrap();
+        assert!(m.list().is_empty());
+        device::delete(&d.id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_unregistered_and_anonymous() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let m = manager(LeaseConfig::default());
+        // 匿名 → 引导 token
+        assert!(matches!(m.gate(None, "COM4"), Err(e) if e.contains("token")));
+        // 未注册端口（有 token）→ 引导 device_create
+        assert!(
+            matches!(m.gate(Some("t"), "COM99"), Err(e) if e.contains("device_create"))
         );
     }
 
-    #[tokio::test]
-    async fn gate_requires_matching_token_lease() {
-        let state = make_state();
-        let m = manager(LeaseConfig::default());
-        // 匿名 → 拒（文案引导）
-        assert!(m.gate(None, "COM3").is_err());
-        // 有 token 无租约 → 拒
-        assert!(m.gate(Some("token-a"), "COM3").is_err());
-        // token-a 拿下 local → 覆盖本机任意端口写；token-b 仍拒
-        m.acquire("token-a", "a", &scope(&["local"]), None, &state)
-            .unwrap();
-        assert!(m.gate(Some("token-a"), "COM99").is_ok());
-        assert!(m.gate(Some("token-b"), "COM99").is_err());
-    }
-
-    /// 排队等待：持有者租约在等待期间过期（惰性清扫腾位）→ 等待者自动获得；
-    /// 无人释放且超时 → 冲突拒绝。
+    /// 排队等待：持有者租约在等待期间过期 → 等待者自动获得。
     #[tokio::test]
     async fn acquire_with_wait_gets_freed_lease() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
         let state = make_state();
         let m = manager(LeaseConfig::default());
+        let n = unique_name("设备");
+        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into() }]);
         let a = m
-            .acquire("token-a", "a", &scope(&["ssh-x1"]), None, &state)
+            .acquire("token-a", "a", &scope_devices(&n), None)
             .unwrap();
 
-        // 后台 600ms 后把 A 的租约拨过期（模拟 TTL 到期/人工释放）
-        let m2 = std::sync::Arc::clone(&m);
+        let m2 = Arc::clone(&m);
         let id = a.id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(600)).await;
@@ -817,14 +769,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let b = m
-            .acquire_with_wait(
-                "token-b",
-                "b",
-                &scope(&["ssh-x1"]),
-                None,
-                5_000,
-                &state,
-            )
+            .acquire_with_wait("token-b", "b", &scope_devices(&n), None, 5_000)
             .await
             .expect("等待后应获得");
         assert_eq!(b.token, "token-b");
@@ -832,18 +777,10 @@ mod tests {
             started.elapsed() >= Duration::from_millis(500),
             "确实经历了等待轮询"
         );
-
-        // 无可腾位 + 短等待 → 冲突拒绝
         let c = m
-            .acquire_with_wait(
-                "token-c",
-                "c",
-                &scope(&["ssh-x1"]),
-                None,
-                300,
-                &state,
-            )
+            .acquire_with_wait("token-c", "c", &scope_devices(&n), None, 300)
             .await;
         assert!(matches!(c, Err(AcquireError::Conflict(_))));
+        device::delete(&d.id).unwrap();
     }
 }

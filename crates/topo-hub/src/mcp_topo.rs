@@ -10,6 +10,7 @@
 //! 覆盖。闸只作用于 MCP 来源；web/本地不经此路径（设计 §4）。
 
 use crate::api::member_views;
+use crate::device;
 use crate::lease::{remaining_minutes, AcquireError, LeaseManager, Scope};
 use crate::topology::{self, LinkInput, MemberInput};
 use serde::Deserialize;
@@ -36,7 +37,7 @@ impl TopoTools {
     async fn topo_list(&self) -> Value {
         let list = topology::load();
         if list.is_empty() {
-            return ok_text("暂无拓扑。用 topo_create 创建；可用 serial_list 查可引用的端口与设备。".into());
+            return ok_text("暂无拓扑。用 topo_create 创建；成员引用被测设备（device_list 可查）。".into());
         }
         let lines: Vec<String> = list
             .iter()
@@ -71,12 +72,27 @@ impl TopoTools {
             lines.push(format!("描述: {}", topo.description));
         }
         for m in &members {
-            let mut line = format!("{} {} · {}", m.kind.label(), m.key, m.label);
-            if let Some(d) = &m.detail {
-                line.push_str(&format!(" · {d}"));
+            let mut line = format!("设备 {}（{}）", m.name, m.device);
+            if !m.channels.is_empty() {
+                let chans: Vec<String> = m
+                    .channels
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{}{}",
+                            c.label,
+                            if c.present { "" } else { "（不在位）" }
+                        )
+                    })
+                    .collect();
+                line.push_str(&format!(" · 通道: {}", chans.join("、")));
             }
-            if m.online == Some(false) {
-                line.push_str(" · 离线");
+            if let Some(l) = self.leases.lease_of_device(&m.device) {
+                line.push_str(&format!(
+                    " · 占用中（{}，剩余 {} 分钟）",
+                    l.label,
+                    remaining_minutes(&l)
+                ));
             }
             if let Some(n) = &m.note {
                 line.push_str(&format!(" · {n}"));
@@ -84,27 +100,28 @@ impl TopoTools {
             lines.push(line);
         }
         for l in &topo.links {
+            let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
             let label = l.label.as_deref().unwrap_or("");
             lines.push(format!(
                 "连接 {} ↔ {}{}",
-                l.from,
-                l.to,
+                name_of(&l.from),
+                name_of(&l.to),
                 if label.is_empty() { String::new() } else { format!(" · {label}") }
             ));
         }
         ok_text(lines.join("\n"))
     }
 
-    async fn topo_create(&self, args: Value, state: &AppState) -> Value {
+    async fn topo_create(&self, args: Value) -> Value {
         let parsed: Result<CreateArgs, _> = serde_json::from_value(args);
         let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 name（必填）、description?、members: [{key, note?}]、links: [{from, to, label?}]".into());
+            return error_text("参数解析失败：需要 name（必填）、description?、members: [{device, note?}]、links: [{from, to, label?}]".into());
         };
-        match topology::create(&a.name, &a.description, &a.members, &a.links, state) {
+        match topology::create(&a.name, &a.description, &a.members, &a.links) {
             Ok(t) => {
                 let _ = self.bus.send(());
                 ok_text(format!(
-                    "已创建拓扑 {}（{}），成员 {} 项。成员键须为已注册设备或本机端口，可用 serial_list 查。",
+                    "已创建拓扑 {}（{}），成员 {} 项。成员引用被测设备（device_list 可查，未注册先 device_create）。",
                     t.name, t.id, t.members.len()
                 ))
             }
@@ -112,7 +129,7 @@ impl TopoTools {
         }
     }
 
-    async fn topo_update(&self, args: Value, state: &AppState) -> Value {
+    async fn topo_update(&self, args: Value) -> Value {
         let parsed: Result<UpdateArgs, _> = serde_json::from_value(args);
         let Ok(a) = parsed else {
             return error_text("参数解析失败：需要 topo（id 或名称），name?/description?/members?/links? 提供才更新".into());
@@ -123,7 +140,6 @@ impl TopoTools {
             a.description.as_deref(),
             a.members.as_deref(),
             a.links.as_deref(),
-            state,
         ) {
             Ok(t) => {
                 let _ = self.bus.send(());
@@ -144,6 +160,145 @@ impl TopoTools {
             Ok(t) => {
                 let _ = self.bus.send(());
                 ok_text(format!("已删除拓扑 {}（{}）。", t.name, t.id))
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    // ===== 被测设备工具族 =====
+
+    async fn device_list(&self, state: &AppState) -> Value {
+        let list = device::load();
+        if list.is_empty() {
+            return ok_text(
+                "暂无被测设备。用 device_create 注册（设备=身份，通道=串口/SSH 接入，如一台交换机 = COM4 串口 + admin/support 两条 SSH 凭据）。".into(),
+            );
+        }
+        let lines: Vec<String> = list
+            .iter()
+            .map(|d| {
+                let chans: Vec<String> =
+                    d.channels.iter().map(|c| c.label(state)).collect();
+                let mut s = format!(
+                    "{} · id {} · 通道: {}",
+                    d.name,
+                    d.id,
+                    if chans.is_empty() { "（无）".into() } else { chans.join("、") }
+                );
+                if let Some(l) = self.leases.lease_of_device(&d.id) {
+                    s.push_str(&format!(
+                        " · 占用中（{}，剩余 {} 分钟）",
+                        l.label,
+                        remaining_minutes(&l)
+                    ));
+                }
+                if !d.location.is_empty() {
+                    s.push_str(&format!(" · {}", d.location));
+                }
+                s
+            })
+            .collect();
+        ok_text(lines.join("\n"))
+    }
+
+    async fn device_get(&self, args: Value, state: &AppState) -> Value {
+        let Some(dev_ref) = args.get("device").and_then(|t| t.as_str()) else {
+            return error_text("缺少参数 device（设备 id 或名称）".into());
+        };
+        let Some(d) = device::find(dev_ref) else {
+            return error_text(format!("设备不存在: {dev_ref}（device_list 可查）"));
+        };
+        let mut lines = vec![format!(
+            "{} · id {}{}{}",
+            d.name,
+            d.id,
+            if d.model.is_empty() { String::new() } else { format!(" · 型号 {}", d.model) },
+            if d.location.is_empty() { String::new() } else { format!(" · 位置 {}", d.location) },
+        )];
+        for ch in &d.channels {
+            lines.push(match ch {
+                device::Channel::Serial { port } => {
+                    format!("通道 串口 {port}（写寻址用此端口键）")
+                }
+                device::Channel::Ssh { r#ref } => {
+                    let rec = state
+                        .ssh
+                        .registry_snapshot()
+                        .into_iter()
+                        .find(|r| r.id == *r#ref);
+                    match rec {
+                        Some(r) => format!(
+                            "通道 SSH {}（{}@{}:{}，端点键 {}::shell）",
+                            r.label(), r.username, r.host, r.port, r#ref
+                        ),
+                        None => format!("通道 SSH {}（凭据已被删除）", r#ref),
+                    }
+                }
+            });
+        }
+        if let Some(l) = self.leases.lease_of_device(&d.id) {
+            lines.push(format!(
+                "占用中 · 持有 {}（至 {}，剩余 {} 分钟）",
+                l.label,
+                fmt_time(l.expires_at),
+                remaining_minutes(&l)
+            ));
+        } else {
+            lines.push("空闲".into());
+        }
+        ok_text(lines.join("\n"))
+    }
+
+    async fn device_create(&self, args: Value, state: &AppState) -> Value {
+        let Ok(a) = serde_json::from_value::<DeviceArgs>(args) else {
+            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port}|{type:ssh,ref}]".into());
+        };
+        match device::create(&a.into_input(), state) {
+            Ok(d) => {
+                let _ = self.bus.send(());
+                ok_text(format!(
+                    "已注册设备 {}（{}），通道 {} 条。拓扑成员/租约按设备引用（名称或 id 均可）。",
+                    d.name, d.id, d.channels.len()
+                ))
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn device_update(&self, args: Value, state: &AppState) -> Value {
+        let Some(dev_ref) = args
+            .get("device")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+        else {
+            return error_text("缺少参数 device（设备 id 或名称）".into());
+        };
+        let Ok(a) = serde_json::from_value::<DeviceArgs>(args) else {
+            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port}|{type:ssh,ref}]".into());
+        };
+        let Some(existing) = device::find(&dev_ref) else {
+            return error_text(format!("设备不存在: {dev_ref}"));
+        };
+        match device::update(&existing.id, &a.into_input(), state) {
+            Ok(d) => {
+                let _ = self.bus.send(());
+                ok_text(format!("已更新设备 {}（{}）。", d.name, d.id))
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn device_delete(&self, args: Value) -> Value {
+        let Some(dev_ref) = args.get("device").and_then(|t| t.as_str()) else {
+            return error_text("缺少参数 device（设备 id 或名称）".into());
+        };
+        let Some(d) = device::find(dev_ref) else {
+            return error_text(format!("设备不存在: {dev_ref}"));
+        };
+        match device::delete(&d.id) {
+            Ok(d) => {
+                let _ = self.bus.send(());
+                ok_text(format!("已删除设备 {}（{}）。", d.name, d.id))
             }
             Err(e) => error_text(e),
         }
@@ -184,7 +339,7 @@ impl TopoTools {
         }
     }
 
-    async fn lease_acquire(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+    async fn lease_acquire(&self, args: Value, principal: Option<&str>) -> Value {
         let Some(token) = principal.map(str::to_string) else {
             return error_text(
                 "申请租约须先标识会话：initialize 取 token（标准客户端自动带头），或在工具参数传 token".into(),
@@ -192,7 +347,7 @@ impl TopoTools {
         };
         let Ok(a) = serde_json::from_value::<AcquireArgs>(args) else {
             return error_text(
-                "参数解析失败：topology? / devices? / endpoints?（可并用取并集）、holder?、ttl_minutes?".into(),
+                "参数解析失败：topology? / devices? / endpoints?（可并用取并集）、holder?、ttl_minutes?、wait_timeout_ms?".into(),
             );
         };
         let scope = Scope {
@@ -210,24 +365,25 @@ impl TopoTools {
         let wait_ms = a.wait_timeout_ms.unwrap_or(0);
         let outcome = if wait_ms > 0 {
             self.leases
-                .acquire_with_wait(&token, &label, &scope, a.ttl_minutes, wait_ms, state)
+                .acquire_with_wait(&token, &label, &scope, a.ttl_minutes, wait_ms)
                 .await
         } else {
-            self.leases.acquire(&token, &label, &scope, a.ttl_minutes, state)
+            self.leases.acquire(&token, &label, &scope, a.ttl_minutes)
         };
+        let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
         match outcome {
             Ok(l) => ok_text(format!(
-                "已获租约 {}（{}，剩余 {} 分钟）：{}{}",
+                "已获租约 {}（{}，剩余 {} 分钟）：设备 {}{}",
                 l.id,
                 fmt_time(l.expires_at),
                 remaining_minutes(&l),
                 l.grants
                     .iter()
-                    .map(|g| format!("{} {}", g.kind.label(), g.key))
+                    .map(|g| name_of(&g.device))
                     .collect::<Vec<_>>()
                     .join("、"),
                 // 提醒续租手段，长任务靠自己保活
-                "\n用完 lease_release 释放；长任务用 lease_renew 顺延。"
+                "\n占用=设备级（全部通道独占）。用完 lease_release 释放；长任务用 lease_renew 顺延。"
             )),
             Err(AcquireError::Conflict(cs)) => {
                 let lines: Vec<String> = cs
@@ -235,7 +391,7 @@ impl TopoTools {
                     .map(|c| {
                         format!(
                             "冲突 {} · 持有 {}（{}，剩余 {} 分钟）",
-                            c.key,
+                            c.device_name,
                             c.holder,
                             c.lease_id,
                             (c.expires_at - chrono::Local::now()).num_minutes().max(0)
@@ -243,7 +399,7 @@ impl TopoTools {
                     })
                     .collect();
                 error_text(format!(
-                    "申请被拒（{} 处冲突，未建立任何租约）：\n{}\n可等其释放/过期后重试，或换范围申请。",
+                    "申请被拒（{} 处冲突，未建立任何租约）：\n{}\n可等其释放/过期后重试，或带 wait_timeout_ms 排队等待。",
                     lines.len(),
                     lines.join("\n")
                 ))
@@ -292,16 +448,17 @@ impl TopoTools {
         if leases.is_empty() {
             return ok_text("本会话当前无活跃租约。".into());
         }
+        let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
         let lines: Vec<String> = leases
             .iter()
             .map(|l| {
                 format!(
-                    "{} · 剩余 {} 分钟 · {}",
+                    "{} · 剩余 {} 分钟 · 设备 {}",
                     l.id,
                     remaining_minutes(l),
                     l.grants
                         .iter()
-                        .map(|g| format!("{} {}", g.kind.label(), g.key))
+                        .map(|g| name_of(&g.device))
                         .collect::<Vec<_>>()
                         .join("、")
                 )
@@ -323,6 +480,29 @@ struct AcquireArgs {
     /// >0 时冲突则服务端排队轮询等待（500ms 重试，上限 10 分钟），到期仍冲突才拒绝。
     #[serde(default)]
     wait_timeout_ms: Option<u64>,
+}
+
+/// device_create/update 的参数（device 字段仅 update 消费）。
+#[derive(Deserialize)]
+struct DeviceArgs {
+    name: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    channels: Vec<device::Channel>,
+}
+
+impl DeviceArgs {
+    fn into_input(self) -> device::DeviceInput {
+        device::DeviceInput {
+            name: self.name,
+            model: self.model,
+            location: self.location,
+            channels: self.channels,
+        }
+    }
 }
 
 fn fmt_time(t: chrono::DateTime<chrono::Local>) -> String {
@@ -361,10 +541,10 @@ impl McpExtension for TopoTools {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "key": { "type": "string", "description": "设备 id 或端口键" },
+                                    "device": { "type": "string", "description": "被测设备 id 或名称（device_list 可查）" },
                                     "note": { "type": "string", "description": "备注，如「被测主板」（可选）" }
                                 },
-                                "required": ["key"]
+                                "required": ["device"]
                             }
                         },
                         "links": {
@@ -372,8 +552,8 @@ impl McpExtension for TopoTools {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "from": { "type": "string", "description": "成员键" },
-                                    "to": { "type": "string", "description": "成员键" },
+                                    "from": { "type": "string", "description": "成员设备 id 或名称" },
+                                    "to": { "type": "string", "description": "成员设备 id 或名称" },
                                     "label": { "type": "string", "description": "连线说明，如 eth0↔port1（可选）" }
                                 },
                                 "required": ["from", "to"]
@@ -397,10 +577,10 @@ impl McpExtension for TopoTools {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "key": { "type": "string" },
+                                    "device": { "type": "string" },
                                     "note": { "type": "string" }
                                 },
-                                "required": ["key"]
+                                "required": ["device"]
                             }
                         },
                         "links": {
@@ -431,14 +611,92 @@ impl McpExtension for TopoTools {
                 }
             }),
             json!({
-                "name": "lease_acquire",
-                "description": "申请租约（排他写权，all-or-nothing）：拓扑整体 / 设备列表 / 端点列表可并用取并集。须会话标识（initialize 的 token，标准客户端自动带头）。冲突整体拒绝并返回各端点当前持有者与到期时间；给 wait_timeout_ms 则冲突时在服务端排队等待，到期仍冲突才拒绝（期间持有者释放/过期即自动获得）。默认 30 分钟，到期自动释放，长任务用 lease_renew 顺延。持有租约后 serial_send/read/clear、port_open 与脚本工具才可用（写闸）。",
+                "name": "device_list",
+                "description": "列出被测设备：名称、通道摘要（串口/SSH 各自目标）、占用状态。设备=被调试的一台机器（如一台交换机），通道=接入方式（串口控制台 + 多条 SSH 登录）。",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "device_get",
+                "description": "查看设备详情：通道明细（SSH 凭据地址、写操作用的端口键）、当前占用。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "topology": { "type": "string", "description": "拓扑 id 或名称（成员并集）" },
-                        "devices": { "type": "array", "items": { "type": "string" }, "description": "设备 id 列表（local=本机全部串口 / SSH 设备 id / 远端设备 id）" },
-                        "endpoints": { "type": "array", "items": { "type": "string" }, "description": "端口键列表（支持别名，服务端定型）" },
+                        "device": { "type": "string", "description": "设备 id 或名称" }
+                    },
+                    "required": ["device"]
+                }
+            }),
+            json!({
+                "name": "device_create",
+                "description": "注册被测设备。channels 为接入通道：{type:serial,port=端口键}（本机 COM4 或级联键 devB::COM4）与 {type:ssh,ref=SSH 凭据 id}（凭据可在 SSH 管理先建；同一端口/凭据只能属于一台设备）。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "设备名（同表唯一，如「车间交换机#3」）" },
+                        "model": { "type": "string", "description": "型号（可选）" },
+                        "location": { "type": "string", "description": "位置（可选）" },
+                        "channels": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "enum": ["serial", "ssh"] },
+                                    "port": { "type": "string", "description": "type=serial 时的端口键" },
+                                    "ref": { "type": "string", "description": "type=ssh 时的凭据 id" }
+                                },
+                                "required": ["type"]
+                            }
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }),
+            json!({
+                "name": "device_update",
+                "description": "更新被测设备（name/model/location/channels 提供才更新，channels 提供时整体替换）。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "设备 id 或名称" },
+                        "name": { "type": "string" },
+                        "model": { "type": "string" },
+                        "location": { "type": "string" },
+                        "channels": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "enum": ["serial", "ssh"] },
+                                    "port": { "type": "string" },
+                                    "ref": { "type": "string" }
+                                },
+                                "required": ["type"]
+                            }
+                        }
+                    },
+                    "required": ["device", "name"]
+                }
+            }),
+            json!({
+                "name": "device_delete",
+                "description": "删除被测设备（被拓扑引用时拒绝并列出拓扑）。不影响底层端口与 SSH 凭据。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "设备 id 或名称" }
+                    },
+                    "required": ["device"]
+                }
+            }),
+            json!({
+                "name": "lease_acquire",
+                "description": "申请租约（排他写权，设备级独占=all-or-nothing）：拓扑整体 / 被测设备列表可并用取并集；endpoints 为糖（端口键解析到属主设备，未注册端口须先 device_create）。须会话标识（initialize 的 token，标准客户端自动带头）。冲突整体拒绝并返回各设备当前持有者与到期时间；给 wait_timeout_ms 则冲突时在服务端排队等待，到期仍冲突才拒绝。默认 30 分钟，到期自动释放，长任务用 lease_renew 顺延。持有租约后 serial_send/read/clear、port_open 与脚本工具才可用（写闸）。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topology": { "type": "string", "description": "拓扑 id 或名称（成员设备并集）" },
+                        "devices": { "type": "array", "items": { "type": "string" }, "description": "被测设备 id 或名称列表" },
+                        "endpoints": { "type": "array", "items": { "type": "string" }, "description": "端口键列表（糖：解析到属主设备；未注册端口报错引导 device_create）" },
                         "holder": { "type": "string", "description": "持有者自报名（展示与审计用，如 claude/agent-1）" },
                         "ttl_minutes": { "type": "integer", "description": "有效分钟数（默认 30，上限可配）" },
                         "wait_timeout_ms": { "type": "integer", "description": "冲突时服务端排队等待的毫秒数（上限 600000；期间 500ms 轮询重试，持有者释放或过期即获得）" }
@@ -489,10 +747,15 @@ impl McpExtension for TopoTools {
             match name {
                 "topo_list" => Some(self.topo_list().await),
                 "topo_get" => Some(self.topo_get(args, state).await),
-                "topo_create" => Some(self.topo_create(args, state).await),
-                "topo_update" => Some(self.topo_update(args, state).await),
+                "topo_create" => Some(self.topo_create(args).await),
+                "topo_update" => Some(self.topo_update(args).await),
                 "topo_delete" => Some(self.topo_delete(args).await),
-                "lease_acquire" => Some(self.lease_acquire(args, principal, state).await),
+                "device_list" => Some(self.device_list(state).await),
+                "device_get" => Some(self.device_get(args, state).await),
+                "device_create" => Some(self.device_create(args, state).await),
+                "device_update" => Some(self.device_update(args, state).await),
+                "device_delete" => Some(self.device_delete(args).await),
+                "lease_acquire" => Some(self.lease_acquire(args, principal).await),
                 "lease_renew" => Some(self.lease_renew(args, principal).await),
                 "lease_release" => Some(self.lease_release(args, principal).await),
                 "lease_status" => Some(self.lease_status(principal).await),
