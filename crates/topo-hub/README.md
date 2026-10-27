@@ -1,0 +1,29 @@
+# topo-hub
+
+AI 设备调试的拓扑管理平台。设计见 [docs/topo-hub-design.md](../../docs/topo-hub-design.md)。
+
+## 运行
+
+```bash
+cargo run -p topo-hub            # http://127.0.0.1:18800/ · MCP: /mcp
+```
+
+配置目录默认在系统配置目录的 `topo-hub/` 子目录（与 serial-studio 隔离）；
+`SERIAL_STUDIO_CONFIG_DIR` 可覆盖。端口默认 18800，错开 serial-studio 的 18700。
+
+## 前端开发
+
+```bash
+npm install --prefix ui-topo
+npm run build --prefix ui-topo   # 产物嵌入二进制（未构建时 cargo 用占位页）
+npm run dev --prefix ui-topo     # 5175 开发服，/api 代理到 127.0.0.1:18800
+```
+
+## 接入 MCP
+
+```
+claude mcp add --scope user --transport http TopoHub http://<host>:18800/mcp
+```
+
+在 serial_studio 12 个串口/脚本工具之外新增 5 个拓扑工具：
+`topo_list` / `topo_get` / `topo_create` / `topo_update` / `topo_delete`。

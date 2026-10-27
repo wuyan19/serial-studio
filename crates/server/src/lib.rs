@@ -7,7 +7,9 @@ pub mod address;
 pub mod config;
 pub mod device;
 pub mod macros_store;
-mod mcp;
+/// MCP JSON-RPC 层。pub 供二次宿主（topo-hub）的扩展工具做集成测试——
+/// 经 handle_request 走完整调度链（内置 + 扩展），绕过 axum 更轻。
+pub mod mcp;
 pub mod mcp_ext;
 pub mod port_meta_store;
 pub mod protocol;

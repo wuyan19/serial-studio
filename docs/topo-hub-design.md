@@ -18,11 +18,14 @@
 
 | 模块 | 职责 |
 |---|---|
-| `topology_store.rs` | topologies.json 读写 + `topo_bus` 变更广播（照 remotes_store 模式） |
-| `lease.rs` | LeaseManager：租约表、覆盖判定、TTL 清扫、原子申请 |
-| `audit.rs` | audit.jsonl 追加写 |
-| `mcp_topo.rs` | 新 MCP 工具注册与实现；session token 签发 |
-| `router.rs` | 组合 ss-server 路由 + 拓扑/租约 REST + 自嵌 SPA |
+| `topology.rs` | 类型 + 成员定型（resolve_member）+ topologies.json 读写（照 remotes_store 模式） |
+| `api.rs` | 拓扑 REST（/api/topologies CRUD）+ TopoState 组装状态 + 成员展示视图 |
+| `events.rs` | SSE 变更通知流（GET /api/events，topo_bus 扇出） |
+| `mcp_topo.rs` | 拓扑 MCP 工具集（McpExtension 实现） |
+| `lease.rs`（P1） | LeaseManager：租约表、覆盖判定、TTL 清扫、原子申请 |
+| `audit.rs`（P1） | audit.jsonl 追加写 |
+
+路由组装在 `lib.rs::create_router`：ss-server `base_router`（/ws、/api/ports、/mcp，扩展已注入）+ 拓扑路由 + 自嵌 SPA fallback。
 
 ## 3. 数据模型
 
@@ -102,14 +105,15 @@ Held → Preempted  仅人（Web 占用中心），顺带 force_close 相关连�
 
 `topo` 展开为成员并集；成员键已失效（设备删除/端点消失）的跳过并在结果标注，不阻塞申请。
 
-## 6. WS 协议增补（additive）
+## 6. 通知通道：SSE（实现修正）
 
-`protocol.rs` 追加，遵守既有两处同步纪律（`ui/src/transport.ts`）：
+设计初稿拟增补 ss-server 的 WS 协议（ClientMsg/ServerMsg 加拓扑消息），实施时改为 **SSE**：`GET /api/events` 订阅 `topo_bus`，变更推 `topo_changed` 事件，客户端重拉 REST。理由：
 
-- ClientMsg：`TopoList` / `TopoSave`（全量 upsert）/ `TopoDelete` / `LeaseAcquire` / `LeaseRenew` / `LeaseRelease` / `LeasePreempt`（仅占用中心）
-- ServerMsg：`TopoChanged`（重拉拓扑）/ `Leases`（全量快照，连接时与每次变更后推）
+- 不动 `protocol.rs` 与 DeviceClient 的反序列化路径——未知消息类型对远端设备客户端是风险面，拓扑通知与串口终端数据面本就无关；
+- 命令面 REST、通知面 SSE，ui-topo 不必为拓扑管理绑进终端 WS 词典（终端视图未来仍走 /ws 拿数据帧）；
+- P1 的租约事件（`lease_changed`）走同一条流，机制复用。
 
-广播沿用 meta_bus 模式：`topo_bus`、`lease_bus` 各一条 broadcast 通道。
+代价：需要主动通知的浏览器页面各持一条 EventSource（连接数多一条）；`lease_acquire` 的排队唤醒（P2）若要低延迟推送，届时再评估是否升级 WS。
 
 ## 7. UI 信息架构（ui-topo）
 
@@ -131,7 +135,7 @@ settings.json 增补：`lease_ttl_minutes`（默认 30）、`lease_max_ttl_minut
 
 ## 9. 分期与测试
 
-- **P0**：topo-hub bin + ui-topo 壳（复用路由、自嵌 SPA）、拓扑 store 与 CRUD（MCP 5 工具 + WS + UI 管理页）。
+- **P0**（已完成）：topo-hub bin + ui-topo 壳（复用路由、自嵌 SPA）、拓扑 store 与 CRUD（MCP 5 工具 + REST/SSE + UI 管理页）。
 - **P1**：session token、LeaseManager、写闸、审计、占用中心与占用徽章。
 - **P2**：拆 `ss-device` 合回 main、拓扑图、排队通知（需 MCP 上 SSE）、API key、脚本跨端口写拦截下沉。
 
