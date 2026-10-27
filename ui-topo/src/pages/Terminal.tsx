@@ -1,6 +1,7 @@
 /** 终端页：端口选择 → （串口）参数对话框 / （SSH）直开 → xterm 标签页。
- * SSH 失败闭环抄 serial-studio：auth_failed 重输密码（更新记录后重开）、
- * host_key_unknown/changed 指纹确认（ssh_trust_host 后重开）。 */
+ * 数据回流：WS 二进制帧按端口键路由到各 tab 的 TermHandle（此前缺失，终端空白）。
+ * 回调全部 useCallback 稳定 + TermView 内部再 ref 化——双保险防 xterm 重建风暴。
+ * SSH 失败闭环抄 serial-studio：auth_failed 重输密码、host_key_* 指纹确认。 */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, channelPortKey, type Device, type PortView } from "../api";
@@ -25,18 +26,23 @@ export default function Terminal() {
   const [picker, setPicker] = useState(false);
   const [pendingSerial, setPendingSerial] = useState<PortView | null>(null);
   const [sshFail, setSshFail] = useState<{ port: string; host: SshHost | undefined; error: SshOpenError } | null>(null);
+  const [lastError, setLastError] = useState("");
   const handles = useRef(new Map<string, TermHandle>());
   const [connLost, setConnLost] = useState(false);
 
   useEffect(() => {
     const offPorts = ws.on("ports", setPorts);
+    // 数据回流：二进制帧 → 对应 tab 的 xterm（此前缺失，终端永远空白）
+    const offData = ws.on("data", (port, data) => handles.current.get(port)?.write(data));
     const offClosed = ws.on("closed", (port) => {
       setTabs((ts) => ts.filter((t) => t.port !== port));
+      handles.current.delete(port);
     });
     const offConn = ws.on("connected", (on) => setConnLost(!on));
     api.devices().then(setDevices).catch(() => {});
     return () => {
       offPorts();
+      offData();
       offClosed();
       offConn();
     };
@@ -49,6 +55,7 @@ export default function Terminal() {
 
   const openPort = useCallback(
     async (p: PortView, config?: SerialConfig) => {
+      setLastError("");
       try {
         const r = await ws.open(p.name, config as unknown as Record<string, unknown>);
         addTab(r.port, p.alias ? `${p.alias}（${p.name}）` : p.name);
@@ -57,15 +64,16 @@ export default function Terminal() {
         if (err.ssh) {
           const hostId = p.name.split("::")[0];
           setSshFail({ port: p.name, host: sshHosts.find((h) => h.id === hostId), error: err.ssh });
+          return;
         }
-        // 非 SSH 错误静默（toast 体系未搬；错误信息经失败闭环或控制台可查）
-        console.warn("open failed:", err.message);
+        // 非 SSH 失败必须可见（此前只 console.warn，用户无从得知"为什么没反应"）
+        setLastError(`打开 ${p.name} 失败：${err.message}`);
       }
     },
     [addTab, sshHosts],
   );
 
-  // 入口：?open=PORT（设备库双击直达）→ 按类别走串口参数或直开
+  // 入口：?open=PORT（设备通道/设备库双击直达）→ 按类别走串口参数或直开
   const bootRef = useRef(false);
   useEffect(() => {
     if (bootRef.current) return;
@@ -98,6 +106,17 @@ export default function Terminal() {
       return next;
     });
   };
+
+  // TermView 回调：稳定引用（TermView 内部还有 ref 兜底，这里防的是父渲染扩散）
+  const handleWrite = useCallback((port: string, data: string) => ws.write(port, data), []);
+  const handleResize = useCallback(
+    (port: string, cols: number, rows: number) => ws.resize(port, cols, rows),
+    [],
+  );
+  const handleReady = useCallback((port: string, h: TermHandle) => {
+    handles.current.set(port, h);
+    h.focus();
+  }, []);
 
   /** SSH 认证闭环：重输密码。协议无"仅本次密码"通道——勾选更新（默认）落库后
    *  重开必成；不勾选则按旧记录重试（旧密码错时会再弹本框，用户自然勾上）。 */
@@ -139,9 +158,18 @@ export default function Terminal() {
         </div>
       </div>
 
+      {lastError && (
+        <p className="error" style={{ marginTop: -6 }}>
+          {lastError}{" "}
+          <button className="link" onClick={() => setLastError("")}>
+            关闭
+          </button>
+        </p>
+      )}
+
       {tabs.length === 0 ? (
         <div className="term-empty">
-          <p className="muted">尚无终端。点「打开端口」或到设备库双击端口。</p>
+          <p className="muted">尚无终端。点「打开端口」或到设备页的通道行开终端。</p>
         </div>
       ) : (
         <div className="term-tabs">
@@ -150,7 +178,10 @@ export default function Terminal() {
               <button
                 key={t.port}
                 className={`term-tab${active === t.port ? " term-tab--active" : ""}`}
-                onClick={() => setActive(t.port)}
+                onClick={() => {
+                  setActive(t.port);
+                  handles.current.get(t.port)?.focus();
+                }}
                 title={t.port}
               >
                 <span className="term-tab__label">{t.label}</span>
@@ -171,12 +202,9 @@ export default function Terminal() {
               <div key={t.port} className="term-pane" style={{ display: active === t.port ? "block" : "none" }}>
                 <TermView
                   port={t.port}
-                  onWrite={(port, data) => ws.write(port, data)}
-                  onResize={(port, cols, rows) => ws.resize(port, cols, rows)}
-                  onReady={(h) => {
-                    handles.current.set(t.port, h);
-                    h.focus();
-                  }}
+                  onWrite={handleWrite}
+                  onResize={handleResize}
+                  onReady={(h) => handleReady(t.port, h)}
                 />
               </div>
             ))}
