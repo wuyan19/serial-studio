@@ -43,8 +43,19 @@ pub struct Topology {
     pub description: String,
     #[serde(default)]
     pub members: Vec<TopologyMember>,
+    /// 设备间连线（拓扑图渲染用）。from/to 引用成员键（创建/修改时校验）。
+    #[serde(default)]
+    pub links: Vec<TopologyLink>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopologyLink {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// 创建/修改请求里的原始成员输入（key 未定型，可以是别名/昵称作用域）。
@@ -53,6 +64,15 @@ pub struct MemberInput {
     pub key: String,
     #[serde(default)]
     pub note: Option<String>,
+}
+
+/// 创建/修改请求里的原始连线输入（from/to 未定型，可写别名）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinkInput {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 // ===== 存储 =====
@@ -119,10 +139,12 @@ fn now() -> String {
 }
 
 /// 创建拓扑：成员逐个定型（全部合法才落盘），返回错误列出全部非法键。
+/// 连线端点定型后须与成员键精确匹配（成员的子端点不算，写成员键本身）。
 pub fn create(
     name: &str,
     description: &str,
     members: &[MemberInput],
+    links: &[LinkInput],
     state: &AppState,
 ) -> Result<Topology, String> {
     let name = name.trim();
@@ -134,11 +156,14 @@ pub fn create(
         return Err(format!("拓扑名称「{name}」已存在，请换一个"));
     }
     let resolved = resolve_all(members, state)?;
+    let keys: Vec<&String> = resolved.iter().map(|m| &m.key).collect();
+    let resolved_links = resolve_links(links, &keys, state)?;
     let topo = Topology {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.into(),
         description: description.trim().into(),
         members: resolved,
+        links: resolved_links,
         created_at: now(),
         updated_at: now(),
     };
@@ -147,12 +172,13 @@ pub fn create(
     Ok(topo)
 }
 
-/// 更新拓扑：名称/描述/成员均可选更新；成员提供时整体替换（同样全量定型）。
+/// 更新拓扑：名称/描述/成员/连线均可选更新；成员/连线提供时整体替换。
 pub fn update(
     id: &str,
     name: Option<&str>,
     description: Option<&str>,
     members: Option<&[MemberInput]>,
+    links: Option<&[LinkInput]>,
     state: &AppState,
 ) -> Result<Topology, String> {
     let mut list = load();
@@ -172,6 +198,10 @@ pub fn update(
     }
     if let Some(m) = members {
         topo.members = resolve_all(m, state)?;
+    }
+    if let Some(l) = links {
+        let keys: Vec<&String> = topo.members.iter().map(|m| &m.key).collect();
+        topo.links = resolve_links(l, &keys, state)?;
     }
     topo.updated_at = now();
     let updated = topo.clone();
@@ -205,6 +235,47 @@ fn resolve_all(inputs: &[MemberInput], state: &AppState) -> Result<Vec<TopologyM
     }
     if errors.is_empty() {
         Ok(members)
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+/// 连线定型：from/to 各经成员定型（别名可用），端点须与成员键精确匹配且不自环。
+fn resolve_links(
+    inputs: &[LinkInput],
+    member_keys: &[&String],
+    state: &AppState,
+) -> Result<Vec<TopologyLink>, String> {
+    let mut links = Vec::with_capacity(inputs.len());
+    let mut errors = Vec::new();
+    for input in inputs {
+        let resolve_end = |raw: &str| -> Result<TopologyMember, String> {
+            let m = resolve_member(raw, state)?;
+            if !member_keys.contains(&&m.key) {
+                return Err(format!(
+                    "连线端点「{raw}」（定型为 {key}）不是本拓扑成员，请先加入成员或改用成员键",
+                    key = m.key
+                ));
+            }
+            Ok(m)
+        };
+        match (resolve_end(&input.from), resolve_end(&input.to)) {
+            (Ok(f), Ok(t)) => {
+                if f.key == t.key {
+                    errors.push(format!("连线「{} ↔ {}」两端是同一成员", input.from, input.to));
+                } else {
+                    links.push(TopologyLink {
+                        from: f.key,
+                        to: t.key,
+                        label: input.label.clone().filter(|l| !l.trim().is_empty()),
+                    });
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => errors.push(e),
+        }
+    }
+    if errors.is_empty() {
+        Ok(links)
     } else {
         Err(errors.join("\n"))
     }
@@ -345,19 +416,61 @@ mod tests {
         crate::test_support::ensure_test_config_dir();
         let state = make_state();
 
-        let t = create("冒烟拓扑", "测试", &[member("ssh-x1")], &state)
+        let t = create("冒烟拓扑", "测试", &[member("ssh-x1")], &[], &state)
             .expect("创建");
         assert_eq!(t.members.len(), 1);
         assert_eq!(find(&t.id).unwrap().name, "冒烟拓扑");
-        assert!(create("冒烟拓扑", "", &[], &state).is_err(), "重名拒绝");
+        assert!(create("冒烟拓扑", "", &[], &[], &state).is_err(), "重名拒绝");
 
-        let t2 = update(&t.id, None, Some("改述"), None, &state).unwrap();
+        let t2 = update(&t.id, None, Some("改述"), None, None, &state).unwrap();
         assert_eq!(t2.description, "改述");
         assert_eq!(t2.created_at, t.created_at, "未动成员不改 created_at");
 
         let removed = delete(&t.id).unwrap();
         assert_eq!(removed.name, "冒烟拓扑");
         assert!(delete(&t.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn links_resolve_and_validate() {
+        let _g = TEST_LOCK.lock().unwrap();
+        crate::test_support::ensure_test_config_dir();
+        let state = make_state();
+        // 名称唯一化：topologies.json 在共享 tempdir 跨测试运行持久
+        let n = crate::test_support::unique_name("连线");
+
+        let members = vec![member("ssh-x1"), member("ssh-x2")];
+        let links = vec![LinkInput {
+            from: "ssh-x1".into(),
+            to: "ssh-x2::shell".into(), // 端点定型后 ≠ 成员键（成员是设备 ssh-x2）
+            label: Some("console".into()),
+        }];
+        let err = create(&format!("坏-{n}"), "", &members, &links, &state).unwrap_err();
+        assert!(err.contains("不是本拓扑成员"), "{err}");
+
+        // 两端均为成员键 → 通过并定型
+        let links_ok = vec![LinkInput {
+            from: "ssh-x1".into(),
+            to: "ssh-x2".into(),
+            label: None,
+        }];
+        let t = create(&n, "", &members, &links_ok, &state).unwrap();
+        assert_eq!(t.links.len(), 1);
+        assert_eq!(t.links[0].from, "ssh-x1");
+
+        // 自环拒绝
+        let self_loop = vec![LinkInput {
+            from: "ssh-x1".into(),
+            to: "ssh-x1".into(),
+            label: None,
+        }];
+        assert!(create(&format!("环-{n}"), "", &members, &self_loop, &state).is_err());
+
+        // update 整体替换 links；成员未变时按现行成员校验
+        let updated = update(&t.id, None, None, None, Some(&[]), &state).unwrap();
+        assert!(updated.links.is_empty(), "空 links 清空连线");
+
+        delete(&t.id).unwrap();
     }
 
     #[tokio::test]
@@ -369,6 +482,7 @@ mod tests {
             "全错拓扑",
             "",
             &[member("nope-a"), member("nope-b")],
+            &[],
             &state,
         )
         .unwrap_err();

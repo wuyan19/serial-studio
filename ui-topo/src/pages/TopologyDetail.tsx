@@ -7,12 +7,14 @@ import {
   type LeaseView,
   type TopologyDetail,
 } from "../api";
+import TopologyGraph from "./TopologyGraph";
 
 export default function TopologyDetail() {
   const { id } = useParams();
   const [detail, setDetail] = useState<TopologyDetail | null>(null);
   const [leases, setLeases] = useState<LeaseView[]>([]);
   const [error, setError] = useState("");
+  const [view, setView] = useState<"table" | "graph">("table");
 
   const refresh = useCallback(() => {
     if (!id) return;
@@ -36,14 +38,29 @@ export default function TopologyDetail() {
       <div className="page-head">
         <h1>{detail.name}</h1>
         <div className="row-actions">
-          <Link className="btn" to={`/topologies/${detail.id}/edit`}>
+          <button
+            className={`btn ${view === "table" ? "" : "secondary"}`}
+            onClick={() => setView("table")}
+          >
+            列表
+          </button>
+          <button
+            className={`btn ${view === "graph" ? "" : "secondary"}`}
+            onClick={() => setView("graph")}
+          >
+            图
+          </button>
+          <Link className="btn secondary" to={`/topologies/${detail.id}/edit`}>
             编辑
           </Link>
           <span className="muted">id {detail.id}</span>
         </div>
       </div>
       {detail.description && <p className="muted">{detail.description}</p>}
-      <table>
+      {view === "graph" ? (
+        <TopologyGraph topo={detail} memberViews={detail.member_views} leases={leases} />
+      ) : (
+        <table>
         <thead>
           <tr>
             <th>类别</th>
@@ -78,7 +95,8 @@ export default function TopologyDetail() {
             );
           })}
         </tbody>
-      </table>
+        </table>
+      )}
       <p className="muted">
         更新于 {detail.updated_at} · AI 引用名 <span className="mono">{detail.name}</span>
       </p>

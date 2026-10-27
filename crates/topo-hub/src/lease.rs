@@ -175,9 +175,7 @@ impl LeaseManager {
         self.cfg.enable_gate
     }
 
-    /// 申请：scope 展开为 grant 集（拓扑成员失效的跳过并注明），与全部活跃
-    /// 租约两两判交，任一冲突整体拒绝（不建部分租约）。TTL 缺省用配置值，
-    /// 传入则夹取 [1, max_ttl]。
+    /// 申请（立即返回）：try_acquire + 审计。等待版见 [`acquire_with_wait`]。
     pub fn acquire(
         &self,
         token: &str,
@@ -186,8 +184,106 @@ impl LeaseManager {
         ttl_minutes: Option<u64>,
         state: &AppState,
     ) -> Result<Lease, AcquireError> {
-        let (grants, skipped) = expand_scope(scope, state).map_err(AcquireError::Invalid)?;
-        let keys: Vec<String> = grants.iter().map(|g| g.key.clone()).collect();
+        let outcome = self.try_acquire(token, label, scope, ttl_minutes, state);
+        let ttl = ttl_minutes
+            .unwrap_or(self.cfg.ttl_minutes)
+            .clamp(1, self.cfg.max_ttl_minutes.max(1));
+        match &outcome {
+            Ok(lease) => {
+                let keys: Vec<String> = lease.grants.iter().map(|g| g.key.clone()).collect();
+                audit::log(
+                    audit::EV_ACQUIRE,
+                    Some(token),
+                    label,
+                    Some(&lease.id),
+                    &keys,
+                    &format!("TTL {ttl} 分钟"),
+                );
+            }
+            Err(AcquireError::Conflict(cs)) => {
+                let ckeys: Vec<String> = cs.iter().map(|c| c.key.clone()).collect();
+                audit::log(
+                    audit::EV_DENY,
+                    Some(token),
+                    label,
+                    None,
+                    &ckeys,
+                    &format!("冲突 {} 处", cs.len()),
+                );
+            }
+            Err(AcquireError::Invalid(_)) => {}
+        }
+        outcome
+    }
+
+    /// 排队申请：冲突时每 500ms 重试（惰性清扫让到期租约自然腾位），到
+    /// wait_ms 仍冲突才拒绝并审计一次。Invalid（范围本身非法）立即返回不重试。
+    /// wait 上限 10 分钟（AI 长等待应自行轮询 lease_status）。
+    pub async fn acquire_with_wait(
+        &self,
+        token: &str,
+        label: &str,
+        scope: &Scope,
+        ttl_minutes: Option<u64>,
+        wait_ms: u64,
+        state: &AppState,
+    ) -> Result<Lease, AcquireError> {
+        const MAX_WAIT_MS: u64 = 600_000;
+        let wait_ms = wait_ms.min(MAX_WAIT_MS);
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_millis(wait_ms);
+        let ttl = ttl_minutes
+            .unwrap_or(self.cfg.ttl_minutes)
+            .clamp(1, self.cfg.max_ttl_minutes.max(1));
+        loop {
+            let outcome = self.try_acquire(token, label, scope, ttl_minutes, state);
+            match outcome {
+                Ok(lease) => {
+                    let keys: Vec<String> = lease.grants.iter().map(|g| g.key.clone()).collect();
+                    audit::log(
+                        audit::EV_ACQUIRE,
+                        Some(token),
+                        label,
+                        Some(&lease.id),
+                        &keys,
+                        &format!("等待 {} 秒后获得，TTL {} 分钟", started.elapsed().as_secs(), ttl),
+                    );
+                    return Ok(lease);
+                }
+                Err(AcquireError::Invalid(e)) => return Err(AcquireError::Invalid(e)),
+                Err(AcquireError::Conflict(cs)) => {
+                    if std::time::Instant::now() >= deadline {
+                        let ckeys: Vec<String> = cs.iter().map(|c| c.key.clone()).collect();
+                        audit::log(
+                            audit::EV_DENY,
+                            Some(token),
+                            label,
+                            None,
+                            &ckeys,
+                            &format!(
+                                "等待 {} 秒后仍冲突 {} 处",
+                                started.elapsed().as_secs(),
+                                cs.len()
+                            ),
+                        );
+                        return Err(AcquireError::Conflict(cs));
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
+    /// 无审计的单次申请（acquire/acquire_with_wait 的公共内核）。
+    fn try_acquire(
+        &self,
+        token: &str,
+        label: &str,
+        scope: &Scope,
+        ttl_minutes: Option<u64>,
+        state: &AppState,
+    ) -> Result<Lease, AcquireError> {
+        let (grants, _skipped) = expand_scope(scope, state).map_err(AcquireError::Invalid)?;
         let mut leases = self.leases.lock().expect("lease lock poisoned");
         self.drop_expired_locked(&mut leases);
 
@@ -206,15 +302,6 @@ impl LeaseManager {
             }
         }
         if !conflicts.is_empty() {
-            let ckeys: Vec<String> = conflicts.iter().map(|c| c.key.clone()).collect();
-            audit::log(
-                audit::EV_DENY,
-                Some(token),
-                label,
-                None,
-                &ckeys,
-                &format!("冲突 {} 处", conflicts.len()),
-            );
             return Err(AcquireError::Conflict(conflicts));
         }
 
@@ -229,18 +316,6 @@ impl LeaseManager {
             acquired_at: chrono::Local::now(),
             expires_at: chrono::Local::now() + Duration::from_secs(ttl * 60),
         };
-        let mut detail = format!("TTL {ttl} 分钟");
-        if !skipped.is_empty() {
-            detail.push_str(&format!("；跳过失效成员: {}", skipped.join("、")));
-        }
-        audit::log(
-            audit::EV_ACQUIRE,
-            Some(token),
-            label,
-            Some(&lease.id),
-            &keys,
-            &detail,
-        );
         leases.push(lease.clone());
         drop(leases);
         let _ = self.bus.send(());
@@ -707,5 +782,55 @@ mod tests {
             .unwrap();
         assert!(m.gate(Some("token-a"), "COM99").is_ok());
         assert!(m.gate(Some("token-b"), "COM99").is_err());
+    }
+
+    /// 排队等待：持有者租约在等待期间过期（惰性清扫腾位）→ 等待者自动获得；
+    /// 无人释放且超时 → 冲突拒绝。
+    #[tokio::test]
+    async fn acquire_with_wait_gets_freed_lease() {
+        let state = make_state();
+        let m = manager(LeaseConfig::default());
+        let a = m
+            .acquire("token-a", "a", &scope(&["ssh-x1"]), None, &state)
+            .unwrap();
+
+        // 后台 600ms 后把 A 的租约拨过期（模拟 TTL 到期/人工释放）
+        let m2 = std::sync::Arc::clone(&m);
+        let id = a.id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            m2.force_expire(&id);
+        });
+
+        let started = std::time::Instant::now();
+        let b = m
+            .acquire_with_wait(
+                "token-b",
+                "b",
+                &scope(&["ssh-x1"]),
+                None,
+                5_000,
+                &state,
+            )
+            .await
+            .expect("等待后应获得");
+        assert_eq!(b.token, "token-b");
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "确实经历了等待轮询"
+        );
+
+        // 无可腾位 + 短等待 → 冲突拒绝
+        let c = m
+            .acquire_with_wait(
+                "token-c",
+                "c",
+                &scope(&["ssh-x1"]),
+                None,
+                300,
+                &state,
+            )
+            .await;
+        assert!(matches!(c, Err(AcquireError::Conflict(_))));
     }
 }

@@ -6,11 +6,18 @@ export interface TopologyMember {
   note?: string;
 }
 
+export interface TopologyLink {
+  from: string;
+  to: string;
+  label?: string;
+}
+
 export interface Topology {
   id: string;
   name: string;
   description: string;
   members: TopologyMember[];
+  links: TopologyLink[];
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +38,12 @@ export interface TopologyDetail extends Topology {
 export interface MemberInput {
   key: string;
   note?: string;
+}
+
+export interface LinkInput {
+  from: string;
+  to: string;
+  label?: string;
 }
 
 export interface PortView {
@@ -81,11 +94,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   topologies: () => req<Topology[]>("/api/topologies"),
   topology: (id: string) => req<TopologyDetail>(`/api/topologies/${id}`),
-  createTopology: (body: { name: string; description?: string; members?: MemberInput[] }) =>
-    req<Topology>("/api/topologies", { method: "POST", body: JSON.stringify(body) }),
+  createTopology: (body: {
+    name: string;
+    description?: string;
+    members?: MemberInput[];
+    links?: LinkInput[];
+  }) => req<Topology>("/api/topologies", { method: "POST", body: JSON.stringify(body) }),
   updateTopology: (
     id: string,
-    body: { name?: string; description?: string; members?: MemberInput[] },
+    body: {
+      name?: string;
+      description?: string;
+      members?: MemberInput[];
+      links?: LinkInput[];
+    },
   ) => req<Topology>(`/api/topologies/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteTopology: (id: string) => req<void>(`/api/topologies/${id}`, { method: "DELETE" }),
   leases: () => req<LeaseView[]>("/api/leases"),

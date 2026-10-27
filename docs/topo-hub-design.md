@@ -38,6 +38,7 @@
 // topologies.json（持久化）
 { "id": "uuid", "name": "唯一名", "description": "",
   "members": [{ "kind": "device|endpoint", "key": "sshUuid", "note": "被测主板" }],
+  "links": [{ "from": "成员键", "to": "成员键", "label": "eth0↔port1" }],
   "created_at": "...", "updated_at": "..." }
 
 // 租约（纯内存，不入盘）
@@ -86,7 +87,7 @@ Held → Preempted  仅人（Web 占用中心）
 
 被闸拒绝时错误信息引导先 `lease_acquire`，并附当前持有者与到期时间。
 
-**失败返回**：每个冲突端点返回 `{key, holder_label, expires_at}`，AI 自行决策重试或换拓扑。
+**失败返回与排队**：每个冲突端点返回 `{key, holder_label, expires_at}`。`lease_acquire` 带 `wait_timeout_ms`（上限 10 分钟）时服务端 500ms 轮询排队，持有者释放或过期即自动获得，超时仍冲突才拒绝——AI 长等待自行轮询 `lease_status`。
 
 ## 5. MCP 会话与工具
 
@@ -141,6 +142,7 @@ Held → Preempted  仅人（Web 占用中心）
 - **P0**（已完成）：topo-hub bin + ui-topo 壳（复用路由、自嵌 SPA）、拓扑 store 与 CRUD（MCP 5 工具 + REST/SSE + UI 管理页）。
 - **P1**（已完成）：session token（initialize 签发，头/参数双通道）、LeaseManager（原子申请/TTL/续租/释放/强释放）、写闸（仅 MCP 来源的 send/read/clear/脚本，拒绝文案附持有者）、审计、占用中心与占用徽章。
 - **P1.5**（已完成）：MCP `port_open` / `port_close`（ss-server 内置）——AI 全流程无人值守补齐；强释放顺带收回该会话开的端口。
-- **P2**：拆 `ss-device` 合回 main、拓扑图、排队通知（需 MCP 上 SSE）、API key、脚本跨端口写拦截下沉。
+- **P2 已交付**：拓扑连线（`links` 数据模型 + 成员引用/自环校验 + UI 连线编辑器）与拓扑图视图（@xyflow/react，节点按设备分组、占用高亮、圆形自动布局）；排队等待（`lease_acquire` 的 `wait_timeout_ms`，服务端轮询，无需 transport 升级）。
+- **P2 剩余**：拆 `ss-device` 合回 main、API key、脚本跨端口写拦截下沉、图布局持久化。
 
 测试：lease 单元（原子性/冲突矩阵：device×endpoint×实例/TTL 边界/覆盖判定）、token 工具集成、store CRUD；冒烟沿用隔离实例方式（`SERIAL_STUDIO_CONFIG_DIR` + 错峰端口）。

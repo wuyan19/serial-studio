@@ -11,7 +11,7 @@
 
 use crate::api::member_views;
 use crate::lease::{remaining_minutes, AcquireError, LeaseManager, Scope};
-use crate::topology::{self, MemberInput};
+use crate::topology::{self, LinkInput, MemberInput};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use ss_server::mcp_ext::McpExtension;
@@ -83,15 +83,24 @@ impl TopoTools {
             }
             lines.push(line);
         }
+        for l in &topo.links {
+            let label = l.label.as_deref().unwrap_or("");
+            lines.push(format!(
+                "连接 {} ↔ {}{}",
+                l.from,
+                l.to,
+                if label.is_empty() { String::new() } else { format!(" · {label}") }
+            ));
+        }
         ok_text(lines.join("\n"))
     }
 
     async fn topo_create(&self, args: Value, state: &AppState) -> Value {
         let parsed: Result<CreateArgs, _> = serde_json::from_value(args);
         let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 name（必填）、description?、members: [{key, note?}]".into());
+            return error_text("参数解析失败：需要 name（必填）、description?、members: [{key, note?}]、links: [{from, to, label?}]".into());
         };
-        match topology::create(&a.name, &a.description, &a.members, state) {
+        match topology::create(&a.name, &a.description, &a.members, &a.links, state) {
             Ok(t) => {
                 let _ = self.bus.send(());
                 ok_text(format!(
@@ -106,13 +115,14 @@ impl TopoTools {
     async fn topo_update(&self, args: Value, state: &AppState) -> Value {
         let parsed: Result<UpdateArgs, _> = serde_json::from_value(args);
         let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 topo（id 或名称），name?/description?/members? 提供才更新".into());
+            return error_text("参数解析失败：需要 topo（id 或名称），name?/description?/members?/links? 提供才更新".into());
         };
         match topology::update(
             &a.topo,
             a.name.as_deref(),
             a.description.as_deref(),
             a.members.as_deref(),
+            a.links.as_deref(),
             state,
         ) {
             Ok(t) => {
@@ -147,6 +157,8 @@ struct CreateArgs {
     description: String,
     #[serde(default)]
     members: Vec<MemberInput>,
+    #[serde(default)]
+    links: Vec<LinkInput>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +167,7 @@ struct UpdateArgs {
     name: Option<String>,
     description: Option<String>,
     members: Option<Vec<MemberInput>>,
+    links: Option<Vec<LinkInput>>,
 }
 
 impl TopoTools {
@@ -194,7 +207,15 @@ impl TopoTools {
             .holder
             .filter(|h| !h.trim().is_empty())
             .unwrap_or_else(|| format!("session-{}", &token[..8.min(token.len())]));
-        match self.leases.acquire(&token, &label, &scope, a.ttl_minutes, state) {
+        let wait_ms = a.wait_timeout_ms.unwrap_or(0);
+        let outcome = if wait_ms > 0 {
+            self.leases
+                .acquire_with_wait(&token, &label, &scope, a.ttl_minutes, wait_ms, state)
+                .await
+        } else {
+            self.leases.acquire(&token, &label, &scope, a.ttl_minutes, state)
+        };
+        match outcome {
             Ok(l) => ok_text(format!(
                 "已获租约 {}（{}，剩余 {} 分钟）：{}{}",
                 l.id,
@@ -299,6 +320,9 @@ struct AcquireArgs {
     endpoints: Vec<String>,
     holder: Option<String>,
     ttl_minutes: Option<u64>,
+    /// >0 时冲突则服务端排队轮询等待（500ms 重试，上限 10 分钟），到期仍冲突才拒绝。
+    #[serde(default)]
+    wait_timeout_ms: Option<u64>,
 }
 
 fn fmt_time(t: chrono::DateTime<chrono::Local>) -> String {
@@ -326,7 +350,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "topo_create",
-                "description": "创建拓扑。成员键两种粒度：设备 id（如 SSH 设备 uuid、远端设备 id、local=本机全部串口）或端口键（本机 COM3、sshUuid::shell、别名/昵称作用域亦可，服务端定型）。键须真实存在，全部合法才创建。",
+                "description": "创建拓扑。成员键两种粒度：设备 id（如 SSH 设备 uuid、远端设备 id、local=本机全部串口）或端口键（本机 COM3、sshUuid::shell、别名/昵称作用域亦可，服务端定型）。键须真实存在，全部合法才创建。links 描述设备间连线（拓扑图渲染用），from/to 引用成员键。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -342,6 +366,18 @@ impl McpExtension for TopoTools {
                                 },
                                 "required": ["key"]
                             }
+                        },
+                        "links": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string", "description": "成员键" },
+                                    "to": { "type": "string", "description": "成员键" },
+                                    "label": { "type": "string", "description": "连线说明，如 eth0↔port1（可选）" }
+                                },
+                                "required": ["from", "to"]
+                            }
                         }
                     },
                     "required": ["name"]
@@ -349,7 +385,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "topo_update",
-                "description": "更新拓扑：name/description/members 提供才更新，members 提供时整体替换（键同样须全部合法）。",
+                "description": "更新拓扑：name/description/members/links 提供才更新，members/links 提供时整体替换（键同样须全部合法）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -365,6 +401,18 @@ impl McpExtension for TopoTools {
                                     "note": { "type": "string" }
                                 },
                                 "required": ["key"]
+                            }
+                        },
+                        "links": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string" },
+                                    "to": { "type": "string" },
+                                    "label": { "type": "string" }
+                                },
+                                "required": ["from", "to"]
                             }
                         }
                     },
@@ -384,7 +432,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "lease_acquire",
-                "description": "申请租约（排他写权，all-or-nothing）：拓扑整体 / 设备列表 / 端点列表可并用取并集。须会话标识（initialize 的 token，标准客户端自动带头）。冲突整体拒绝并返回各端点当前持有者与到期时间。默认 30 分钟，到期自动释放，长任务用 lease_renew 顺延。持有租约后 serial_send/read/clear 与脚本工具才可用（写闸）。",
+                "description": "申请租约（排他写权，all-or-nothing）：拓扑整体 / 设备列表 / 端点列表可并用取并集。须会话标识（initialize 的 token，标准客户端自动带头）。冲突整体拒绝并返回各端点当前持有者与到期时间；给 wait_timeout_ms 则冲突时在服务端排队等待，到期仍冲突才拒绝（期间持有者释放/过期即自动获得）。默认 30 分钟，到期自动释放，长任务用 lease_renew 顺延。持有租约后 serial_send/read/clear、port_open 与脚本工具才可用（写闸）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -392,7 +440,8 @@ impl McpExtension for TopoTools {
                         "devices": { "type": "array", "items": { "type": "string" }, "description": "设备 id 列表（local=本机全部串口 / SSH 设备 id / 远端设备 id）" },
                         "endpoints": { "type": "array", "items": { "type": "string" }, "description": "端口键列表（支持别名，服务端定型）" },
                         "holder": { "type": "string", "description": "持有者自报名（展示与审计用，如 claude/agent-1）" },
-                        "ttl_minutes": { "type": "integer", "description": "有效分钟数（默认 30，上限可配）" }
+                        "ttl_minutes": { "type": "integer", "description": "有效分钟数（默认 30，上限可配）" },
+                        "wait_timeout_ms": { "type": "integer", "description": "冲突时服务端排队等待的毫秒数（上限 600000；期间 500ms 轮询重试，持有者释放或过期即获得）" }
                     }
                 }
             }),

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api, type MemberInput, type PortView, type Topology } from "../api";
+import {
+  api,
+  type LinkInput,
+  type MemberInput,
+  type PortView,
+  type Topology,
+} from "../api";
 
 /** 成员编辑行：键（datalist 给端口/设备建议）+ 备注。 */
 function MemberRow({
@@ -48,6 +54,7 @@ export default function TopologyEdit() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [members, setMembers] = useState<MemberInput[]>([{ key: "" }]);
+  const [links, setLinks] = useState<LinkInput[]>([]);
   const [ports, setPorts] = useState<PortView[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -61,6 +68,7 @@ export default function TopologyEdit() {
         setName(t.name);
         setDescription(t.description);
         setMembers(t.members.map((m) => ({ key: m.key, note: m.note })));
+        setLinks(t.links.map((l) => ({ from: l.from, to: l.to, label: l.label })));
       })
       .catch((e) => setError(String(e.message ?? e)));
   }, [id, editing]);
@@ -74,6 +82,12 @@ export default function TopologyEdit() {
     return [...ids, ...ports.map((p) => p.name)];
   }, [ports]);
 
+  /** 连线选单：当前表单里的成员键。 */
+  const memberKeys = useMemo(
+    () => members.map((m) => m.key.trim()).filter(Boolean),
+    [members],
+  );
+
   const save = async () => {
     setSaving(true);
     setError("");
@@ -81,6 +95,7 @@ export default function TopologyEdit() {
       name,
       description,
       members: members.filter((m) => m.key.trim()),
+      links: links.filter((l) => l.from && l.to),
     };
     try {
       const t = editing
@@ -133,6 +148,60 @@ export default function TopologyEdit() {
           <p className="muted">
             设备 id = 该设备全部端点；端口键 = 单端点。可输入别名，保存时服务端定型。
           </p>
+        </div>
+        <div>
+          <div className="form-label">连线</div>
+          {links.map((l, i) => (
+            <div className="link-row" key={i}>
+              <select
+                value={l.from}
+                onChange={(e) =>
+                  setLinks(links.map((x, j) => (i === j ? { ...x, from: e.target.value } : x)))
+                }
+              >
+                <option value="">起点…</option>
+                {memberKeys.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <span>↔</span>
+              <select
+                value={l.to}
+                onChange={(e) =>
+                  setLinks(links.map((x, j) => (i === j ? { ...x, to: e.target.value } : x)))
+                }
+              >
+                <option value="">终点…</option>
+                {memberKeys.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <input
+                placeholder="说明（可选）"
+                value={l.label ?? ""}
+                onChange={(e) =>
+                  setLinks(links.map((x, j) => (i === j ? { ...x, label: e.target.value || undefined } : x)))
+                }
+              />
+              <button
+                className="link"
+                onClick={() => setLinks(links.filter((_, j) => j !== i))}
+              >
+                移除
+              </button>
+            </div>
+          ))}
+          <button
+            className="link"
+            onClick={() => setLinks([...links, { from: "", to: "" }])}
+          >
+            + 添加连线
+          </button>
+          <p className="muted">连线两端从成员里选（拓扑图渲染用）。</p>
         </div>
         {error && <p className="error whitespace">{error}</p>}
         <div className="row-actions">

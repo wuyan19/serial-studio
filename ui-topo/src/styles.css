@@ -269,3 +269,35 @@ input:focus {
   color: #ffb454;
   border-color: #ffb454;
 }
+
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.link-row {
+  display: grid;
+  grid-template-columns: 1.4fr auto 1.4fr 1fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.graph {
+  height: 480px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  margin-bottom: 12px;
+}
+
+.react-flow__controls-button {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+  fill: var(--text);
+}

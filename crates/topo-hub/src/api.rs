@@ -5,7 +5,7 @@
 //! 无需把 ui-topo 绑进串口终端的 WS 词典。
 
 use crate::lease;
-use crate::topology::{self, MemberInput, MemberKind, Topology};
+use crate::topology::{self, LinkInput, MemberInput, MemberKind, Topology};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -53,7 +53,7 @@ pub struct LeaseView {
     pub remaining_minutes: i64,
 }
 
-/// 创建/更新请求体。POST 要求 name（description/members 缺省为空）；
+/// 创建/更新请求体。POST 要求 name（description/members/links 缺省为空）；
 /// PUT 全部可选（提供才更新）。
 #[derive(Deserialize)]
 pub struct TopoBody {
@@ -62,6 +62,8 @@ pub struct TopoBody {
     pub description: Option<String>,
     #[serde(default)]
     pub members: Option<Vec<MemberInput>>,
+    #[serde(default)]
+    pub links: Option<Vec<LinkInput>>,
 }
 
 /// 成员的展示视图（detail 页/工具输出共用）：键 + 定型 + 设备标签与在线态。
@@ -120,6 +122,7 @@ async fn create(
         &name,
         body.description.as_deref().unwrap_or(""),
         body.members.as_deref().unwrap_or(&[]),
+        body.links.as_deref().unwrap_or(&[]),
         &state.base,
     )
     .map_err(bad)?;
@@ -149,6 +152,7 @@ async fn update(
         body.name.as_deref(),
         body.description.as_deref(),
         body.members.as_deref(),
+        body.links.as_deref(),
         &state.base,
     )
     .map_err(bad)?;
