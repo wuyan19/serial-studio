@@ -9,6 +9,18 @@
 import type { PortView } from "./api";
 import type { SshOpenError, SshHost as SshHostT } from "./types";
 
+/** Open.config 线格式要求完整 SerialConfig（baud_rate 无默认值，缺字段整条
+ * 消息反序列化被拒——"SSH 打不开且无反馈"的根因）。SSH 端点服务端忽略其
+ * 内容，但必须带全字段。 */
+const FULL_DEFAULT_CONFIG = {
+  baud_rate: 115200,
+  data_bits: "eight",
+  stop_bits: "one",
+  parity: "none",
+  flow_control: "none",
+  line_ending: "lf",
+};
+
 function decodeDataFrame(buf: ArrayBuffer): { port: string; data: Uint8Array } {
   const bytes = new Uint8Array(buf);
   const len = bytes[0];
@@ -83,6 +95,9 @@ export class Ws {
     if (this.closed) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    // 数据帧按 ArrayBuffer 解码——默认 blob 下 new Uint8Array(e.data) 是空数组，
+    // 设备回显会被整帧吞掉（屏幕无输出但 TX 正常，"打字没反应"的根因）
+    ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -162,6 +177,12 @@ export class Ws {
           const err = Object.assign(new Error(message), { ssh: msg.ssh as SshOpenError | undefined });
           this.openResolvers.get(wire)!.reject(err);
           this.openResolvers.delete(wire);
+        } else if (!wire && this.openResolvers.size > 0) {
+          // 消息层错误（如参数解析失败）不带 port——必须兜底 reject 全部在途
+          // open，否则 Promise 永久悬挂（SSH "打不开且无反馈"的第二成因）
+          const err = new Error(message);
+          this.openResolvers.forEach((c) => c.reject(err));
+          this.openResolvers.clear();
         }
         break;
       }
@@ -199,12 +220,37 @@ export class Ws {
 
   /** 打开端口。UI 恒用规范键（PortView.name，服务端真名）——请求名与回执
    * Acquired.port（resolved 真名）天然一致，按端口配对无歧义。SSH 失败 reject
-   * 带 ssh 结构化分类（auth_failed / host_key_unknown / host_key_changed）。 */
+   * 带 ssh 结构化分类（auth_failed / host_key_unknown / host_key_changed）。
+   * 25s 超时：SSH 建连（TCP+认证+PTY）可能很慢，超时必须反馈而非永久悬挂。 */
   async open(port: string, config?: Record<string, unknown>): Promise<OpenResult> {
     await this.whenOpen();
     return new Promise((resolve, reject) => {
       this.openResolvers.set(port, { resolve, reject });
-      this.send({ action: "open", port, config: config ?? {} });
+      this.send({
+        action: "open",
+        port,
+        config: { ...FULL_DEFAULT_CONFIG, ...(config ?? {}) },
+      });
+      const timer = setTimeout(() => {
+        if (this.openResolvers.delete(port)) {
+          reject(new Error(`打开 ${port} 超时（25 秒无回执；SSH 主机不可达或网络慢）`));
+        }
+      }, 25_000);
+      // 回执到达后清掉超时定时器
+      const entry = this.openResolvers.get(port);
+      if (entry) {
+        const wrapped = {
+          resolve: (r: OpenResult) => {
+            clearTimeout(timer);
+            entry.resolve(r);
+          },
+          reject: (e: Error & { ssh?: SshOpenError }) => {
+            clearTimeout(timer);
+            entry.reject(e);
+          },
+        };
+        this.openResolvers.set(port, wrapped);
+      }
     });
   }
 

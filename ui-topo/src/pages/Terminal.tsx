@@ -55,13 +55,15 @@ export default function Terminal() {
 
   const openPort = useCallback(
     async (p: PortView, config?: SerialConfig) => {
-      setLastError("");
+      setLastError(`正在打开 ${p.name} …（SSH 建连可能数秒）`);
       try {
         const r = await ws.open(p.name, config as unknown as Record<string, unknown>);
+        setLastError("");
         addTab(r.port, p.alias ? `${p.alias}（${p.name}）` : p.name);
       } catch (e) {
         const err = e as Error & { ssh?: SshOpenError };
         if (err.ssh) {
+          setLastError("");
           const hostId = p.name.split("::")[0];
           setSshFail({ port: p.name, host: sshHosts.find((h) => h.id === hostId), error: err.ssh });
           return;
