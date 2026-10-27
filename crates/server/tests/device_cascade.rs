@@ -103,6 +103,7 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
     };
     let manager = Arc::new(SerialManager::new(event_bus.clone(), opener));
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

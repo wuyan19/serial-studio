@@ -424,6 +424,7 @@ async fn boot_ws() -> (String, Arc<SshManager>) {
     devices.bind(Arc::downgrade(&devices));
     let ssh = Arc::new(SshManager::from_registry());
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager,
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -586,6 +587,7 @@ async fn instance_rows_visible_in_list() {
     let ssh = Arc::new(SshManager::empty());
     ssh.update_registry(vec![record("hlist", "192.0.2.50", 22)]);
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

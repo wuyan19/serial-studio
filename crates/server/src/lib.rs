@@ -8,6 +8,7 @@ pub mod config;
 pub mod device;
 pub mod macros_store;
 mod mcp;
+pub mod mcp_ext;
 pub mod port_meta_store;
 pub mod protocol;
 pub mod remotes_store;
@@ -99,6 +100,9 @@ pub struct AppState {
     /// 本实例全局身份(段名=实例 id 的根基)。settings 首启生成落盘,跨重启稳定;
     /// 测试注入固定值不落盘。列表合并与别名索引的环检测语义判据用它。
     pub instance_id: Arc<str>,
+    /// MCP 工具集扩展(topo-hub 等二次宿主注入;串口工具自身不用)。
+    /// create_state 置空,宿主组装时直接改写本字段再进 router。
+    pub mcp_extensions: Vec<Arc<dyn mcp_ext::McpExtension>>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -150,6 +154,7 @@ pub fn create_state() -> AppState {
         ssh,
         addresses,
         instance_id,
+        mcp_extensions: Vec::new(),
     }
 }
 
@@ -544,14 +549,20 @@ fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     res
 }
 
-/// 构造 axum 路由。GUI/headless 共用。
-pub fn create_router(state: AppState) -> Router {
+/// 基础路由（/ws、/api/ports、/mcp），无 fallback。二次宿主（topo-hub）以
+/// base_router 起拼，追加自己的路由并替换 SPA fallback；本仓两个宿主
+/// （Tauri GUI、headless bin）仍走 create_router。
+pub fn base_router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/ports", get(list_ports))
         .route("/mcp", post(mcp::mcp_handler))
-        .fallback(serve_web)
         .with_state(state)
+}
+
+/// 构造 axum 路由。GUI/headless 共用。
+pub fn create_router(state: AppState) -> Router {
+    base_router(state).fallback(serve_web)
 }
 
 /// REST: 列出端口（带别名）。WS 客户端也可通过 `{"action":"list"}` 获取。

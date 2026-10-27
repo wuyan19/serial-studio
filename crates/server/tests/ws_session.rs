@@ -65,6 +65,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -372,6 +373,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         addresses.key_resolver_fn(),
     ));
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

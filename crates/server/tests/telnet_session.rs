@@ -70,6 +70,7 @@ async fn boot() -> (
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus: event_bus.clone(),
         meta_bus: Arc::new(meta_tx),

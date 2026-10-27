@@ -46,7 +46,7 @@ pub async fn handle_request(body: &str, state: &AppState) -> Value {
     let result = match method {
         "initialize" => json!(handle_initialize()),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
-        "tools/list" => json!(handle_tools_list()),
+        "tools/list" => json!(handle_tools_list(&state.mcp_extensions)),
         "tools/call" => handle_tools_call(&params, state).await,
         "prompts/list" => json!(handle_prompts_list()),
         "prompts/get" => json!(handle_prompts_get(&params)),
@@ -73,9 +73,8 @@ fn handle_initialize() -> Value {
     })
 }
 
-fn handle_tools_list() -> Value {
-    json!({
-        "tools": [
+fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtension>]) -> Value {
+    let mut tools: Vec<Value> = json!([
             {
                 "name": "serial_list",
                 "description": "列出所有端口(本机串口/远程设备/SSH 终端):完整键、别名、设备昵称与寻址提示、打开状态,中点分隔的扁平单行。",
@@ -230,8 +229,14 @@ fn handle_tools_list() -> Value {
                     "required": ["name"]
                 }
             }
-        ]
-    })
+    ])
+    .as_array()
+    .cloned()
+    .unwrap_or_default();
+    for ext in extensions {
+        tools.extend(ext.tools());
+    }
+    json!({ "tools": tools })
 }
 
 async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
@@ -253,7 +258,13 @@ async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
         "serial_get_script" => tool_serial_get_script(arguments).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
-        other => error_text(format!("Unknown tool: {}", other)),
+        other => {
+            // 内置未命中 → 委托扩展（topo-hub 等）；扩展也不认得才是真未知。
+            match crate::mcp_ext::dispatch(&state.mcp_extensions, other, arguments, state).await {
+                Some(result) => result,
+                None => error_text(format!("Unknown tool: {}", other)),
+            }
+        }
     }
 }
 
@@ -920,6 +931,7 @@ mod tests {
             devices,
             ssh: Arc::new(crate::ssh::SshManager::empty()),
             instance_id: "inst-mcp-test".into(),
+            mcp_extensions: Vec::new(),
         }
     }
 
@@ -960,6 +972,67 @@ mod tests {
         assert!(names.contains(&"serial_get_script"));
         assert!(names.contains(&"serial_list_scripts"));
         assert!(names.contains(&"serial_delete_script"));
+    }
+
+    /// MCP 扩展点：注入的工具进 tools/list，tools/call 内置未命中时委托扩展，
+    /// 扩展也不认得才报 Unknown tool。
+    struct EchoExt;
+    impl crate::mcp_ext::McpExtension for EchoExt {
+        fn tools(&self) -> Vec<Value> {
+            vec![json!({
+                "name": "echo_test",
+                "description": "测试扩展工具",
+                "inputSchema": { "type": "object", "properties": {} }
+            })]
+        }
+        fn call<'a>(
+            &'a self,
+            name: &'a str,
+            args: Value,
+            _state: &'a AppState,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if name != "echo_test" {
+                    return None;
+                }
+                let msg = args
+                    .get("msg")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("echo")
+                    .to_string();
+                Some(ok_text(msg))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_extension_listed_and_dispatched() {
+        let mut state = make_state();
+        state.mcp_extensions = vec![std::sync::Arc::new(EchoExt)];
+
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 13, "12 内置 + 1 扩展");
+        assert!(tools.iter().any(|t| t["name"] == "echo_test"));
+
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo_test","arguments":{"msg":"hi"}}}"#,
+            &state,
+        )
+        .await;
+        assert_eq!(resp["result"]["content"][0]["text"], "hi");
+
+        // 扩展返回 None(不认得)时透传给下一环——最终仍是 Unknown tool
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"nope"}}"#,
+            &state,
+        )
+        .await;
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool"));
     }
 
     /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_debug_script 应被拒。
