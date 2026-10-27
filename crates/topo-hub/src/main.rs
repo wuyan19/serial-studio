@@ -34,11 +34,19 @@ async fn main() -> anyhow::Result<()> {
     let base = ss_server::create_state();
     base.devices.start();
 
-    let (tx, _) = tokio::sync::broadcast::channel::<()>(16);
-    let state = TopoState {
-        base,
-        topo_bus: std::sync::Arc::new(tx),
-    };
+    let state = TopoState::create(base);
+    // 租约定时清扫：读路径已惰性清扫，这里是无人访问时的兜底（崩溃客户端的
+    // 租约最多多活到下一个整分钟 tick）。
+    {
+        let leases = std::sync::Arc::clone(&state.leases);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                leases.sweep();
+            }
+        });
+    }
     let app = create_router(state);
 
     let addr = format!("{}:{}", args.host, args.port);

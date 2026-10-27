@@ -5,7 +5,9 @@
 //! 自嵌 ui-topo 控制台 SPA。不依赖 tauri-app。
 
 pub mod api;
+pub mod audit;
 pub mod events;
+pub mod lease;
 pub mod mcp_topo;
 pub mod topology;
 pub mod test_support;
@@ -48,12 +50,13 @@ fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     res
 }
 
-/// 组装完整路由：ss-server 基础路由（/mcp 已注入拓扑工具扩展）
-/// + 拓扑 REST + SSE + 自嵌 SPA fallback。
+/// 组装完整路由：ss-server 基础路由（/mcp 已注入拓扑+租约工具扩展与写闸）
+/// + 拓扑/租约 REST + SSE + 自嵌 SPA fallback。
 pub fn create_router(state: TopoState) -> Router {
     let mut base = state.base.clone();
     base.mcp_extensions = vec![std::sync::Arc::new(mcp_topo::TopoTools {
         bus: (*state.topo_bus).clone(),
+        leases: std::sync::Arc::clone(&state.leases),
     })];
     ss_server::base_router(base)
         .merge(api::routes().with_state(state))

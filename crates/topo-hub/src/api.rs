@@ -4,6 +4,7 @@
 //! 这是设计文档 §6 的实现修正：命令面 REST、通知面 SSE，拓扑数据变更频率低，
 //! 无需把 ui-topo 绑进串口终端的 WS 词典。
 
+use crate::lease;
 use crate::topology::{self, MemberInput, MemberKind, Topology};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -16,12 +17,40 @@ use ss_server::AppState;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// topo-hub 组装状态：ss-server 共享运行时 + 拓扑域变更广播。
+/// topo-hub 组装状态：ss-server 共享运行时 + 拓扑/租约两条变更广播 + 租约管理器。
 /// bus 是空通道语义（收发双方只关心"变了"，不传载荷）。
 #[derive(Clone)]
 pub struct TopoState {
     pub base: AppState,
     pub topo_bus: Arc<broadcast::Sender<()>>,
+    pub lease_bus: Arc<broadcast::Sender<()>>,
+    pub leases: Arc<lease::LeaseManager>,
+}
+
+impl TopoState {
+    /// 生产组装点：总线 + 租约管理器（配置读 lease.json）。
+    pub fn create(base: AppState) -> TopoState {
+        let (ttx, _) = broadcast::channel(16);
+        let (ltx, _) = broadcast::channel(16);
+        let leases = lease::LeaseManager::new(lease::load_config(), ltx.clone());
+        TopoState {
+            base,
+            topo_bus: Arc::new(ttx),
+            lease_bus: Arc::new(ltx),
+            leases,
+        }
+    }
+}
+
+/// 活跃租约的 REST 视图（占用中心消费）。
+#[derive(Serialize)]
+pub struct LeaseView {
+    pub id: String,
+    pub label: String,
+    pub grants: Vec<lease::Grant>,
+    pub acquired_at: chrono::DateTime<chrono::Local>,
+    pub expires_at: chrono::DateTime<chrono::Local>,
+    pub remaining_minutes: i64,
 }
 
 /// 创建/更新请求体。POST 要求 name（description/members 缺省为空）；
@@ -63,6 +92,8 @@ pub fn routes() -> Router<TopoState> {
     Router::new()
         .route("/api/topologies", get(list).post(create))
         .route("/api/topologies/:id", get(detail).put(update).delete(remove))
+        .route("/api/leases", get(leases_list))
+        .route("/api/leases/:id", axum::routing::delete(lease_force_delete))
         .route("/api/events", get(crate::events::sse))
 }
 
@@ -134,6 +165,39 @@ async fn remove(State(state): State<TopoState>, Path(id): Path<String>) -> Resul
         }
     })?;
     let _ = state.topo_bus.send(());
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn leases_list(State(state): State<TopoState>) -> Json<Vec<LeaseView>> {
+    Json(
+        state
+            .leases
+            .list()
+            .into_iter()
+            .map(|l| LeaseView {
+                remaining_minutes: lease::remaining_minutes(&l),
+                id: l.id,
+                label: l.label,
+                grants: l.grants,
+                acquired_at: l.acquired_at,
+                expires_at: l.expires_at,
+            })
+            .collect(),
+    )
+}
+
+/// 人工强释放（占用中心）。无 token 校验——闸的语义是"人可以随时收回 AI 的写权"。
+async fn lease_force_delete(
+    State(state): State<TopoState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.leases.force_release(&id).map_err(|e| {
+        if e.contains("不存在") {
+            not_found(&id)
+        } else {
+            bad(e)
+        }
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -8,18 +8,54 @@
 use crate::address::AliasMatch;
 use crate::AppState;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// axum POST /mcp 入口。
-pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Json<Value> {
-    Json(handle_request(&body, &state).await)
+/// axum POST /mcp 入口。读入站 `Mcp-Session-Id` 头（principal 来源之一）；
+/// initialize 时回签同各头（标准 Streamable HTTP 约定），结果体同带一份
+/// `session_token` 供不读头的客户端显式传工具 token 参数。
+pub async fn mcp_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> axum::response::Response {
+    let incoming = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp = handle_request_with(incoming.as_deref(), &body, &state).await;
+    let is_init = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
+        .as_deref()
+        == Some("initialize");
+    let token = is_init
+        .then(|| {
+            resp["result"]["session_token"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .flatten();
+    let mut out = Json(resp).into_response();
+    if let Some(token) = token {
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&token) {
+            out.headers_mut().insert("mcp-session-id", hv);
+        }
+    }
+    out
 }
 
 pub async fn handle_request(body: &str, state: &AppState) -> Value {
+    handle_request_with(None, body, state).await
+}
+
+/// 带入站会话（Mcp-Session-Id 头）的完整处理。二次宿主的集成测试用它
+/// 模拟标准客户端的头回传。
+pub async fn handle_request_with(session: Option<&str>, body: &str, state: &AppState) -> Value {
     let request: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
@@ -47,7 +83,7 @@ pub async fn handle_request(body: &str, state: &AppState) -> Value {
         "initialize" => json!(handle_initialize()),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "tools/list" => json!(handle_tools_list(&state.mcp_extensions)),
-        "tools/call" => handle_tools_call(&params, state).await,
+        "tools/call" => handle_tools_call(&params, session, state).await,
         "prompts/list" => json!(handle_prompts_list()),
         "prompts/get" => json!(handle_prompts_get(&params)),
         "ping" => json!({}),
@@ -69,7 +105,11 @@ fn handle_initialize() -> Value {
             "tools": { "listChanged": false },
             "prompts": { "listChanged": false }
         },
-        "serverInfo": { "name": "serial-studio", "version": env!("CARGO_PKG_VERSION") }
+        "serverInfo": { "name": "serial-studio", "version": env!("CARGO_PKG_VERSION") },
+        // 会话令牌：调用方身份的凭据（租约持有/释放等扩展语义绑定它）。
+        // 每次 initialize 新签；标准客户端回传 Mcp-Session-Id 头（handler 已回签），
+        // 其余客户端可显式传工具的 token 参数。
+        "session_token": uuid::Uuid::new_v4().to_string(),
     })
 }
 
@@ -239,12 +279,33 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
     json!({ "tools": tools })
 }
 
-async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
+async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppState) -> Value {
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return error_text("Missing tool name".into()),
     };
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+    // 调用方身份：工具参数 token 优先，其次 Mcp-Session-Id 头（initialize 签发）。
+    // 皆无 → 匿名。租约/写闸等扩展语义消费；内置串口工具自身不感知。
+    let principal = arguments
+        .get("token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .or(session)
+        .map(str::to_string);
+    let principal = principal.as_deref();
+    // 写类工具的准入钩子（如 topo-hub 写闸）。放行才进正常分发。
+    if matches!(
+        name,
+        "serial_send" | "serial_read" | "serial_clear" | "serial_debug_script" | "serial_run_script"
+    ) {
+        if let Some(denied) =
+            crate::mcp_ext::intercept(&state.mcp_extensions, name, arguments.clone(), principal, state)
+                .await
+        {
+            return denied;
+        }
+    }
     match name {
         "serial_list" => tool_serial_list(arguments, state).await,
         "serial_send" => tool_serial_send(arguments, state).await,
@@ -260,7 +321,9 @@ async fn handle_tools_call(params: &Value, state: &AppState) -> Value {
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
         other => {
             // 内置未命中 → 委托扩展（topo-hub 等）；扩展也不认得才是真未知。
-            match crate::mcp_ext::dispatch(&state.mcp_extensions, other, arguments, state).await {
+            match crate::mcp_ext::dispatch(&state.mcp_extensions, other, arguments, principal, state)
+                .await
+            {
                 Some(result) => result,
                 None => error_text(format!("Unknown tool: {}", other)),
             }
@@ -975,7 +1038,8 @@ mod tests {
     }
 
     /// MCP 扩展点：注入的工具进 tools/list，tools/call 内置未命中时委托扩展，
-    /// 扩展也不认得才报 Unknown tool。
+    /// 扩展也不认得才报 Unknown tool。echo_principal 回显收到的 principal——
+    /// 锁定"参数 token > 头 > 匿名"的解析契约。
     struct EchoExt;
     impl crate::mcp_ext::McpExtension for EchoExt {
         fn tools(&self) -> Vec<Value> {
@@ -989,19 +1053,23 @@ mod tests {
             &'a self,
             name: &'a str,
             args: Value,
+            principal: Option<&'a str>,
             _state: &'a AppState,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>>
         {
             Box::pin(async move {
-                if name != "echo_test" {
-                    return None;
+                match name {
+                    "echo_test" => {
+                        let msg = args
+                            .get("msg")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("echo")
+                            .to_string();
+                        Some(ok_text(msg))
+                    }
+                    "echo_principal" => Some(ok_text(principal.unwrap_or("anonymous").to_string())),
+                    _ => None,
                 }
-                let msg = args
-                    .get("msg")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("echo")
-                    .to_string();
-                Some(ok_text(msg))
             })
         }
     }
@@ -1013,7 +1081,7 @@ mod tests {
 
         let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13, "12 内置 + 1 扩展");
+        assert_eq!(tools.len(), 13, "12 内置 + 1 扩展(echo_test)");
         assert!(tools.iter().any(|t| t["name"] == "echo_test"));
 
         let resp = handle_request(
@@ -1033,6 +1101,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+    }
+
+    /// principal 解析契约：参数 token > Mcp-Session-Id 头 > 匿名。
+    #[tokio::test]
+    async fn principal_resolution_param_over_header() {
+        let mut state = make_state();
+        state.mcp_extensions = vec![std::sync::Arc::new(EchoExt)];
+
+        // 匿名（无头无参）
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo_principal","arguments":{}}}"#,
+            &state,
+        )
+        .await;
+        assert_eq!(resp["result"]["content"][0]["text"], "anonymous");
+
+        // 头（handle_request_with 模拟标准客户端回传）
+        let resp = handle_request_with(
+            Some("header-token"),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo_principal","arguments":{}}}"#,
+            &state,
+        )
+        .await;
+        assert_eq!(resp["result"]["content"][0]["text"], "header-token");
+
+        // 参数覆盖头
+        let resp = handle_request_with(
+            Some("header-token"),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo_principal","arguments":{"token":"param-token"}}}"#,
+            &state,
+        )
+        .await;
+        assert_eq!(resp["result"]["content"][0]["text"], "param-token");
+    }
+
+    /// initialize 签发 session_token（每次新签，非空 uuid）。
+    #[tokio::test]
+    async fn initialize_mints_session_token() {
+        let a = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#, &make_state()).await;
+        let b = handle_request(r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#, &make_state()).await;
+        let ta = a["result"]["session_token"].as_str().unwrap();
+        let tb = b["result"]["session_token"].as_str().unwrap();
+        assert!(!ta.is_empty() && ta != tb, "每次 initialize 新签: {ta} / {tb}");
     }
 
     /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_debug_script 应被拒。

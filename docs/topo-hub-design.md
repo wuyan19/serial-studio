@@ -67,11 +67,13 @@
 申请成功 → Held ── renew ──→ Held（顺延 expires_at，受 max_ttl 约束）
 Held → Released   显式释放（持 token 或人）
 Held → Expired    TTL 到期（每分钟定时清扫 + 读取时惰性判定双保险）
-Held → Preempted  仅人（Web 占用中心），顺带 force_close 相关连接
+Held → Preempted  仅人（Web 占用中心）
 申请冲突 → Denied（不建立，返回冲突明细）
 ```
 
-**TTL**：默认 30 分钟、上限 240 分钟（settings 可配），申请与续租可传 `ttl_minutes`。MCP 是短连接 POST，无断连信号，租约生命周期不依赖连接状态，TTL 是崩溃客户端的唯一回收手段。
+**TTL**：默认 30 分钟、上限 240 分钟（lease.json 可配），申请与续租可传 `ttl_minutes`。MCP 是短连接 POST，无断连信号，租约生命周期不依赖连接状态，TTL 是崩溃客户端的唯一回收手段。
+
+**抢占不踢连接**（实施修正）：MCP 调用是无状态 POST，AI 没有常驻连接可踢；且 MCP 工具从不开端口（send 对未开端口直接报错，端口由人在 UI/WS 打开）——强释放即收回写权本身（写闸立即对该会话生效），端口归端口的人管。设计初稿的"顺带 force_close"基于错误假设，已删。
 
 **写闸**（`enable_lease_gate`，默认开，**仅作用于 MCP 来源**；web 用户与本地 Tauri 免闸——闸的管理对象是 AI，人有人工抢占权兜底）：
 
@@ -129,14 +131,14 @@ Held → Preempted  仅人（Web 占用中心），顺带 force_close 相关连�
 
 ## 8. 审计与配置
 
-`audit.jsonl`（config 目录）追加 `{ts, event, principal, label, lease_id?, keys, detail}`；事件：`acquire` / `deny` / `renew` / `release` / `expire` / `preempt` / `write_denied`。V1 不滚动。
+`audit.jsonl`（config 目录）追加 `{ts, event, token, label, lease_id, keys, detail}`；事件：`acquire` / `deny` / `renew` / `release` / `expire` / `preempt` / `write_denied`。V1 不滚动。
 
-settings.json 增补：`lease_ttl_minutes`（默认 30）、`lease_max_ttl_minutes`（默认 240）、`enable_lease_gate`（默认 true）、独立监听端口（本机 18700/18701 已被 serial-studio 占用，topo-hub 默认 18800）。
+租约配置读独立文件 `lease.json`（`ttl_minutes` 默认 30、`max_ttl_minutes` 默认 240、`enable_gate` 默认 true）——不并入 settings.json：settings 的写方是 ss-server 的字段白名单序列化，拓扑域自持配置避免互相覆盖。监听端口走 CLI 参数（默认 18800，错开本机 serial-studio 的 18700/18701）。
 
 ## 9. 分期与测试
 
 - **P0**（已完成）：topo-hub bin + ui-topo 壳（复用路由、自嵌 SPA）、拓扑 store 与 CRUD（MCP 5 工具 + REST/SSE + UI 管理页）。
-- **P1**：session token、LeaseManager、写闸、审计、占用中心与占用徽章。
+- **P1**（已完成）：session token（initialize 签发，头/参数双通道）、LeaseManager（原子申请/TTL/续租/释放/强释放）、写闸（仅 MCP 来源的 send/read/clear/脚本，拒绝文案附持有者）、审计、占用中心与占用徽章。
 - **P2**：拆 `ss-device` 合回 main、拓扑图、排队通知（需 MCP 上 SSE）、API key、脚本跨端口写拦截下沉。
 
 测试：lease 单元（原子性/冲突矩阵：device×endpoint×实例/TTL 边界/覆盖判定）、token 工具集成、store CRUD；冒烟沿用隔离实例方式（`SERIAL_STUDIO_CONFIG_DIR` + 错峰端口）。

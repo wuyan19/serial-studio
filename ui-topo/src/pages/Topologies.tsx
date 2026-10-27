@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, subscribeChanged, type Topology } from "../api";
+import { api, leaseOfMember, subscribeChanged, type LeaseView, type Topology } from "../api";
 
 export default function Topologies() {
   const [list, setList] = useState<Topology[]>([]);
+  const [leases, setLeases] = useState<LeaseView[]>([]);
   const [error, setError] = useState("");
 
   const refresh = useCallback(() => {
@@ -11,6 +12,7 @@ export default function Topologies() {
       .topologies()
       .then(setList)
       .catch((e) => setError(String(e.message ?? e)));
+    api.leases().then(setLeases).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -26,6 +28,17 @@ export default function Topologies() {
     } catch (e) {
       setError(String((e as Error).message ?? e));
     }
+  };
+
+  /** 任一成员被租约覆盖 → 占用徽章（首个命中）。 */
+  const badge = (t: Topology) => {
+    const hit = t.members.map((m) => leaseOfMember(m, leases)).find(Boolean);
+    if (!hit) return null;
+    return (
+      <span className="badge warn">
+        占用 · {hit.label} · {hit.remaining_minutes} 分钟
+      </span>
+    );
   };
 
   return (
@@ -48,6 +61,7 @@ export default function Topologies() {
                   {t.name}
                 </Link>
                 <span className="muted">成员 {t.members.length}</span>
+                {badge(t)}
               </div>
               {t.description && <p className="topo-desc">{t.description}</p>}
               <div className="topo-actions">

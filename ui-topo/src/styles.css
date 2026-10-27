@@ -264,3 +264,8 @@ input:focus {
   border-radius: 10px;
   padding: 0 8px;
 }
+
+.badge.warn {
+  color: #ffb454;
+  border-color: #ffb454;
+}

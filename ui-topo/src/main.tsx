@@ -6,6 +6,7 @@ import Topologies from "./pages/Topologies";
 import TopologyDetail from "./pages/TopologyDetail";
 import TopologyEdit from "./pages/TopologyEdit";
 import Devices from "./pages/Devices";
+import Leases from "./pages/Leases";
 import Placeholder from "./pages/Placeholder";
 import "./styles.css";
 
@@ -19,7 +20,7 @@ const router = createBrowserRouter([
       { path: "topologies/:id", element: <TopologyDetail /> },
       { path: "topologies/:id/edit", element: <TopologyEdit /> },
       { path: "devices", element: <Devices /> },
-      { path: "leases", element: <Placeholder title="占用中心" phase="P1" /> },
+      { path: "leases", element: <Leases /> },
       { path: "terminal", element: <Placeholder title="终端" phase="P1" /> },
     ],
   },

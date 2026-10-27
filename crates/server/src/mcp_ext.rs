@@ -19,14 +19,31 @@ pub trait McpExtension: Send + Sync + 'static {
     /// 处理 tools/call。返回 None 表示"非本扩展的工具名"，交回调度链；
     /// 返回 Some 则是完整 MCP 工具结果（content 数组），与内置工具同构。
     ///
+    /// `principal` = 调用方身份（工具参数 token 优先于 Mcp-Session-Id 头，
+    /// 由 mcp.rs 统一解析；None = 匿名）。租约类语义消费它，纯工具可忽略。
+    ///
     /// 返回的 future 借用全部入参（统一 'a）——实现里可用 state 读共享运行时、
     /// 用 name 分发；调度方（dispatch）当埘认 await，借用立收。
     fn call<'a>(
         &'a self,
         name: &'a str,
         args: Value,
+        principal: Option<&'a str>,
         state: &'a AppState,
     ) -> Pin<Box<dyn Future<Output = Option<Value>> + Send + 'a>>;
+
+    /// 内置工具执行前的准入检查（如 topo-hub 的写闸：MCP 写类操作须持租约）。
+    /// 仅对内置工具调用；返回 Some(结果) = 拦截（isError 标记），None = 放行。
+    /// 默认全放行。
+    fn intercept<'a>(
+        &'a self,
+        _name: &'a str,
+        _args: Value,
+        _principal: Option<&'a str>,
+        _state: &'a AppState,
+    ) -> Pin<Box<dyn Future<Output = Option<Value>> + Send + 'a>> {
+        Box::pin(async move { None })
+    }
 }
 
 /// 调度辅助：按注册顺序委托扩展，None 透传给下一个。
@@ -34,11 +51,28 @@ pub(crate) async fn dispatch(
     extensions: &[Arc<dyn McpExtension>],
     name: &str,
     args: Value,
+    principal: Option<&str>,
     state: &AppState,
 ) -> Option<Value> {
     for ext in extensions {
-        if let Some(result) = ext.call(name, args.clone(), state).await {
+        if let Some(result) = ext.call(name, args.clone(), principal, state).await {
             return Some(result);
+        }
+    }
+    None
+}
+
+/// 准入辅助：按注册顺序询问扩展，首个 Some 即拦截。
+pub(crate) async fn intercept(
+    extensions: &[Arc<dyn McpExtension>],
+    name: &str,
+    args: Value,
+    principal: Option<&str>,
+    state: &AppState,
+) -> Option<Value> {
+    for ext in extensions {
+        if let Some(denied) = ext.intercept(name, args.clone(), principal, state).await {
+            return Some(denied);
         }
     }
     None
