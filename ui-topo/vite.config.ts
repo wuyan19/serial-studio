@@ -8,6 +8,7 @@ export default defineConfig({
     port: 5175,
     proxy: { "/api": "http://127.0.0.1:18800" },
   },
-  // 嵌入 topo-hub 二进制从任意路径加载，相对资源路径更稳
-  base: "./",
+  // 嵌入后恒伺服于根路径；相对 base("./") 会在多层路由(/topologies/:id)下把
+  // assets 解析到 /topologies/assets/ 而白屏——用绝对路径
+  base: "/",
 });

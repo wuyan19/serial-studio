@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, fmtTime, subscribeChanged, type LeaseView } from "../api";
+import { api, fmtTime, subscribeChanged, type Device, type LeaseView } from "../api";
 
 export default function Leases() {
   const [list, setList] = useState<LeaseView[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
   const [error, setError] = useState("");
 
   const refresh = useCallback(() => {
@@ -10,6 +11,7 @@ export default function Leases() {
       .leases()
       .then(setList)
       .catch((e) => setError(String(e.message ?? e)));
+    api.devices().then(setDevices).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -59,7 +61,10 @@ export default function Leases() {
                 <td>{l.label}</td>
                 <td className="mono">
                   {l.grants
-                    .map((g) => `${g.kind === "device" ? "设备" : "端点"} ${g.key}`)
+                    .map(
+                      (g) =>
+                        devices.find((d) => d.id === g.device)?.name ?? g.device,
+                    )
                     .join("、")}
                 </td>
                 <td>{fmtTime(l.acquired_at)}</td>

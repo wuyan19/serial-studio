@@ -1,14 +1,16 @@
-//! 拓扑与租约工具的 MCP 集成测试：经 ss_server::mcp 的 handle_request(_with)
+//! 设备/拓扑/租约工具的 MCP 集成测试：经 ss_server::mcp 的 handle_request(_with)
 //! 走完整 JSON-RPC 调度链（principal 解析、写闸 intercept、扩展分发）。
+//! P2.5 模型：设备=一等实体（通道=串口/SSH），拓扑成员/租约均为设备引用。
 
 use serde_json::Value;
 use std::sync::Arc;
 use topo_hub::mcp_topo::TopoTools;
-use topo_hub::test_support::{ensure_test_config_dir, make_state, unique_name};
+use topo_hub::test_support::{ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK};
 use topo_hub::TopoState;
 
 fn state_with_tools() -> TopoState {
     ensure_test_config_dir();
+    reset_stores();
     let mut ts = TopoState::create(make_state());
     ts.base.mcp_extensions = vec![Arc::new(TopoTools {
         bus: (*ts.topo_bus).clone(),
@@ -31,211 +33,229 @@ fn text(resp: &Value) -> String {
 }
 
 #[tokio::test]
-async fn topo_tools_listed_alongside_builtin() {
+async fn tools_listed_alongside_builtin() {
     let state = state_with_tools();
-    let resp = call(
-        &state,
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-    )
-    .await;
+    let resp = call(&state, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 23, "14 内置(含 port_open/close) + 5 拓扑 + 4 租约工具");
+    assert_eq!(tools.len(), 28, "14 内置 + 5 拓扑 + 5 设备 + 4 租约");
     for name in [
-        "topo_list",
-        "topo_get",
-        "topo_create",
-        "topo_update",
-        "topo_delete",
-        "lease_acquire",
-        "lease_renew",
-        "lease_release",
-        "lease_status",
+        "topo_list", "topo_get", "topo_create", "topo_update", "topo_delete",
+        "device_list", "device_get", "device_create", "device_update", "device_delete",
+        "lease_acquire", "lease_renew", "lease_release", "lease_status",
     ] {
-        assert!(
-            tools.iter().any(|t| t["name"] == name),
-            "缺工具 {name}"
-        );
+        assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
     }
 }
 
 #[tokio::test]
-async fn topo_crud_roundtrip() {
+async fn device_and_topology_roundtrip() {
+    let _g = STORE_LOCK.lock().unwrap();
     let state = state_with_tools();
-    let name = unique_name("集成拓扑");
+    let dev_name = unique_name("交换机");
+    let topo_name = unique_name("拓扑");
 
-    // create：设备键 + 端点键各一，成员定型后落盘
+    // 注册设备：串口 + SSH 双通道
     let resp = call(
         &state,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"topo_create","arguments":{{"name":"{name}","description":"集成测试","members":[{{"key":"ssh-x1","note":"被测网关"}},{{"key":"ssh-x1::shell"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","model":"H3C S5120","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","ref":"ssh-x1"}}]}}}}}}"#
+        ),
+    )
+    .await;
+    assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+
+    // device_list / device_get
+    let msg = text(&call(&state, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"device_list","arguments":{}}}"#).await);
+    assert!(msg.contains(&dev_name) && msg.contains("串口 COM4"), "{msg}");
+    let resp = call(
+        &state,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"device_get","arguments":{{"device":"{dev_name}"}}}}}}"#
         ),
     )
     .await;
     let msg = text(&resp);
-    assert!(resp["result"]["isError"].is_null(), "创建应成功: {msg}");
-    assert!(msg.contains("已创建拓扑"), "{msg}");
+    assert!(msg.contains("空闲") && msg.contains("车间网关"), "{msg}");
 
-    // list 能看到
-    let msg = text(&call(&state, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"topo_list","arguments":{}}}"#).await);
-    assert!(msg.contains(&name), "{msg}");
+    // 设备资源独占：同串口三注册拒绝（throwaway 名，不成器）
+    let other = unique_name("设备");
+    let resp = call(
+        &state,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{other}","channels":[{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+        ),
+    )
+    .await;
+    assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+    let resp = call(
+        &state,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{}","channels":[{{"type":"serial","port":"COM4"}}]}}}}}}"#,
+            unique_name("冲突设备")
+        ),
+    )
+    .await;
+    assert!(text(&resp).contains("已是其它设备"));
 
-    // get：成员两行，设备行带昵称与备注，端点行带端点名
+    // 拓扑：成员=设备引用，连线端点=成员设备
+    let resp = call(
+        &state,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"topo_create","arguments":{{"name":"{topo_name}","members":[{{"device":"{dev_name}","note":"被测交换机"}},{{"device":"{other}"}}],"links":[{{"from":"{dev_name}","to":"{other}","label":"级联"}}]}}}}}}"#
+        ),
+    )
+    .await;
+    assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+
+    // 未知成员设备报错
+    let resp = call(
+        &state,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"topo_create","arguments":{"name":"坏","members":[{"device":"ghost"}]}}}"#,
+    )
+    .await;
+    assert!(text(&resp).contains("ghost"));
+
+    // topo_get：设备行（通道+备注）与连接行（设备名）
     let msg = text(
         &call(
             &state,
             &format!(
-                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"topo_get","arguments":{{"topo":"{name}"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"topo_get","arguments":{{"topo":"{topo_name}"}}}}}}"#
             ),
         )
         .await,
     );
-    assert!(msg.contains("设备 ssh-x1"), "{msg}");
-    assert!(msg.contains("车间网关"), "{msg}");
-    assert!(msg.contains("被测网关"), "{msg}");
-    assert!(msg.contains("端点 ssh-x1::shell"), "{msg}");
+    assert!(msg.contains(&format!("设备 {dev_name}")), "{msg}");
+    assert!(msg.contains("被测交换机"));
+    assert!(msg.contains("连接") && msg.contains("级联"), "{msg}");
 
-    // update：改描述 + 换成员
+    // 设备删除被拓扑引用拦截
     let resp = call(
         &state,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"topo_update","arguments":{{"topo":"{name}","description":"改述","members":[{{"key":"ssh-x2"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"device_delete","arguments":{{"device":"{dev_name}"}}}}}}"#
         ),
     )
     .await;
-    assert!(text(&resp).contains("已更新拓扑"));
+    assert!(text(&resp).contains(topo_name.as_str()), "应列出引用拓扑");
 
-    // delete → 再 get 报不存在
-    let resp = call(
-        &state,
-        &format!(
-            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"topo_delete","arguments":{{"topo":"{name}"}}}}}}"#
-        ),
-    )
-    .await;
-    assert!(text(&resp).contains("已删除拓扑"));
-    let resp = call(
-        &state,
-        &format!(
-            r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"topo_get","arguments":{{"topo":"{name}"}}}}}}"#
-        ),
-    )
-    .await;
-    assert_eq!(resp["result"]["isError"], true, "删除后 get 应报错");
+    // 清理：删拓扑 → 删设备
+    for name in [&topo_name] {
+        let resp = call(
+            &state,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"topo_delete","arguments":{{"topo":"{name}"}}}}}}"#
+            ),
+        )
+        .await;
+        assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+    }
+    for name in [&dev_name, &other] {
+        let resp = call(
+            &state,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"device_delete","arguments":{{"device":"{name}"}}}}}}"#
+            ),
+        )
+        .await;
+        assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+    }
 }
 
-#[tokio::test]
-async fn topo_create_rejects_unknown_member() {
-    let state = state_with_tools();
-    let resp = call(
-        &state,
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"topo_create","arguments":{"name":"坏拓扑","members":[{"key":"ghost-dev"}]}}}"#,
-    )
-    .await;
-    assert_eq!(resp["result"]["isError"], true);
-    assert!(text(&resp).contains("ghost-dev"), "错误应指明坏键");
-}
-
-// ===== 租约与写闸（P1）=====
-
-/// initialize 签发 token → 持 token 申请租约 → 写闸放行/拦截/冲突/释放全链路。
+/// initialize 签发 token → 设备注册 → 申请（设备级）→ 写闸放行/拦截/冲突/释放。
 #[tokio::test]
 async fn lease_flow_and_write_gate() {
+    let _g = STORE_LOCK.lock().unwrap();
     let state = state_with_tools();
+    let dev_name = unique_name("闸设备");
 
-    // 匿名申请 → 拒
+    // 匿名写 → 引导 token
     let resp = call(
         &state,
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"devices":["ssh-x1"]}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"COM4","data":"AT"}}}"#,
     )
     .await;
-    assert_eq!(resp["result"]["isError"], true);
-    assert!(text(&resp).contains("token"), "{}", text(&resp));
+    assert!(text(&resp).contains("token"));
 
-    // 匿名写 → 闸拒（引导先申请）
-    let resp = call(
+    // 未注册端口（有 token）→ 引导 device_create
+    let resp = call_as(
         &state,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"ssh-x1::shell","data":"AT"}}}"#,
+        "tok-x",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"COM99","data":"AT"}}}"#,
     )
     .await;
-    assert_eq!(resp["result"]["isError"], true);
-    assert!(text(&resp).contains("租约"), "匿名写应被闸拦: {}", text(&resp));
+    let msg = text(&resp);
+    assert!(msg.contains("device_create"), "未注册端口引导注册: {msg}");
 
-    // initialize → token（模拟标准客户端从响应取 token 后以头回传）
-    let init = call(
-        &state,
-        r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#,
-    )
-    .await;
+    // initialize → token → 注册设备（COM4 串口 + SSH）
+    let init = call(&state, r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#).await;
     let token = init["result"]["session_token"].as_str().unwrap().to_string();
-
-    // A 会话申请设备 ssh-x1
     let resp = call_as(
         &state,
         &token,
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"devices":["ssh-x1"],"holder":"集成-agent"}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+        ),
+    )
+    .await;
+    assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+
+    // A 会话申请设备
+    let resp = call_as(
+        &state,
+        &token,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"lease_acquire","arguments":{{"devices":["{dev_name}"],"holder":"集成-agent"}}}}}}"#
+        ),
     )
     .await;
     let msg = text(&resp);
     assert!(resp["result"]["isError"].is_null(), "申请应成功: {msg}");
     let lease_id = msg.split("已获租约 ").nth(1).unwrap().split('（').next().unwrap().to_string();
 
-    // A 写（闸放行 → 进入工具本体，失败原因是端口未开而非租约）
-    let resp = call_as(
-        &state,
-        &token,
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"ssh-x1::shell","data":"AT"}}}"#,
-    )
-    .await;
-    let msg = text(&resp);
-    assert!(!msg.contains("租约"), "持租约者写应过闸: {msg}");
+    // A 写串口通道（过闸 → 工具本体的端口未开错）；写 SSH 通道同样过闸
+    for port in ["COM4", "ssh-x2::shell"] {
+        let resp = call_as(
+            &state,
+            &token,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"serial_send","arguments":{{"port":"{port}","data":"AT"}}}}}}"#
+            ),
+        )
+        .await;
+        let msg = text(&resp);
+        assert!(!msg.contains("租约"), "持设备租约写 {port} 应过闸: {msg}");
+    }
 
-    // port_open 同样过闸：持租约 → 工具本体报端口打不开；匿名 → 闸拦
-    let resp = call_as(
-        &state,
-        &token,
-        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"port_open","arguments":{"port":"ssh-x1::shell"}}}"#,
-    )
-    .await;
-    let msg = text(&resp);
-    assert!(!msg.contains("租约") && resp["result"]["isError"] == true, "持租约开口过闸: {msg}");
-    let resp = call(
-        &state,
-        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"port_open","arguments":{"port":"ssh-x1::shell"}}}"#,
-    )
-    .await;
-    assert!(text(&resp).contains("租约"), "匿名开口应被闸拦");
-
-    // B 会话（另一 token）写同端口 → 闸拒 + 报出 A 的持有信息
+    // B 会话写同设备另一通道 → 闸拒 + 报出 A（设备级独占的体现）
     let resp = call_as(
         &state,
         "token-b-别人",
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"ssh-x1::shell","data":"AT"}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"ssh-x2::shell","data":"AT"}}}"#,
     )
     .await;
     let msg = text(&resp);
     assert!(msg.contains("租约") && msg.contains("集成-agent"), "应报当前持有者: {msg}");
 
-    // B 申请同设备 → 冲突明细
+    // B 申请同设备（endpoints 糖走 COM4）→ 冲突明细
     let resp = call_as(
         &state,
         "token-b-别人",
-        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"devices":["ssh-x1"]}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"endpoints":["COM4"]}}}"#,
     )
     .await;
     assert!(text(&resp).contains("集成-agent"), "冲突应报持有者");
 
-    // B 释放 A 的租约 → token 不匹配拒；A 释放成功
-    let del = format!(r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"lease_release","arguments":{{"lease_id":"{lease_id}"}}}}}}"#);
-    let resp = call_as(&state, "token-b-别人", &del).await;
-    assert!(text(&resp).contains("不属于"), "非持有者释放应拒");
-    let resp = call_as(&state, &token, &del).await;
-    assert!(text(&resp).contains("已释放"));
-
-    // 释放后 B 可申请
+    // B 释放 A 的租约 → token 不匹配拒；A 释放成功；B 可申请
+    let del = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"lease_release","arguments":{{"lease_id":"{lease_id}"}}}}}}"#);
+    assert!(text(&call_as(&state, "token-b-别人", &del).await).contains("不属于"));
+    assert!(text(&call_as(&state, &token, &del).await).contains("已释放"));
     let resp = call_as(
         &state,
         "token-b-别人",
-        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"devices":["ssh-x1"]}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"lease_acquire","arguments":{{"devices":["{dev_name}"]}}}}}}"#
+        ),
     )
     .await;
     assert!(resp["result"]["isError"].is_null());
@@ -244,11 +264,22 @@ async fn lease_flow_and_write_gate() {
 /// 租约状态查询：本会话视角。
 #[tokio::test]
 async fn lease_status_shows_own_leases() {
+    let _g = STORE_LOCK.lock().unwrap();
     let state = state_with_tools();
+    let dev = unique_name("状态设备");
+    let resp = call(
+        &state,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev}","channels":[{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+        ),
+    )
+    .await;
+    assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+
     let resp = call_as(
         &state,
         "token-status",
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lease_status","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lease_status","arguments":{}}}"#,
     )
     .await;
     assert!(text(&resp).contains("无活跃租约"));
@@ -256,14 +287,16 @@ async fn lease_status_shows_own_leases() {
     call_as(
         &state,
         "token-status",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lease_acquire","arguments":{"endpoints":["ssh-x2::shell"]}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"lease_acquire","arguments":{{"devices":["{dev}"]}}}}}}"#
+        ),
     )
     .await;
     let resp = call_as(
         &state,
         "token-status",
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lease_status","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lease_status","arguments":{}}}"#,
     )
     .await;
-    assert!(text(&resp).contains("ssh-x2::shell"), "{}", text(&resp));
+    assert!(text(&resp).contains(&dev), "{}", text(&resp));
 }

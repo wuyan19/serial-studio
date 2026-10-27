@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, leaseOfMember, subscribeChanged, type LeaseView, type Topology } from "../api";
+import { api, leaseOfDevice, subscribeChanged, type LeaseView, type Topology } from "../api";
 
 export default function Topologies() {
   const [list, setList] = useState<Topology[]>([]);
@@ -30,9 +30,9 @@ export default function Topologies() {
     }
   };
 
-  /** 任一成员被租约覆盖 → 占用徽章（首个命中）。 */
+  /** 任一成员设备被租约覆盖 → 占用徽章（首个命中）。 */
   const badge = (t: Topology) => {
-    const hit = t.members.map((m) => leaseOfMember(m, leases)).find(Boolean);
+    const hit = t.members.map((m) => leaseOfDevice(m.device, leases)).find(Boolean);
     if (!hit) return null;
     return (
       <span className="badge warn">

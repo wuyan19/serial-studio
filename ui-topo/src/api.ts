@@ -1,12 +1,45 @@
 /** REST + SSE 封装。后端契约见 crates/topo-hub/src/api.rs。 */
 
-export interface TopologyMember {
-  kind: "device" | "endpoint";
+/** 被测设备（device.rs 注册表）：设备=身份，通道=接入方式。 */
+export interface DeviceChannel {
+  type: "serial" | "ssh";
+  /** serial: 端口键（本机裸名或级联键）；ssh: 凭据 id。 */
+  port?: string;
+  ref?: string;
+}
+
+export interface Device {
+  id: string;
+  name: string;
+  model: string;
+  location: string;
+  channels: DeviceChannel[];
+}
+
+export interface DeviceInput {
+  name: string;
+  model?: string;
+  location?: string;
+  channels: DeviceChannel[];
+}
+
+/** 通道展示视图（member_views 内嵌；设备管理页本地构造同形）。 */
+export interface ChannelView {
+  type: "serial" | "ssh";
   key: string;
+  label: string;
+  present: boolean;
+  opened?: boolean;
+  holders?: number;
+}
+
+export interface TopologyMember {
+  device: string;
   note?: string;
 }
 
 export interface TopologyLink {
+  /** 设备 id（拓扑成员维度）。 */
   from: string;
   to: string;
   label?: string;
@@ -23,12 +56,12 @@ export interface Topology {
 }
 
 export interface MemberView {
-  kind: "device" | "endpoint";
-  key: string;
+  device: string;
+  name: string;
+  model: string;
+  location: string;
   note?: string;
-  label: string;
-  detail?: string;
-  online?: boolean;
+  channels: ChannelView[];
 }
 
 export interface TopologyDetail extends Topology {
@@ -36,7 +69,7 @@ export interface TopologyDetail extends Topology {
 }
 
 export interface MemberInput {
-  key: string;
+  device: string;
   note?: string;
 }
 
@@ -84,8 +117,7 @@ export interface ServerSettings {
 }
 
 export interface Grant {
-  kind: "device" | "endpoint";
-  key: string;
+  device: string;
 }
 
 export interface LeaseView {
@@ -129,6 +161,12 @@ export const api = {
     },
   ) => req<Topology>(`/api/topologies/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteTopology: (id: string) => req<void>(`/api/topologies/${id}`, { method: "DELETE" }),
+  devices: () => req<Device[]>("/api/devices"),
+  createDevice: (body: DeviceInput) =>
+    req<Device>("/api/devices", { method: "POST", body: JSON.stringify(body) }),
+  updateDevice: (id: string, body: DeviceInput) =>
+    req<Device>(`/api/devices/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteDevice: (id: string) => req<void>(`/api/devices/${id}`, { method: "DELETE" }),
   leases: () => req<LeaseView[]>("/api/leases"),
   forceReleaseLease: (id: string) =>
     req<void>(`/api/leases/${id}`, { method: "DELETE" }),
@@ -141,7 +179,7 @@ export const api = {
     req<ServerSettings>("/api/settings", { method: "PUT", body: JSON.stringify(s) }),
 };
 
-/** 订阅变更通知（拓扑/租约），收到即回调（调用方重拉数据）。 */
+/** 订阅变更通知（拓扑/设备/租约），收到即回调（调用方重拉数据）。 */
 export function subscribeChanged(cb: () => void): () => void {
   const es = new EventSource("/api/events");
   es.addEventListener("topo_changed", cb);
@@ -149,25 +187,15 @@ export function subscribeChanged(cb: () => void): () => void {
   return () => es.close();
 }
 
-const devSeg = (k: string) => (k.includes("::") ? k.split("::")[0] : "local");
-
-/** grant 覆盖集合与拓扑成员是否相交（服务端 grants_intersect 的展示侧子集）。 */
-export function grantCoversMember(
-  grant: Grant,
-  member: { kind: "device" | "endpoint"; key: string },
-): boolean {
-  if (grant.kind === "device" && member.kind === "device") return grant.key === member.key;
-  if (grant.kind === "device") return devSeg(member.key) === grant.key;
-  if (member.kind === "device") return devSeg(grant.key) === member.key;
-  return grant.key === member.key;
+/** 设备的占用租约（设备级独占：grant.device 即设备 id）。 */
+export function leaseOfDevice(deviceId: string, leases: LeaseView[]): LeaseView | undefined {
+  return leases.find((l) => l.grants.some((g) => g.device === deviceId));
 }
 
-/** 找到覆盖该成员的租约（占用徽章/占用列共用）。 */
-export function leaseOfMember(
-  member: { kind: "device" | "endpoint"; key: string },
-  leases: LeaseView[],
-): LeaseView | undefined {
-  return leases.find((l) => l.grants.some((g) => grantCoversMember(g, member)));
+/** 通道的终端端口键：serial 直用；ssh 取凭据的 shell 端点。 */
+export function channelPortKey(ch: DeviceChannel): string {
+  if (ch.type === "serial") return ch.port ?? "";
+  return `${ch.ref}::shell`;
 }
 
 /** 时间戳显示（iso → 本地短格式）。 */

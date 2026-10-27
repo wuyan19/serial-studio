@@ -107,9 +107,6 @@ export default function App() {
             ))}
           </nav>
           <div className="sidebar__tools">
-            <button className="tool-btn" onClick={() => openDialog("ssh")} title="SSH 设备">
-              SSH 设备
-            </button>
             <button className="tool-btn" onClick={() => openDialog("remote")} title="添加远程设备">
               添加远端
             </button>
@@ -142,6 +139,7 @@ export default function App() {
       {dialog === "settings" && (
         <SettingsPanel
           settings={settings}
+          onOpenSsh={() => setDialog("ssh")}
           onClose={() => setDialog(null)}
           onSave={(s) => {
             api

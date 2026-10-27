@@ -3,7 +3,7 @@
  * host_key_unknown/changed 指纹确认（ssh_trust_host 后重开）。 */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api, type PortView } from "../api";
+import { api, channelPortKey, type Device, type PortView } from "../api";
 import { ws } from "../ws";
 import { useShell } from "../App";
 import TermView, { type TermHandle } from "../components/term";
@@ -18,6 +18,7 @@ interface Tab {
 export default function Terminal() {
   const [params] = useSearchParams();
   const { sshHosts, openDialog } = useShell();
+  const [devices, setDevices] = useState<Device[]>([]);
   const [ports, setPorts] = useState<PortView[]>([]);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -33,6 +34,7 @@ export default function Terminal() {
       setTabs((ts) => ts.filter((t) => t.port !== port));
     });
     const offConn = ws.on("connected", (on) => setConnLost(!on));
+    api.devices().then(setDevices).catch(() => {});
     return () => {
       offPorts();
       offClosed();
@@ -184,16 +186,45 @@ export default function Terminal() {
 
       {picker && (
         <div className="dialog-overlay" onMouseDown={(e) => e.target === e.currentTarget && setPicker(false)}>
-          <div className="dialog dialog--med" role="dialog" aria-modal="true" aria-label="打开端口" onClick={(e) => e.stopPropagation()}>
-            <h3 className="dialog__title">打开端口</h3>
+          <div className="dialog dialog--med" role="dialog" aria-modal="true" aria-label="打开终端" onClick={(e) => e.stopPropagation()}>
+            <h3 className="dialog__title">打开终端</h3>
             <div className="port-picker">
-              {ports.length === 0 && <p className="dialog__hint">无可用端口（设备库为空或连接断开）。</p>}
-              {ports.map((p) => (
-                <button key={p.name} className="port-picker__item" onClick={() => startOpen(p)} title={p.name}>
-                  <span>{p.alias ? `${p.alias}（${p.name}）` : p.name}</span>
-                  <span className="muted">{p.opened ? `已开 · ${p.holders} 人` : p.device?.label ?? ""}</span>
-                </button>
-              ))}
+              <p className="dialog__hint">设备通道（被测设备注册表）</p>
+              {devices.length === 0 && (
+                <p className="dialog__hint">暂无被测设备（设备页注册，或直接用下方裸端口）。</p>
+              )}
+              {devices.flatMap((d) =>
+                d.channels.map((c, i) => (
+                  <button
+                    key={`${d.id}-${i}`}
+                    className="port-picker__item"
+                    onClick={() => {
+                      const key = channelPortKey(c);
+                      const p = ports.find((x) => x.name === key);
+                      setPicker(false);
+                      if (p) startOpen(p);
+                      else void openPort({ name: key, opened: false, holders: 0 } as PortView);
+                    }}
+                    title={channelPortKey(c)}
+                  >
+                    <span>
+                      {d.name} · {c.type === "serial" ? `串口 ${c.port}` : "SSH"}
+                    </span>
+                    <span className="muted mono">{channelPortKey(c)}</span>
+                  </button>
+                )),
+              )}
+              <p className="dialog__hint" style={{ marginTop: 10 }}>
+                裸端口（未注册设备）
+              </p>
+              {ports
+                .filter((p) => p.kind !== "ssh" || p.instance == null)
+                .map((p) => (
+                  <button key={p.name} className="port-picker__item" onClick={() => startOpen(p)} title={p.name}>
+                    <span>{p.alias ? `${p.alias}（${p.name}）` : p.name}</span>
+                    <span className="muted">{p.opened ? `已开 · ${p.holders} 人` : p.device?.label ?? ""}</span>
+                  </button>
+                ))}
             </div>
           </div>
         </div>

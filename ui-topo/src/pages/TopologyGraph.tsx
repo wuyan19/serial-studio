@@ -1,63 +1,40 @@
 import { useMemo } from "react";
-import {
-  Background,
-  Controls,
-  ReactFlow,
-  type Edge,
-  type Node,
-} from "@xyflow/react";
+import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { LeaseView, MemberView, Topology } from "../api";
-import { leaseOfMember } from "../api";
+import { leaseOfDevice, type LeaseView, type Topology } from "../api";
 
-const devSeg = (k: string) => (k.includes("::") ? k.split("::")[0] : "local");
-
-interface GraphProps {
+/** 拓扑图：节点 = 成员设备（通道列为小字），边 = links（设备维度）。
+ * 圆形自动布局，节点可拖；占用中的设备描边高亮。V2 不持久化布局。 */
+export default function TopologyGraph({
+  topo,
+  nameOf,
+  subtitleOf,
+  leases,
+}: {
   topo: Topology;
-  memberViews: MemberView[];
+  /** 设备 id → 显示名（详情快照优先、注册表兜底，由调用方注入）。 */
+  nameOf: (deviceId: string) => string;
+  /** 设备 id → 节点小字（通道摘要）。 */
+  subtitleOf: (deviceId: string) => string | undefined;
   leases: LeaseView[];
-}
-
-/** 拓扑图：节点 = 成员按设备分组（端点列为节点小字），边 = links（归到设备）。
- * 圆形自动布局，节点可拖；占用中的设备节点描边高亮。V2 不持久化布局。 */
-export default function TopologyGraph({ topo, memberViews, leases }: GraphProps) {
+}) {
   const { nodes, edges } = useMemo(() => {
-    // 设备分组：device 成员自带标签；endpoint 成员的 label 形如 "设备 · 端点"
-    const devices = new Map<
-      string,
-      { label: string; endpoints: string[]; occupied: boolean }
-    >();
-    for (const m of memberViews) {
-      const dev = devSeg(m.key);
-      const entry = devices.get(dev) ?? { label: dev, endpoints: [], occupied: false };
-      if (m.kind === "device") {
-        entry.label = m.label;
-      } else {
-        entry.label = m.label.split(" · ")[0] || entry.label;
-        entry.endpoints.push(m.key.split("::").pop() ?? m.key);
-      }
-      if (leaseOfMember(m, leases)) entry.occupied = true;
-      devices.set(dev, entry);
-    }
-
-    const ids = [...devices.keys()];
-    const radius = Math.max(120, 55 * ids.length);
-    const nodeList: Node[] = ids.map((id, i) => {
-      const d = devices.get(id)!;
-      const angle = (2 * Math.PI * i) / Math.max(ids.length, 1) - Math.PI / 2;
+    const memberIds = topo.members.map((m) => m.device);
+    const radius = Math.max(120, 55 * memberIds.length);
+    const nodeList: Node[] = memberIds.map((id, i) => {
+      const occupied = leaseOfDevice(id, leases);
+      const angle = (2 * Math.PI * i) / Math.max(memberIds.length, 1) - Math.PI / 2;
+      const chans = subtitleOf(id);
       return {
         id,
-        position: {
-          x: Math.cos(angle) * radius,
-          y: Math.sin(angle) * radius,
-        },
+        position: { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius },
         data: {
-          label: `${d.label}${d.endpoints.length ? `\n${d.endpoints.join(" · ")}` : ""}`,
+          label: `${nameOf(id)}${chans ? `\n${chans}` : ""}${occupied ? "\n● 占用中" : ""}`,
         },
         style: {
-          background: "var(--panel)",
-          color: "var(--text)",
-          border: `1px solid ${d.occupied ? "var(--warn)" : "var(--border)"}`,
+          background: "var(--surface)",
+          color: "var(--ink)",
+          border: `1px solid ${occupied ? "var(--warn)" : "var(--hairline)"}`,
           borderRadius: 8,
           padding: "8px 14px",
           fontSize: 13,
@@ -66,18 +43,18 @@ export default function TopologyGraph({ topo, memberViews, leases }: GraphProps)
         },
       };
     });
-
     const edgeList: Edge[] = topo.links.map((l, i) => ({
       id: `e${i}`,
-      source: devSeg(l.from),
-      target: devSeg(l.to),
+      source: l.from,
+      target: l.to,
       label: l.label,
-      style: { stroke: "var(--border)", strokeWidth: 1.5 },
-      labelStyle: { fill: "var(--muted)", fontSize: 11 },
+      style: { stroke: "var(--hairline)", strokeWidth: 1.5 },
+      labelStyle: { fill: "var(--ink-faint)", fontSize: 11 },
       labelBgStyle: { fill: "var(--bg)" },
     }));
     return { nodes: nodeList, edges: edgeList };
-  }, [topo, memberViews, leases]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topo, leases, nameOf, subtitleOf]);
 
   return (
     <div className="graph">
