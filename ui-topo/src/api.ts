@@ -51,6 +51,8 @@ export interface PortView {
   opened: boolean;
   holders: number;
   alias?: string;
+  /** 设备断开（USB 拔出等）但占有权保留、可重连。 */
+  disconnected?: boolean;
   kind?: string;
   instance?: number;
   device?: DeviceView;
@@ -62,6 +64,23 @@ export interface DeviceView {
   detail?: string;
   via: string;
   online?: boolean;
+}
+
+export interface RemoteDeviceT {
+  id: string;
+  host: string;
+  port: number;
+  nickname?: string;
+}
+
+/** 设置视图（后端 SettingsView：settings.json 展开 + lease 对象）。 */
+export interface ServerSettings {
+  ws_host: string;
+  ws_port: number;
+  telnet_port: number;
+  enable_scripting: boolean;
+  script_log_to_disk: boolean;
+  lease: { ttl_minutes: number; max_ttl_minutes: number; enable_gate: boolean };
 }
 
 export interface Grant {
@@ -114,6 +133,12 @@ export const api = {
   forceReleaseLease: (id: string) =>
     req<void>(`/api/leases/${id}`, { method: "DELETE" }),
   ports: () => req<PortView[]>("/api/ports"),
+  remotes: () => req<RemoteDeviceT[]>("/api/remotes"),
+  saveRemotes: (devices: RemoteDeviceT[]) =>
+    req<RemoteDeviceT[]>("/api/remotes", { method: "PUT", body: JSON.stringify({ devices }) }),
+  settings: () => req<ServerSettings>("/api/settings"),
+  saveSettings: (s: ServerSettings) =>
+    req<ServerSettings>("/api/settings", { method: "PUT", body: JSON.stringify(s) }),
 };
 
 /** 订阅变更通知（拓扑/租约），收到即回调（调用方重拉数据）。 */

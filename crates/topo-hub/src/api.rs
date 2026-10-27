@@ -96,6 +96,8 @@ pub fn routes() -> Router<TopoState> {
         .route("/api/topologies/:id", get(detail).put(update).delete(remove))
         .route("/api/leases", get(leases_list))
         .route("/api/leases/:id", axum::routing::delete(lease_force_delete))
+        .route("/api/remotes", get(remotes_list).put(remotes_save))
+        .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/events", get(crate::events::sse))
 }
 
@@ -203,6 +205,91 @@ async fn lease_force_delete(
         }
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ===== 远端设备与设置（原 Tauri IPC 专属，平台 Web 化补 REST 入口）=====
+
+async fn remotes_list() -> Json<Vec<ss_core::RemoteDevice>> {
+    Json(ss_server::remotes_store::load())
+}
+
+/// 全量覆盖远端设备表（昵称校验在 store 层）：更新连接池并触发（重）连接，
+/// meta_bus 通知所有客户端刷新端口列表。
+async fn remotes_save(
+    State(state): State<TopoState>,
+    Json(body): Json<RemotesBody>,
+) -> Result<Json<Vec<ss_core::RemoteDevice>>, ApiError> {
+    ss_server::remotes_store::save(&body.devices).map_err(bad)?;
+    state.base.devices.update_registry(&body.devices);
+    state.base.devices.start();
+    let _ = state.base.meta_bus.send(());
+    Ok(Json(body.devices))
+}
+
+#[derive(Deserialize)]
+pub struct RemotesBody {
+    pub devices: Vec<ss_core::RemoteDevice>,
+}
+
+/// 设置视图：服务器 settings.json + 租约 lease.json（后者展示运行中定格值）。
+#[derive(Serialize)]
+pub struct SettingsView {
+    #[serde(flatten)]
+    pub server: ss_server::settings::Settings,
+    pub lease: lease::LeaseConfig,
+}
+
+async fn settings_get(State(state): State<TopoState>) -> Json<SettingsView> {
+    Json(SettingsView {
+        server: ss_server::settings::load(),
+        lease: state.leases.cfg.clone(),
+    })
+}
+
+/// 提供的字段才更新（instance_id 永不覆盖）；enable_scripting 热生效（刷新
+/// AppState 缓存的原子开关）；监听参数写盘后重启生效；lease.json 重启生效。
+#[derive(Deserialize)]
+pub struct SettingsBody {
+    ws_host: Option<String>,
+    ws_port: Option<u16>,
+    telnet_port: Option<u16>,
+    enable_scripting: Option<bool>,
+    script_log_to_disk: Option<bool>,
+    lease: Option<lease::LeaseConfig>,
+}
+
+async fn settings_put(
+    State(state): State<TopoState>,
+    Json(body): Json<SettingsBody>,
+) -> Result<Json<SettingsView>, ApiError> {
+    let mut s = ss_server::settings::load();
+    if let Some(v) = body.ws_host {
+        s.ws_host = v;
+    }
+    if let Some(v) = body.ws_port {
+        s.ws_port = v;
+    }
+    if let Some(v) = body.telnet_port {
+        s.telnet_port = v;
+    }
+    if let Some(v) = body.script_log_to_disk {
+        s.script_log_to_disk = v;
+    }
+    if let Some(v) = body.enable_scripting {
+        s.enable_scripting = v;
+        state
+            .base
+            .enable_scripting
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    ss_server::settings::save(&s).map_err(bad)?;
+    if let Some(cfg) = &body.lease {
+        lease::save_config(cfg).map_err(bad)?;
+    }
+    Ok(Json(SettingsView {
+        server: s,
+        lease: body.lease.unwrap_or_else(|| state.leases.cfg.clone()),
+    }))
 }
 
 /// 成员展示视图：端点按端口表查属主设备，设备查各注册表。

@@ -59,6 +59,19 @@ pub fn load_config() -> LeaseConfig {
         .unwrap_or_default()
 }
 
+/// 写 lease.json（设置面板用；temp+rename 原子替换，同 settings.json 模式）。
+/// 运行中的 LeaseManager 配置在启动时定格——新值重启进程生效。
+pub fn save_config(cfg: &LeaseConfig) -> Result<(), String> {
+    let p = ss_server::config::config_dir()
+        .map(|d| d.join("lease.json"))
+        .ok_or("无法定位配置目录")?;
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("写入 {:?} 失败: {}", tmp, e))?;
+    std::fs::rename(&tmp, &p).map_err(|e| format!("落盘 {:?} 失败: {}", p, e))?;
+    Ok(())
+}
+
 /// 一条授权（租约的原子单位）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Grant {

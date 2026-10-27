@@ -121,15 +121,19 @@ Held → Preempted  仅人（Web 占用中心）
 
 ## 7. UI 信息架构（ui-topo）
 
-独立 Vite + React + TS 应用，上路由（react-router）；复用旧 UI 的 transport 模式、`term.tsx`、`theme.ts`、`primitives.tsx`。
+独立 Vite + React + TS 应用，上路由（react-router）。**视觉体系与功能面板整体移植自 serial-studio UI**（2026-10-27 起）：styles.css 全量（design tokens + 全部主题覆盖块）、theme.ts 主题注册表（13 主题、localStorage 持久、首帧防闪内联脚本）、primitives（ConfigRow/对话框键盘栈/焦点圈闭/PortLabel/InlineAliasInput）、对话框族（设置/关于/SSH 管理与编辑/认证重试/指纹确认/添加远端/设备与端口详情/串口参数/通用确认）。
+
+数据通道：SSH 管理/别名/版本走既有 WS 协议（与 serial-studio UI 同源同协议）；远端设备与设置走 topo-hub REST（`/api/remotes`、`/api/settings`，原为 Tauri IPC 专属）；终端走 WS 数据面（二进制帧 + Acquired/Error 回执配对），xterm 单终端简化移植（选中复制/fit/PTY resize/主题热切）。
 
 | 页面 | 内容 |
 |---|---|
 | 总览 | 拓扑卡片：成员数、占用徽章（持有者 label + 剩余时间） |
-| 拓扑详情 | 成员列表（在线/占用状态）；V2 加图（@xyflow/react） |
-| 设备库 | 本机/SSH/远端三源统一管理，消费 DeviceView |
+| 拓扑详情 | 成员列表（在线/占用状态）⇄ 拓扑图（@xyflow/react） |
+| 设备库 | 本机/SSH/远端统一清单（WS 实时）；右键设备/端口详情、铅笔内联别名、双击进终端 |
 | 占用中心 | 活跃租约表 + 人工强释放（Preempted 路径） |
-| 终端 | 点端点开 xterm，从属视图 |
+| 终端 | 端口选择（串口参数对话框/SSH 直开）→ xterm 标签页；SSH 认证/指纹闭环弹窗 |
+
+侧栏工具区：SSH 设备 / 添加远端 / 设置（服务器+租约）/ 关于 / 主题选择。设置中 enable_scripting 热生效，监听与租约参数重启生效。
 
 ## 8. 审计与配置
 
