@@ -1,6 +1,6 @@
 /** 设备管理：被测设备卡（通道清单/在线态/占用徽章/每通道开终端/编辑/删除）。
- *  页底折叠「未注册资源」——未归属设备的端口与凭据（资源选择器视角，注册设备时
- *  的候选来源）。占用 = 设备级（leases.grants.device join）。 */
+ *  临时端口的直达入口在终端页的「任意端口键」输入，不再在本页维护未注册资源清单。
+ *  占用 = 设备级（leases.grants.device join）。 */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -30,7 +30,6 @@ export default function Devices() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Device | null>(null);
   const [detail, setDetail] = useState<Device | null>(null);
-  const [showResources, setShowResources] = useState(false);
 
   const refresh = useCallback(() => {
     api
@@ -72,25 +71,6 @@ export default function Devices() {
     const h = sshHosts.find((x) => x.id === id);
     return h ? h.nickname || `${h.username}@${h.host}` : id ?? "?";
   };
-
-  /** 未注册资源：未归属任何设备的端口行 + 未挂设备的 SSH 凭据。
-   *  端口归属判定与 device.rs Channel::covers 同构：串口通道精确匹配端口键；
-   *  SSH 通道按复合键首段（凭据 id）匹配——否则 SSH 端点行（ref::shell 及
-   *  实例行 ref::shell@N）会漏进未注册清单。 */
-  const unregisteredPorts = useMemo(
-    () =>
-      ports.filter((p) => {
-        const owned =
-          ownedSerial.has(p.name.toLowerCase()) ||
-          (p.name.includes("::") && ownedSsh.has(p.name.split("::")[0]));
-        return !owned;
-      }),
-    [ports, ownedSerial, ownedSsh],
-  );
-  const orphanSsh = useMemo(
-    () => sshHosts.filter((h) => !ownedSsh.has(h.id)),
-    [sshHosts, ownedSsh],
-  );
 
   const save = (input: {
     name: string;
@@ -238,38 +218,6 @@ export default function Devices() {
           })}
         </div>
       )}
-
-      <div style={{ marginTop: 20 }}>
-        <button className="btn btn--ghost" onClick={() => setShowResources(!showResources)}>
-          {showResources ? "收起" : "展开"}未注册资源（{unregisteredPorts.length} 端口 · {orphanSsh.length} 凭据）
-        </button>
-        {showResources && (
-          <div className="device-card" style={{ marginTop: 10 }}>
-            <div className="device-head">
-              <strong>未注册资源</strong>
-              <span className="muted">注册设备时可将其选为通道</span>
-            </div>
-            <ul>
-              {unregisteredPorts.map((p) => (
-                <li key={p.name} className="port-row">
-                  <span className="group-badge">端口</span>
-                  <span className="mono">{p.name}</span>
-                  <span className="muted">{p.device?.label ?? p.kind}</span>
-                </li>
-              ))}
-              {orphanSsh.map((h) => (
-                <li key={h.id} className="port-row">
-                  <span className="group-badge">SSH</span>
-                  <span>{h.nickname || `${h.username}@${h.host}`}</span>
-                </li>
-              ))}
-              {unregisteredPorts.length === 0 && orphanSsh.length === 0 && (
-                <li className="muted">全部资源已归属设备。</li>
-              )}
-            </ul>
-          </div>
-        )}
-      </div>
 
       {(creating || editing) && (
         <DeviceEditDialog

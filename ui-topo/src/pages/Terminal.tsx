@@ -24,6 +24,7 @@ export default function Terminal() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
+  const [customPort, setCustomPort] = useState("");
   const [pendingSerial, setPendingSerial] = useState<PortView | null>(null);
   const [sshFail, setSshFail] = useState<{ port: string; host: SshHost | undefined; error: SshOpenError } | null>(null);
   const [lastError, setLastError] = useState("");
@@ -97,6 +98,25 @@ export default function Terminal() {
     setPicker(false);
     if (p.kind === "serial" && !p.opened) setPendingSerial(p);
     else void openPort(p);
+  };
+
+  /** 任意端口键：命中清单走常规；SSH 端点（首段=凭据 id）直开；其余按串口走参数框。 */
+  const openCustom = () => {
+    const key = customPort.trim();
+    if (!key) return;
+    setPicker(false);
+    setCustomPort("");
+    const known = ports.find((x) => x.name === key);
+    if (known) {
+      startOpen(known);
+      return;
+    }
+    const first = key.split("::")[0];
+    if (key.includes("::") && sshHosts.some((h) => h.id === first)) {
+      void openPort({ name: key, opened: false, holders: 0 } as PortView);
+    } else {
+      setPendingSerial({ name: key, opened: false, holders: 0, kind: "serial" } as PortView);
+    }
   };
 
   const closeTab = (port: string) => {
@@ -255,6 +275,25 @@ export default function Terminal() {
                     <span className="muted">{p.opened ? `已开 · ${p.holders} 人` : p.device?.label ?? ""}</span>
                   </button>
                 ))}
+              <p className="dialog__hint" style={{ marginTop: 10 }}>
+                任意端口键
+              </p>
+              <div className="port-picker__custom">
+                <input
+                  value={customPort}
+                  onChange={(e) => setCustomPort(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") openCustom();
+                  }}
+                  placeholder="COM7 / sshUuid::shell / 级联键 devB::COM5"
+                  className="mono"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+                <button className="btn btn--primary" onClick={openCustom}>
+                  打开
+                </button>
+              </div>
             </div>
           </div>
         </div>
