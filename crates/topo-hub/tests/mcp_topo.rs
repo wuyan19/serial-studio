@@ -58,7 +58,7 @@ async fn device_and_topology_roundtrip() {
     let resp = call(
         &state,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","model":"H3C S5120","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","ref":"ssh-x1"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","model":"H3C S5120","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","host":"192.0.2.70","username":"root","nickname":"车间网关","auth":{{"type":"agent"}}}}]}}}}}}"#
         ),
     )
     .await;
@@ -82,7 +82,7 @@ async fn device_and_topology_roundtrip() {
     let resp = call(
         &state,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{other}","channels":[{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{other}","channels":[{{"type":"ssh","host":"192.0.2.71","username":"root","auth":{{"type":"agent"}}}}]}}}}}}"#
         ),
     )
     .await;
@@ -187,18 +187,28 @@ async fn lease_flow_and_write_gate() {
     let msg = text(&resp);
     assert!(msg.contains("device_create"), "未注册端口引导注册: {msg}");
 
-    // initialize → token → 注册设备（COM4 串口 + SSH）
+    // initialize → token → 注册设备（COM4 串口 + 内联 SSH）
     let init = call(&state, r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#).await;
     let token = init["result"]["session_token"].as_str().unwrap().to_string();
     let resp = call_as(
         &state,
         &token,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev_name}","channels":[{{"type":"serial","port":"COM4"}},{{"type":"ssh","host":"192.0.2.71","username":"root","auth":{{"type":"agent"}}}}]}}}}}}"#
         ),
     )
     .await;
     assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
+    // 内联 SSH 的通道 id 是服务端生成的——从 REST 读回，拼端点键
+    let ssh_ep = topo_hub::device::find(&dev_name)
+        .unwrap()
+        .channels
+        .iter()
+        .find_map(|c| match c {
+            topo_hub::device::Channel::Ssh(s) => Some(format!("{}::shell", s.id)),
+            _ => None,
+        })
+        .unwrap();
 
     // A 会话申请设备
     let resp = call_as(
@@ -214,7 +224,7 @@ async fn lease_flow_and_write_gate() {
     let lease_id = msg.split("已获租约 ").nth(1).unwrap().split('（').next().unwrap().to_string();
 
     // A 写串口通道（过闸 → 工具本体的端口未开错）；写 SSH 通道同样过闸
-    for port in ["COM4", "ssh-x2::shell"] {
+    for port in ["COM4", &ssh_ep] {
         let resp = call_as(
             &state,
             &token,
@@ -231,7 +241,9 @@ async fn lease_flow_and_write_gate() {
     let resp = call_as(
         &state,
         "token-b-别人",
-        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"serial_send","arguments":{"port":"ssh-x2::shell","data":"AT"}}}"#,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"serial_send","arguments":{{"port":"{ssh_ep}","data":"AT"}}}}}}"#
+        ),
     )
     .await;
     let msg = text(&resp);
@@ -270,7 +282,7 @@ async fn lease_status_shows_own_leases() {
     let resp = call(
         &state,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev}","channels":[{{"type":"ssh","ref":"ssh-x2"}}]}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"device_create","arguments":{{"name":"{dev}","channels":[{{"type":"ssh","host":"192.0.2.71","username":"root","auth":{{"type":"agent"}}}}]}}}}}}"#
         ),
     )
     .await;

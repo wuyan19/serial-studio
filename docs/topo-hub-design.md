@@ -32,11 +32,13 @@
 **设备是被测对象的一等实体，通道是接入方式**（2026-10-27 定案，P2.5 重构）：一台交换机 = 一台设备，其串口控制台（COM4）与多条 SSH 登录（admin@ip、support@ip）是它的**通道**。此前模型里的"设备"（本机/SSH 主机/远端实例）实为接入源，不再冒充设备——接入源降级为底层资源；"哪些通道属于同一台被测设备"这层领域知识落进注册表，此前只存在于人的备注里。
 
 ```jsonc
-// devices.json（新增：被测设备注册表）
+// devices.json（被测设备注册表；P2.6 起通道携带完整接入配置——"通道归设备"）
 { "id": "uuid", "name": "车间交换机#3（同表唯一）", "model": "", "location": "",
   "channels": [
-    { "type": "serial", "port": "COM4" },     // 本机裸名，或级联端口键 devB::COM4（设备插在另一台 ss 主机）
-    { "type": "ssh", "ref": "ssh-uuid" }      // 引用 SSH 凭据库（admin@ 与 support@ 是两条凭据、一台设备的两条通道）
+    { "type": "serial", "port": "COM4",        // 本机裸名或级联键 devB::COM4
+      "config": { "baud_rate": 115200, "data_bits": "eight", /* …与打开串口同构的完整参数 */ } },
+    { "type": "ssh", "id": "uuid（稳定，=端口键首段）", "host": "192.168.21.20", "port": 22,
+      "username": "root", "nickname": null, "auth": { "type": "password", "password": "…" } }
   ] }
 
 // topologies.json（成员纯设备引用）
@@ -50,9 +52,11 @@
   "acquired_at": "...", "expires_at": "..." }
 ```
 
-校验：设备名唯一；串口通道的端口与 SSH 凭据**跨设备不共用**；SSH ref 须存在于凭据库。SSH 凭据库（ssh.json）保留为连接层——管理入口收进设备编辑表单（顺带建/选凭据），未挂设备的凭据收纳在设置里。租约纯内存语义不变。
+校验：设备名唯一；串口端口跨设备不共用；SSH 通道 id 与 host:port 跨设备不重复；SSH 字段完整性（host/username 非空、认证按类型带 key_path/password）。
 
-**一次性迁移**（仅冒烟期数据）：旧成员 `{kind, key}` 每键自动包一台设备（串口端点键→串口通道；SSH 键→SSH 通道；`local`/远端实例整机成员跳过），迁移后重写两份 JSON。
+**SSH 凭据库降级为实现细节**：连接层（SshManager 会话池、`sshUuid::shell` 端口寻址）仍建立在 ssh.json 之上——设备保存时把 SSH 通道**投影**进凭据库（增删改同步，id 稳定保证端口键不变），用户不再直接管理凭据；设置页的凭据库入口撤销。设备删除即删其凭据；历史孤儿凭据保留（裸端口区仍可开）。终端从设备通道打开**即点即开**（串口用存储参数，不再弹参数框）；参数框仅留给未注册裸端口。MCP `device_create/update` 的 channels 直接收完整配置。
+
+**迁移**（冒烟期一次性）：P2.5 的 `{type:"ssh", ref}` 通道查凭据库展开内联（查无则弃）；串口通道补默认 config；旧拓扑成员包设备逻辑不变。
 
 ## 4. 租约机制
 

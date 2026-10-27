@@ -167,7 +167,7 @@ impl TopoTools {
 
     // ===== 被测设备工具族 =====
 
-    async fn device_list(&self, state: &AppState) -> Value {
+    async fn device_list(&self, _state: &AppState) -> Value {
         let list = device::load();
         if list.is_empty() {
             return ok_text(
@@ -178,7 +178,7 @@ impl TopoTools {
             .iter()
             .map(|d| {
                 let chans: Vec<String> =
-                    d.channels.iter().map(|c| c.label(state)).collect();
+                    d.channels.iter().map(|c| c.label()).collect();
                 let mut s = format!(
                     "{} · id {} · 通道: {}",
                     d.name,
@@ -201,7 +201,7 @@ impl TopoTools {
         ok_text(lines.join("\n"))
     }
 
-    async fn device_get(&self, args: Value, state: &AppState) -> Value {
+    async fn device_get(&self, args: Value, _state: &AppState) -> Value {
         let Some(dev_ref) = args.get("device").and_then(|t| t.as_str()) else {
             return error_text("缺少参数 device（设备 id 或名称）".into());
         };
@@ -217,23 +217,18 @@ impl TopoTools {
         )];
         for ch in &d.channels {
             lines.push(match ch {
-                device::Channel::Serial { port } => {
-                    format!("通道 串口 {port}（写寻址用此端口键）")
-                }
-                device::Channel::Ssh { r#ref } => {
-                    let rec = state
-                        .ssh
-                        .registry_snapshot()
-                        .into_iter()
-                        .find(|r| r.id == *r#ref);
-                    match rec {
-                        Some(r) => format!(
-                            "通道 SSH {}（{}@{}:{}，端点键 {}::shell）",
-                            r.label(), r.username, r.host, r.port, r#ref
-                        ),
-                        None => format!("通道 SSH {}（凭据已被删除）", r#ref),
-                    }
-                }
+                device::Channel::Serial { port, config } => format!(
+                    "通道 串口 {port}（{}bps，写寻址用此端口键）",
+                    config.baud_rate
+                ),
+                device::Channel::Ssh(s) => format!(
+                    "通道 SSH {}（{}:{}，端点键 {}::shell，认证 {}）",
+                    s.label(),
+                    s.host,
+                    s.port,
+                    s.id,
+                    ss_server::ssh::auth_label_of(&s.auth)
+                ),
             });
         }
         if let Some(l) = self.leases.lease_of_device(&d.id) {
@@ -251,7 +246,7 @@ impl TopoTools {
 
     async fn device_create(&self, args: Value, state: &AppState) -> Value {
         let Ok(a) = serde_json::from_value::<DeviceArgs>(args) else {
-            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port}|{type:ssh,ref}]".into());
+            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port,config?}|{type:ssh,host,port?,username,nickname?,auth}]".into());
         };
         match device::create(&a.into_input(), state) {
             Ok(d) => {
@@ -274,7 +269,7 @@ impl TopoTools {
             return error_text("缺少参数 device（设备 id 或名称）".into());
         };
         let Ok(a) = serde_json::from_value::<DeviceArgs>(args) else {
-            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port}|{type:ssh,ref}]".into());
+            return error_text("参数解析失败：需要 name（必填）、model?/location?、channels: [{type:serial,port,config?}|{type:ssh,host,port?,username,nickname?,auth}]".into());
         };
         let Some(existing) = device::find(&dev_ref) else {
             return error_text(format!("设备不存在: {dev_ref}"));
@@ -288,14 +283,14 @@ impl TopoTools {
         }
     }
 
-    async fn device_delete(&self, args: Value) -> Value {
+    async fn device_delete(&self, args: Value, state: &AppState) -> Value {
         let Some(dev_ref) = args.get("device").and_then(|t| t.as_str()) else {
             return error_text("缺少参数 device（设备 id 或名称）".into());
         };
         let Some(d) = device::find(dev_ref) else {
             return error_text(format!("设备不存在: {dev_ref}"));
         };
-        match device::delete(&d.id) {
+        match device::delete(&d.id, state) {
             Ok(d) => {
                 let _ = self.bus.send(());
                 ok_text(format!("已删除设备 {}（{}）。", d.name, d.id))
@@ -754,7 +749,7 @@ impl McpExtension for TopoTools {
                 "device_get" => Some(self.device_get(args, state).await),
                 "device_create" => Some(self.device_create(args, state).await),
                 "device_update" => Some(self.device_update(args, state).await),
-                "device_delete" => Some(self.device_delete(args).await),
+                "device_delete" => Some(self.device_delete(args, state).await),
                 "lease_acquire" => Some(self.lease_acquire(args, principal).await),
                 "lease_renew" => Some(self.lease_renew(args, principal).await),
                 "lease_release" => Some(self.lease_release(args, principal).await),

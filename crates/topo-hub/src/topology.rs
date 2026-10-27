@@ -150,7 +150,7 @@ fn migrate_legacy(raw: &str) -> (Vec<Topology>, Vec<crate::device::Device>, bool
     let ssh_hosts = ss_server::ssh::store::load();
     let mut devices: Vec<crate::device::Device> = Vec::new();
     let mut wrap = |kind: &str, key: &str| -> Option<String> {
-        use crate::device::{Channel, Device};
+        use crate::device::{Channel, Device, SshChannelConfig};
         let _ = kind;
         // split_port_key 对裸名返回 (local, 键本身)——设备段按"复合键取首段、
         // 裸名取键本身"归一，再判 local / SSH / 串口。
@@ -158,28 +158,27 @@ fn migrate_legacy(raw: &str) -> (Vec<Topology>, Vec<crate::device::Device>, bool
             .split_once(ss_core::PORT_KEY_SEP)
             .map(|(f, _)| f)
             .unwrap_or(key);
-        let channels = if key == ss_core::LOCAL_DEVICE_ID {
+        let channels: Vec<Channel> = if key == ss_core::LOCAL_DEVICE_ID {
             // local 整机成员（本机全部串口）在新模型无对应——跳过
             return None;
-        } else if ssh_hosts.iter().any(|h| h.id == first_seg) {
-            // SSH 键（裸设备键或 hostId::shell 端点键）→ 凭据通道
-            vec![Channel::Ssh {
-                r#ref: first_seg.to_string(),
-            }]
+        } else if let Some(h) = ssh_hosts.iter().find(|h| h.id == first_seg) {
+            // SSH 键（裸设备键或 hostId::shell 端点键）→ 内联凭据通道
+            vec![Channel::Ssh(SshChannelConfig {
+                id: h.id.clone(),
+                host: h.host.clone(),
+                port: h.port,
+                username: h.username.clone(),
+                nickname: h.nickname.clone(),
+                auth: h.auth.clone(),
+            })]
         } else {
-            // 本机串口裸名或级联端口键 → 串口通道（port 存原键）
+            // 本机串口裸名或级联端口键 → 串口通道（port 存原键，默认参数）
             vec![Channel::Serial {
                 port: key.to_string(),
+                config: ss_core::SerialConfig::default(),
             }]
         };
-        let name = match &channels[0] {
-            Channel::Ssh { r#ref } => ssh_hosts
-                .iter()
-                .find(|h| &h.id == r#ref)
-                .map(|h| h.label())
-                .unwrap_or_else(|| format!("SSH {}", r#ref)),
-            Channel::Serial { port } => format!("串口 {port}"),
-        };
+        let name = channels[0].label();
         let id = uuid::Uuid::new_v4().to_string();
         devices.push(Device {
             id: id.clone(),
@@ -408,7 +407,7 @@ mod tests {
                 name: a.clone(),
                 model: String::new(),
                 location: String::new(),
-                channels: vec![Channel::Serial { port: "COM4".into() }],
+                channels: vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }],
             },
             state,
         )
@@ -418,9 +417,14 @@ mod tests {
                 name: b.clone(),
                 model: String::new(),
                 location: String::new(),
-                channels: vec![Channel::Ssh {
-                    r#ref: "ssh-x1".into(),
-                }],
+                channels: vec![Channel::Ssh(crate::device::SshChannelConfig {
+                    id: "ssh-x1".into(),
+                    host: "192.0.2.70".into(),
+                    port: 22,
+                    username: "root".into(),
+                    nickname: None,
+                    auth: ss_server::ssh::SshAuthRecord::Agent,
+                })],
             },
             state,
         )
@@ -475,11 +479,11 @@ mod tests {
         assert!(err.contains("不是本拓扑成员"), "{err}");
 
         // 设备删除被拓扑引用拦截
-        let err = device::delete(&t.members[0].device).unwrap_err();
+        let err = device::delete(&t.members[0].device, &state).unwrap_err();
         assert!(err.contains(&n), "错误应列出引用拓扑: {err}");
 
         delete(&t.id).unwrap();
-        device::delete(&dev_b.id).unwrap();
+        device::delete(&dev_b.id, &state).unwrap();
     }
 
     #[tokio::test]
@@ -518,9 +522,9 @@ mod tests {
         assert_eq!(list[0].members.len(), 2, "local 整机成员被跳过");
         // 成员已是设备 id；包装出的设备通道正确
         let d1 = device::find(&list[0].members[0].device).unwrap();
-        assert!(matches!(d1.channels[0], Channel::Serial { ref port } if port == "COM4"));
+        assert!(matches!(&d1.channels[0], Channel::Serial { port, .. } if port == "COM4"));
         let d2 = device::find(&list[0].members[1].device).unwrap();
-        assert!(matches!(&d2.channels[0], Channel::Ssh { r#ref } if r#ref == "ssh-x1"));
+        assert!(matches!(&d2.channels[0], Channel::Ssh(s) if s.id == "ssh-x1"));
         assert!(d2.name.contains("车间网关"), "SSH 设备用凭据标签命名: {}", d2.name);
         // 重读不再迁移（文件已是新形态）
         assert_eq!(load().len(), 1);
@@ -528,7 +532,7 @@ mod tests {
         // 清理迁移产物
         delete(&list[0].id).unwrap();
         for d in crate::device::load() {
-            let _ = device::delete(&d.id);
+            let _ = device::delete(&d.id, &state);
         }
     }
 }

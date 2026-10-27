@@ -611,10 +611,8 @@ mod tests {
             &state,
             &n,
             vec![
-                Channel::Serial { port: "COM4".into() },
-                Channel::Ssh {
-                    r#ref: "ssh-x1".into(),
-                },
+                Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() },
+                Channel::Ssh(crate::device::SshChannelConfig::ssh_fixture("ssh-x1")),
             ],
         );
         let g = Grant { device: d.id.clone() };
@@ -623,7 +621,7 @@ mod tests {
         assert!(g.covers("ssh-x1::shell@3"), "SSH 实例行覆盖");
         assert!(!g.covers("COM5"));
         assert!(!g.covers("ssh-x2::shell"));
-        device::delete(&d.id).unwrap();
+        device::delete(&d.id, &state).unwrap();
     }
 
     #[tokio::test]
@@ -635,8 +633,8 @@ mod tests {
         let m = manager(LeaseConfig::default());
         let na = unique_name("设备A");
         let nb = unique_name("设备B");
-        let a = seed_device(&state, &na, vec![Channel::Serial { port: "COM4".into() }]);
-        let b = seed_device(&state, &nb, vec![Channel::Ssh { r#ref: "ssh-x1".into() }]);
+        let a = seed_device(&state, &na, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
+        let b = seed_device(&state, &nb, vec![Channel::Ssh(crate::device::SshChannelConfig::ssh_fixture("ssh-x1"))]);
 
         // token-a 持 A
         let la = m
@@ -681,8 +679,8 @@ mod tests {
         assert_eq!(m.list().len(), 2, "失败申请不建租约");
 
         m.release(&la.id, "token-a").unwrap();
-        device::delete(&a.id).unwrap();
-        device::delete(&b.id).unwrap();
+        device::delete(&a.id, &state).unwrap();
+        device::delete(&b.id, &state).unwrap();
     }
 
     #[tokio::test]
@@ -698,7 +696,7 @@ mod tests {
         };
         let m = manager(cfg);
         let n = unique_name("设备");
-        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into() }]);
+        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
 
         let a = m
             .acquire("token-a", "a", &scope_devices(&n), Some(9999))
@@ -729,7 +727,7 @@ mod tests {
         let lb = m.list()[0].clone();
         m.force_release(&lb.id, &state).await.unwrap();
         assert!(m.list().is_empty());
-        device::delete(&d.id).unwrap();
+        device::delete(&d.id, &state).unwrap();
     }
 
     #[tokio::test]
@@ -755,7 +753,7 @@ mod tests {
         let state = make_state();
         let m = manager(LeaseConfig::default());
         let n = unique_name("设备");
-        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into() }]);
+        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
         let a = m
             .acquire("token-a", "a", &scope_devices(&n), None)
             .unwrap();
@@ -781,6 +779,6 @@ mod tests {
             .acquire_with_wait("token-c", "c", &scope_devices(&n), None, 300)
             .await;
         assert!(matches!(c, Err(AcquireError::Conflict(_))));
-        device::delete(&d.id).unwrap();
+        device::delete(&d.id, &state).unwrap();
     }
 }

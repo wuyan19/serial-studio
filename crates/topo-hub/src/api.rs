@@ -73,9 +73,9 @@ pub struct TopoBody {
 pub struct ChannelView {
     #[serde(rename = "type")]
     pub kind: String,
-    /// 通道目标键（串口端口键 / SSH 凭据 id）。
+    /// 通道目标键（串口端口键 / SSH 通道 id）。
     pub key: String,
-    /// 展示标签（"串口 COM4" / "SSH 车间网关"）。
+    /// 展示标签（"串口 COM4·115200bps" / "SSH 车间网关"）。
     pub label: String,
     /// 通道端口当前在端口表中可见（串口在位/SSH 端点行存在）。
     pub present: bool,
@@ -83,6 +83,9 @@ pub struct ChannelView {
     pub opened: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holders: Option<usize>,
+    /// 串口通道存储的波特率（终端即点即开用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baud_rate: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -337,35 +340,37 @@ pub async fn member_views(topo: &Topology, state: &AppState) -> Vec<MemberView> 
         .collect()
 }
 
-/// 设备的通道视图：串口通道在端口表精确匹配；SSH 通道取凭据全部端点行
-/// （present = 任一端点行可见，opened/holders 取首个端点行）。
-pub fn channel_views(d: &Device, state: &AppState, rows: &[PortView]) -> Vec<ChannelView> {
+/// 设备的通道视图：串口通道在端口表精确匹配（label 带存储的波特率）；
+/// SSH 通道按 id 取端点行（present = 任一端点行可见）。
+pub fn channel_views(d: &Device, _state: &AppState, rows: &[PortView]) -> Vec<ChannelView> {
     d.channels
         .iter()
         .map(|ch| match ch {
-            Channel::Serial { port } => {
+            Channel::Serial { port, config } => {
                 let row = rows.iter().find(|r| r.info.name == *port);
                 ChannelView {
                     kind: "serial".into(),
                     key: port.clone(),
-                    label: format!("串口 {port}"),
+                    label: ch.label(),
                     present: row.is_some(),
                     opened: row.map(|r| r.info.opened),
                     holders: row.map(|r| r.info.holders),
+                    baud_rate: Some(config.baud_rate),
                 }
             }
-            Channel::Ssh { r#ref } => {
+            Channel::Ssh(s) => {
                 let endpoints: Vec<&PortView> = rows
                     .iter()
-                    .filter(|r| ss_core::split_port_key(&r.info.name).0 == *r#ref)
+                    .filter(|r| ss_core::split_port_key(&r.info.name).0 == s.id)
                     .collect();
                 ChannelView {
                     kind: "ssh".into(),
-                    key: r#ref.clone(),
-                    label: ch.label(state),
+                    key: s.id.clone(),
+                    label: ch.label(),
                     present: !endpoints.is_empty(),
                     opened: endpoints.first().map(|r| r.info.opened),
                     holders: endpoints.first().map(|r| r.info.holders),
+                    baud_rate: None,
                 }
             }
         })
@@ -404,7 +409,7 @@ async fn devices_update(
 }
 
 async fn devices_delete(State(state): State<TopoState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    device::delete(&id).map_err(|e| {
+    device::delete(&id, &state.base).map_err(|e| {
         if e.contains("不存在") {
             (StatusCode::NOT_FOUND, Json(json!({ "error": e })))
         } else {
