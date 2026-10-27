@@ -4002,14 +4002,3 @@ button.link {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }
-
-/* 终端选择器：任意端口键输入行 */
-.port-picker__custom {
-  display: flex;
-  gap: 8px;
-  padding: 4px 2px 8px;
-}
-
-.port-picker__custom input {
-  flex: 1;
-}

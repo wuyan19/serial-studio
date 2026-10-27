@@ -2,7 +2,7 @@
  * 数据回流：WS 二进制帧按端口键路由到各 tab 的 TermHandle（此前缺失，终端空白）。
  * 回调全部 useCallback 稳定 + TermView 内部再 ref 化——双保险防 xterm 重建风暴。
  * SSH 失败闭环抄 serial-studio：auth_failed 重输密码、host_key_* 指纹确认。 */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, channelPortKey, type Device, type PortView } from "../api";
 import { ws } from "../ws";
@@ -24,7 +24,6 @@ export default function Terminal() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
-  const [customPort, setCustomPort] = useState("");
   const [pendingSerial, setPendingSerial] = useState<PortView | null>(null);
   const [sshFail, setSshFail] = useState<{ port: string; host: SshHost | undefined; error: SshOpenError } | null>(null);
   const [lastError, setLastError] = useState("");
@@ -103,25 +102,6 @@ export default function Terminal() {
     else void openPort(p);
   };
 
-  /** 任意端口键：命中清单走常规；SSH 端点（首段=凭据 id）直开；其余按串口走参数框。 */
-  const openCustom = () => {
-    const key = customPort.trim();
-    if (!key) return;
-    setPicker(false);
-    setCustomPort("");
-    const known = ports.find((x) => x.name === key);
-    if (known) {
-      startOpen(known);
-      return;
-    }
-    const first = key.split("::")[0];
-    if (key.includes("::") && sshHosts.some((h) => h.id === first)) {
-      void openPort({ name: key, opened: false, holders: 0 } as PortView);
-    } else {
-      setPendingSerial({ name: key, opened: false, holders: 0, kind: "serial" } as PortView);
-    }
-  };
-
   const closeTab = (port: string) => {
     ws.close(port);
     handles.current.delete(port);
@@ -131,6 +111,23 @@ export default function Terminal() {
       return next;
     });
   };
+
+  /** 裸端口 = 未归属任何设备通道的端口（与 device.rs Channel::covers 同构：
+   *  串口通道精确匹配端口键、SSH 通道按复合键首段匹配）。已注册的走上方设备通道区。 */
+  const barePorts = useMemo(() => {
+    const ownedSerial = new Set<string>();
+    const ownedSsh = new Set<string>();
+    for (const d of devices)
+      for (const c of d.channels) {
+        if (c.type === "serial" && c.port) ownedSerial.add(c.port.toLowerCase());
+        if (c.type === "ssh" && c.ref) ownedSsh.add(c.ref);
+      }
+    return ports.filter(
+      (p) =>
+        !ownedSerial.has(p.name.toLowerCase()) &&
+        !(p.name.includes("::") && ownedSsh.has(p.name.split("::")[0])),
+    );
+  }, [ports, devices]);
 
   // TermView 回调：稳定引用（TermView 内部还有 ref 兜底，这里防的是父渲染扩散）
   const handleWrite = useCallback((port: string, data: string) => ws.write(port, data), []);
@@ -270,7 +267,7 @@ export default function Terminal() {
               <p className="dialog__hint" style={{ marginTop: 10 }}>
                 裸端口（未注册设备）
               </p>
-              {ports
+              {barePorts
                 .filter((p) => p.kind !== "ssh" || p.instance == null)
                 .map((p) => (
                   <button key={p.name} className="port-picker__item" onClick={() => startOpen(p)} title={p.name}>
@@ -278,25 +275,9 @@ export default function Terminal() {
                     <span className="muted">{p.opened ? `已开 · ${p.holders} 人` : p.device?.label ?? ""}</span>
                   </button>
                 ))}
-              <p className="dialog__hint" style={{ marginTop: 10 }}>
-                任意端口键
-              </p>
-              <div className="port-picker__custom">
-                <input
-                  value={customPort}
-                  onChange={(e) => setCustomPort(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") openCustom();
-                  }}
-                  placeholder="COM7 / sshUuid::shell / 级联键 devB::COM5"
-                  className="mono"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
-                <button className="btn btn--primary" onClick={openCustom}>
-                  打开
-                </button>
-              </div>
+              {barePorts.length === 0 && (
+                <p className="dialog__hint">全部端口已归属设备。</p>
+              )}
             </div>
           </div>
         </div>
