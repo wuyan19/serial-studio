@@ -35,11 +35,14 @@ export default function TopologyGraph({
           background: "var(--surface)",
           color: "var(--ink)",
           border: `1px solid ${occupied ? "var(--warn)" : "var(--hairline)"}`,
-          borderRadius: 8,
-          padding: "8px 14px",
+          borderRadius: 12,
+          padding: "10px 16px",
           fontSize: 13,
+          lineHeight: 1.55,
+          maxWidth: 240,
           whiteSpace: "pre-line",
           textAlign: "center",
+          boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
         },
       };
     });
@@ -48,9 +51,11 @@ export default function TopologyGraph({
       source: l.from,
       target: l.to,
       label: l.label,
-      style: { stroke: "var(--hairline)", strokeWidth: 1.5 },
-      labelStyle: { fill: "var(--ink-faint)", fontSize: 11 },
-      labelBgStyle: { fill: "var(--bg)" },
+      style: { stroke: "var(--ink-faint)", strokeWidth: 1.5 },
+      labelStyle: { fill: "var(--ink-dim)", fontSize: 11 },
+      labelBgStyle: { fill: "var(--surface-2)" },
+      labelBgPadding: [6, 3],
+      labelBgBorderRadius: 4,
     }));
     return { nodes: nodeList, edges: edgeList };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -65,7 +70,7 @@ export default function TopologyGraph({
         nodesConnectable={false}
         proOptions={{ hideAttribution: false }}
       >
-        <Background color="#2c303a" gap={20} />
+        <Background color="var(--hairline)" gap={20} />
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>

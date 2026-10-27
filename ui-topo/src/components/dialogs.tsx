@@ -186,7 +186,7 @@ export function SettingsPanel({
     <div className="dialog-overlay">
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
-          <IconGear /> SETTINGS
+          <IconGear /> 设置
         </h3>
         {srv ? (
           <>

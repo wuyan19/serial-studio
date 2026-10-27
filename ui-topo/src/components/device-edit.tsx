@@ -225,7 +225,7 @@ export function DeviceEditDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="dialog__title">{initial ? "编辑设备" : "注册设备"}</h3>
-        <div className="dialog__sub">设备 = 被调试的一台机器；通道 = 接入方式（携带完整配置）</div>
+        <div className="dialog__sub">{initial ? initial.name : "定义被测设备与接入通道"}</div>
         <div className="chan-card__grid" style={{ marginBottom: 10 }}>
           <label>
             名称

@@ -16,6 +16,7 @@ import { ws } from "../ws";
 import { useShell } from "../App";
 import TermView, { type TermHandle } from "../components/term";
 import { SerialConfigDialog, SshAuthDialog, SshTrustDialog } from "../components/dialogs";
+import { IconSsh } from "../icons";
 import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenError } from "../types";
 
 interface Tab {
@@ -188,7 +189,7 @@ export default function Terminal() {
       </div>
 
       {lastError && (
-        <p className="error" style={{ marginTop: -6 }}>
+        <p className="open-note" role="status">
           {lastError}{" "}
           <button className="link" onClick={() => setLastError("")}>
             关闭
@@ -198,7 +199,11 @@ export default function Terminal() {
 
       {tabs.length === 0 ? (
         <div className="term-blank">
-          <p className="muted">尚无终端。点「打开端口」或到设备页的通道行开终端。</p>
+          <IconSsh className="term-blank__icon" />
+          <p className="muted">尚无终端。从设备页的通道行打开，或在此选择端口。</p>
+          <button className="btn btn--primary" onClick={() => setPicker(true)}>
+            打开端口
+          </button>
         </div>
       ) : (
         <div className="term-tabs">
@@ -214,15 +219,18 @@ export default function Terminal() {
                 title={t.port}
               >
                 <span className="term-tab__label">{t.label}</span>
-                <span
+                <button
+                  type="button"
                   className="term-tab__close"
+                  aria-label={`关闭 ${t.label}`}
+                  title="关闭"
                   onClick={(e) => {
                     e.stopPropagation();
                     closeTab(t.port);
                   }}
                 >
                   ×
-                </span>
+                </button>
               </button>
             ))}
           </div>

@@ -3597,11 +3597,16 @@ button.link {
   border-radius: 12px;
   padding: 12px 16px;
   background: var(--surface);
+  transition: border-color var(--t-med) var(--ease);
+}
+
+.topo-card:hover {
+  border-color: var(--ink-faint);
 }
 
 .topo-main {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
 }
 
@@ -3610,6 +3615,7 @@ button.link {
   font-weight: 600;
   color: var(--ink);
   text-decoration: none;
+  margin-right: auto;
 }
 
 .topo-name:hover { text-decoration: underline; }
@@ -3619,24 +3625,59 @@ button.link {
   color: var(--ink-faint);
 }
 
+/* 成员设备名单行小字（拓扑卡第三行） */
+.topo-members {
+  margin: 6px 0 0;
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡内图标操作（编辑/删除）——与设备卡脚部同形制 */
 .topo-actions {
   display: flex;
-  gap: 14px;
-  margin-top: 6px;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.topo-actions a {
-  color: var(--rx);
-  font-size: var(--fs-sm);
+.topo-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-faint);
+  font-size: 13px;
+  cursor: pointer;
   text-decoration: none;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 
-/* 表单（拓扑编辑） */
+.topo-act:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.topo-act--danger:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* 表单（拓扑编辑）——卡片容器承载，不再裸排 */
 .form {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 580px;
+  max-width: 640px;
+  padding: 18px 20px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  background: var(--surface);
 }
 
 .form label {
@@ -3725,6 +3766,7 @@ button.link {
   border-radius: 12px;
   background: var(--bg);
   margin-bottom: 12px;
+  overflow: hidden;
 }
 
 .react-flow__controls-button {
@@ -3739,8 +3781,17 @@ button.link {
 .term-blank {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
+}
+
+.term-blank__icon {
+  width: 42px;
+  height: 42px;
+  color: var(--ink-faint);
+  opacity: 0.7;
 }
 
 .term-tabs {
@@ -4052,4 +4103,158 @@ button.link {
 
 .chan-card__auth .form-label {
   margin-bottom: 0;
+}
+
+/* ============================================================
+   UI 全面优化追加段（2026-10）——新增类名均已 grep 全文件防撞
+   （历史教训：.term-empty 撞老段 absolute/inset 盖死整页）
+   ============================================================ */
+
+/* 品牌点 = WS 连接状态灯：常态 teal，断连转琥珀脉冲（全局可见） */
+.brand__dot--off {
+  background: var(--warn);
+  animation: conn-pulse 1.2s var(--ease) infinite;
+}
+
+@keyframes conn-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand__dot--off {
+    animation: none;
+  }
+}
+
+/* 终端页「正在打开…」进行中提示：中性色（此前误用 .error 红色=错误语义） */
+.open-note {
+  margin: 0 0 8px;
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+}
+
+/* 空态引导块（占用页等）：图标 + 一句话 */
+.empty-note {
+  margin-top: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 20px;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-card);
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.empty-note p {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.empty-note__icon {
+  width: 30px;
+  height: 30px;
+  opacity: 0.7;
+}
+
+/* 小号按钮（表格行内危险操作等） */
+.btn--sm {
+  padding: 3px 10px;
+  font-size: var(--fs-sm);
+}
+
+/* 「使用中」状态徽章：teal tinted（与串口徽章同色相、语义=有活跃会话） */
+.dev-badge--ok {
+  background: color-mix(in srgb, var(--rx) 14%, transparent);
+  color: var(--rx);
+}
+
+/* 详情页元信息行：与正文拉开层级的小字行 */
+.meta-line {
+  margin: 10px 0 0;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+/* id 复制按钮：mono 小字，悬停提亮示意可点 */
+.copy-id {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+
+.copy-id:hover {
+  color: var(--ink);
+}
+
+/* 通道列：类型徽章 + 文字的行内清单 */
+.chan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.chan-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+/* 表格行 hover 反馈（详情/占用两处表格共用） */
+table tbody tr {
+  transition: background var(--t-fast) var(--ease);
+}
+
+table tbody tr:hover td {
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+}
+
+/* 终端 tab 关闭钮：真按钮，扩大命中区（此前 span 命中区过小） */
+.term-tab__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: -4px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+/* 表单「＋添加」虚线 chip（拓扑编辑） */
+.add-chip {
+  background: none;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-btn);
+  color: var(--ink-dim);
+  padding: 5px 12px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+
+.add-chip:hover {
+  color: var(--accent-hover);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }

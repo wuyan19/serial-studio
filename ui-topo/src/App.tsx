@@ -48,6 +48,7 @@ export default function App() {
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   const [existingRemotes, setExistingRemotes] = useState<string[]>([]);
   const [deleteSsh, setDeleteSsh] = useState<SshHost | null>(null);
+  const [connUp, setConnUp] = useState(true);
 
   useEffect(() => subscribe(setThemeState), []);
   useEffect(() => {
@@ -56,10 +57,13 @@ export default function App() {
     const offTest = ws.on("sshTestResult", (id, ok) =>
       setSshTests((t) => ({ ...t, [id]: ok ? "ok" : "fail" })),
     );
+    // 连接状态灯：数据面断连时全站可见（此前只有终端页有提示）
+    const offConn = ws.on("connected", setConnUp);
     void ws.version().then((v) => setVersion(v.version)).catch(() => {});
     return () => {
       offHosts();
       offTest();
+      offConn();
     };
   }, []);
 
@@ -96,8 +100,11 @@ export default function App() {
     <ShellContext.Provider value={{ openDialog, sshHosts, editSsh }}>
       <div className="shell">
         <aside className="sidebar">
-          <div className="brand" title="topo-hub">
-            <span className="brand__dot" /> topo-hub
+          <div
+            className="brand"
+            title={connUp ? "已连接服务器" : "连接断开，重连中…"}
+          >
+            <span className={`brand__dot${connUp ? "" : " brand__dot--off"}`} /> topo-hub
           </div>
           <nav>
             {nav.map((n) => (

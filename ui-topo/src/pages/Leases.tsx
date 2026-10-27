@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, fmtTime, subscribeChanged, type Device, type LeaseView } from "../api";
+import { IconBolt } from "../icons";
 
 export default function Leases() {
   const [list, setList] = useState<LeaseView[]>([]);
@@ -36,13 +37,20 @@ export default function Leases() {
 
   return (
     <section>
-      <h1>占用</h1>
+      <div className="page-head">
+        <h1>占用</h1>
+      </div>
       <p className="muted">
         AI 会话经 lease_acquire 申请的排他写权；到期自动释放，人可强制收回。
       </p>
       {error && <p className="error">{error}</p>}
       {list.length === 0 ? (
-        <p className="muted">当前无活跃租约。</p>
+        <div className="empty-note">
+          <IconBolt className="empty-note__icon" />
+          <p>
+            当前无活跃租约。AI 申请占用设备后，租约会出现在这里。
+          </p>
+        </div>
       ) : (
         <table>
           <thead>
@@ -69,9 +77,11 @@ export default function Leases() {
                 </td>
                 <td>{fmtTime(l.acquired_at)}</td>
                 <td>{fmtTime(l.expires_at)}</td>
-                <td>{l.remaining_minutes} 分钟</td>
                 <td>
-                  <button className="link" onClick={() => forceRelease(l)}>
+                  <span className="dev-badge dev-badge--warn">剩 {l.remaining_minutes} 分</span>
+                </td>
+                <td>
+                  <button className="btn btn--danger btn--sm" onClick={() => forceRelease(l)}>
                     强制释放
                   </button>
                 </td>

@@ -17,6 +17,7 @@ export default function TopologyDetail() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [error, setError] = useState("");
   const [view, setView] = useState<"table" | "graph">("table");
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(() => {
     if (!id) return;
@@ -49,6 +50,16 @@ export default function TopologyDetail() {
       : undefined;
   };
 
+  const copyId = () => {
+    navigator.clipboard?.writeText(detail.id).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      },
+      () => {},
+    );
+  };
+
   return (
     <section className="page">
       <div className="page-head">
@@ -69,10 +80,17 @@ export default function TopologyDetail() {
           <Link className="btn btn--ghost" to={`/topologies/${detail.id}/edit`}>
             编辑
           </Link>
-          <span className="muted">id {detail.id}</span>
         </div>
       </div>
       {detail.description && <p className="muted">{detail.description}</p>}
+      <p className="meta-line">
+        AI 引用名 <span className="mono">{detail.name}</span>
+        {" · "}更新于 {detail.updated_at}
+        {" · "}
+        <button className="copy-id mono" onClick={copyId} title="点击复制完整 id">
+          {copied ? "已复制 id" : `id ${detail.id.slice(0, 8)}…`}
+        </button>
+      </p>
       {view === "graph" ? (
         <TopologyGraph topo={detail} nameOf={nameOf} subtitleOf={subtitleOf} leases={leases} />
       ) : (
@@ -98,23 +116,39 @@ export default function TopologyDetail() {
                     )}
                   </td>
                   <td>
-                    {m.channels.length === 0
-                      ? "—"
-                      : m.channels
-                          .map((c) => c.label + (c.present ? "" : "（不在位）"))
-                          .join("、")}
+                    {m.channels.length === 0 ? (
+                      "—"
+                    ) : (
+                      <span className="chan-list">
+                        {m.channels.map((c, i) => (
+                          <span key={i} className="chan-item">
+                            <span className={`dev-badge ${c.type === "serial" ? "dev-badge--serial" : "dev-badge--ssh"}`}>
+                              {c.type === "serial" ? "串口" : "SSH"}
+                            </span>
+                            {c.type === "serial" ? c.label.replace(/^串口\s*/, "") : c.label}
+                            {c.present ? "" : "（不在位）"}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                   </td>
                   <td>
-                    {m.channels.length === 0
-                      ? "—"
-                      : m.channels.some((c) => c.opened)
-                        ? "使用中"
-                        : "空闲"}
+                    {m.channels.length === 0 ? (
+                      "—"
+                    ) : m.channels.some((c) => c.opened) ? (
+                      <span className="dev-badge dev-badge--ok">使用中</span>
+                    ) : (
+                      <span className="dev-badge">空闲</span>
+                    )}
                   </td>
                   <td>
-                    {lease
-                      ? `${lease.label} · ${lease.remaining_minutes} 分钟`
-                      : "空闲"}
+                    {lease ? (
+                      <span className="dev-badge dev-badge--warn" title={`至 ${lease.expires_at}`}>
+                        {lease.label} · 剩 {lease.remaining_minutes} 分
+                      </span>
+                    ) : (
+                      <span className="dev-badge">空闲</span>
+                    )}
                   </td>
                   <td>{m.note ?? ""}</td>
                 </tr>
@@ -123,17 +157,14 @@ export default function TopologyDetail() {
           </tbody>
         </table>
       )}
-      <p className="muted">
-        更新于 {detail.updated_at} · AI 引用名 <span className="mono">{detail.name}</span>
-        {view === "table" && detail.links.length > 0 && (
-          <>
-            {" "}· 连线{" "}
-            {detail.links
-              .map((l) => `${nameOf(l.from)} ↔ ${nameOf(l.to)}${l.label ? `（${l.label}）` : ""}`)
-              .join("；")}
-          </>
-        )}
-      </p>
+      {view === "table" && detail.links.length > 0 && (
+        <p className="meta-line">
+          连线：
+          {detail.links
+            .map((l) => `${nameOf(l.from)} ↔ ${nameOf(l.to)}${l.label ? `（${l.label}）` : ""}`)
+            .join("；")}
+        </p>
+      )}
     </section>
   );
 }

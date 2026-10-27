@@ -103,8 +103,8 @@ export default function TopologyEdit() {
               </button>
             </div>
           ))}
-          <button className="link" onClick={() => setMembers([...members, { device: "" }])}>
-            + 添加成员
+          <button className="add-chip" onClick={() => setMembers([...members, { device: "" }])}>
+            ＋ 添加成员
           </button>
           {devices.length === 0 && (
             <p className="muted">暂无被测设备——先到「设备」页注册（成员只能引用已注册设备）。</p>
@@ -149,8 +149,8 @@ export default function TopologyEdit() {
               </button>
             </div>
           ))}
-          <button className="link" onClick={() => setLinks([...links, { from: "", to: "" }])}>
-            + 添加连线
+          <button className="add-chip" onClick={() => setLinks([...links, { from: "", to: "" }])}>
+            ＋ 添加连线
           </button>
           <p className="muted">连线两端从成员设备里选（拓扑图渲染用）。</p>
         </div>
