@@ -40,6 +40,9 @@ export default function Terminal() {
       handles.current.delete(port);
     });
     const offConn = ws.on("connected", (on) => setConnLost(!on));
+    // 初始拉取：WS 首次端口推送在页面挂载前已发生（壳启动即连即推），
+    // 只靠订阅会漏——裸端口区因此空列表
+    api.ports().then(setPorts).catch(() => {});
     api.devices().then(setDevices).catch(() => {});
     return () => {
       offPorts();
