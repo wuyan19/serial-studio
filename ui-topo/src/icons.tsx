@@ -320,3 +320,13 @@ export function IconExport({ className }: IconProps) {
     </Svg>
   );
 }
+
+/** 终端面板收起（双箭头向右）。 */
+export function IconChevronsRight({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M6 5l6 7-6 7" />
+      <path d="M13 5l6 7-6 7" />
+    </Svg>
+  );
+}

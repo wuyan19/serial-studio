@@ -1,8 +1,7 @@
 /** 设备管理：被测设备卡（通道清单/在线态/占用徽章/每通道开终端/编辑/删除）。
- *  临时端口的直达入口在终端页的「任意端口键」输入，不再在本页维护未注册资源清单。
+ *  「终端」按钮直达右侧终端面板（不跳页）；裸端口入口在面板的「打开端口」。
  *  占用 = 设备级（leases.grants.device join）。 */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   api,
   channelPortKey,
@@ -15,12 +14,13 @@ import {
   type PortView,
 } from "../api";
 import { ws } from "../ws";
+import { useShell } from "../App";
 import { DeviceEditDialog } from "../components/device-edit";
 import { ConfirmDialog, DeviceDetailDialog } from "../components/dialogs";
 import type { DeviceDetailInfo } from "../components/dialogs";
 
 export default function Devices() {
-  const navigate = useNavigate();
+  const { openTerminal } = useShell();
   const [devices, setDevices] = useState<Device[]>([]);
   const [leases, setLeases] = useState<LeaseView[]>([]);  const [ports, setPorts] = useState<PortView[]>([]);
   const [error, setError] = useState("");
@@ -176,7 +176,7 @@ export default function Devices() {
                         )}
                         <button
                           className="dev-channel__term"
-                          onClick={() => navigate(`/terminal?open=${encodeURIComponent(key)}`)}
+                          onClick={() => openTerminal(key)}
                         >
                           终端
                         </button>

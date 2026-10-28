@@ -64,6 +64,8 @@ export class Ws {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private openWaiters: (() => void)[] = [];
   private openResolvers = new Map<string, { resolve: (r: OpenResult) => void; reject: (e: Error & { ssh?: SshOpenError }) => void }>();
+  /** 同端口在途 open 的单飞表（key=端口，value=共享 Promise）。 */
+  private openInflight = new Map<string, Promise<OpenResult>>();
   private versionWaiters: ((v: { version: string; enableScripting: boolean; instanceId?: string }) => void)[] = [];
   private h: Handlers = {
     connected: [], data: [], ports: [], opened: [], closed: [], disconnected: [],
@@ -219,39 +221,44 @@ export class Ws {
   }
 
   /** 打开端口。UI 恒用规范键（PortView.name，服务端真名）——请求名与回执
-   * Acquired.port（resolved 真名）天然一致，按端口配对无歧义。SSH 失败 reject
-   * 带 ssh 结构化分类（auth_failed / host_key_unknown / host_key_changed）。
-   * 25s 超时：SSH 建连（TCP+认证+PTY）可能很慢，超时必须反馈而非永久悬挂。 */
+   *  Acquired.port（resolved 真名）天然一致，按端口配对无歧义。SSH 失败 reject
+   *  带 ssh 结构化分类（auth_failed / host_key_unknown / host_key_changed）。
+   *  25s 超时：SSH 建连（TCP+认证+PTY）可能很慢，超时必须反馈而非永久悬挂。
+   *  同端口并发 open 单飞：此前两次 open 会互相覆盖 openResolvers 表项、
+   *  超时定时器误删对方表项，其中一个 Promise 永久悬挂（双击/StrictMode 双开必踩）。 */
   async open(port: string, config?: Record<string, unknown>): Promise<OpenResult> {
     await this.whenOpen();
-    return new Promise((resolve, reject) => {
-      this.openResolvers.set(port, { resolve, reject });
+    const inflight = this.openInflight.get(port);
+    if (inflight) return inflight;
+    const p = new Promise<OpenResult>((resolve, reject) => {
+      const settle = () => {
+        this.openInflight.delete(port);
+        this.openResolvers.delete(port);
+      };
+      const timer = setTimeout(() => {
+        const entry = this.openResolvers.get(port);
+        if (entry) entry.reject(new Error(`打开 ${port} 超时（25 秒无回执；SSH 主机不可达或网络慢）`));
+      }, 25_000);
+      this.openResolvers.set(port, {
+        resolve: (r) => {
+          clearTimeout(timer);
+          settle();
+          resolve(r);
+        },
+        reject: (e: Error & { ssh?: SshOpenError }) => {
+          clearTimeout(timer);
+          settle();
+          reject(e);
+        },
+      });
       this.send({
         action: "open",
         port,
         config: { ...FULL_DEFAULT_CONFIG, ...(config ?? {}) },
       });
-      const timer = setTimeout(() => {
-        if (this.openResolvers.delete(port)) {
-          reject(new Error(`打开 ${port} 超时（25 秒无回执；SSH 主机不可达或网络慢）`));
-        }
-      }, 25_000);
-      // 回执到达后清掉超时定时器
-      const entry = this.openResolvers.get(port);
-      if (entry) {
-        const wrapped = {
-          resolve: (r: OpenResult) => {
-            clearTimeout(timer);
-            entry.resolve(r);
-          },
-          reject: (e: Error & { ssh?: SshOpenError }) => {
-            clearTimeout(timer);
-            entry.reject(e);
-          },
-        };
-        this.openResolvers.set(port, wrapped);
-      }
     });
+    this.openInflight.set(port, p);
+    return p;
   }
 
   close(port: string) {

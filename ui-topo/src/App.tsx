@@ -1,7 +1,7 @@
-/** 应用壳：左侧导航 + 顶栏全局入口（主题切换/SSH 设备/添加远端/设置/关于）。
+/** 应用壳：左侧导航 + 顶栏全局入口（主题切换/SSH 设备/添加远端/设置/关于）+ 右侧终端面板。
  * 全局对话框（设置/关于/SSH 管理/添加远端）在此挂载，页面经 context 请求打开。
- * WS 数据面连接随壳启动（单例，终端/设备库/SSH 管理共用）。 */
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+ * WS 数据面连接随壳启动（单例，终端面板/设备库/SSH 管理共用）。 */
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
@@ -13,6 +13,7 @@ import {
   SettingsPanel,
   SshManagerDialog,
 } from "./components/dialogs";
+import TermPanel, { type TermPanelHandle } from "./components/term-panel";
 import type { SshHost } from "./types";
 
 type DialogKind = null | "settings" | "about" | "ssh" | "remote";
@@ -22,12 +23,17 @@ interface ShellCtx {
   sshHosts: SshHost[];
   /** 更新单台 SSH 设备（认证闭环重输密码后改记录）并打开管理弹窗。 */
   editSsh: (host: SshHost) => void;
+  /** 直达开终端（面板随之展开）；面板宿主在壳层，切页不丢会话。 */
+  openTerminal: (key: string) => void;
+  toggleTermPanel: () => void;
 }
 
 export const ShellContext = createContext<ShellCtx>({
   openDialog: () => {},
   sshHosts: [],
   editSsh: () => {},
+  openTerminal: () => {},
+  toggleTermPanel: () => {},
 });
 export const useShell = () => useContext(ShellContext);
 
@@ -35,7 +41,6 @@ const nav = [
   { to: "/", label: "拓扑" },
   { to: "/devices", label: "设备库" },
   { to: "/leases", label: "占用" },
-  { to: "/terminal", label: "终端" },
 ];
 
 export default function App() {
@@ -49,6 +54,7 @@ export default function App() {
   const [existingRemotes, setExistingRemotes] = useState<string[]>([]);
   const [deleteSsh, setDeleteSsh] = useState<SshHost | null>(null);
   const [connUp, setConnUp] = useState(true);
+  const termPanel = useRef<TermPanelHandle>(null);
 
   useEffect(() => subscribe(setThemeState), []);
   useEffect(() => {
@@ -96,8 +102,17 @@ export default function App() {
     setDialog("ssh");
   };
 
+  const openTerminal = useCallback((key: string) => {
+    termPanel.current?.openByKey(key);
+  }, []);
+  const toggleTermPanel = useCallback(() => {
+    termPanel.current?.togglePanel();
+  }, []);
+
   return (
-    <ShellContext.Provider value={{ openDialog, sshHosts, editSsh }}>
+    <ShellContext.Provider
+      value={{ openDialog, sshHosts, editSsh, openTerminal, toggleTermPanel }}
+    >
       <div className="shell">
         <aside className="sidebar">
           <div
@@ -141,6 +156,7 @@ export default function App() {
         <main className="content">
           <Outlet />
         </main>
+        <TermPanel ref={termPanel} sshHosts={sshHosts} openSshManager={() => openDialog("ssh")} />
       </div>
 
       {dialog === "settings" && (

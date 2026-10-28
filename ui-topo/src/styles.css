@@ -4258,3 +4258,212 @@ table tbody tr:hover td {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
+
+/* ============================================================
+   终端面板（壳层右栏）——终端的唯一宿主，切页不卸载。
+   收起 = term-panel--hidden(display:none 保活，xterm 缓冲留存)，
+   收起态右缘渲染 term-rail(36px) 承载展开钮 = 应用右上角。
+   类名已 grep 全文件防撞（term-panel/term-rail 无同名老段）。
+   ============================================================ */
+.term-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border-left: 1px solid var(--hairline);
+  background: var(--surface);
+  min-height: 0;
+}
+
+.term-panel--hidden {
+  display: none;
+}
+
+.term-panel--max {
+  flex: 0 0 70%;
+  width: auto !important;
+}
+
+/* 左缘拖拽条：hover/聚焦出细高亮线；拖拽期间 body 加 panel-resizing 锁光标 */
+.term-panel__resizer {
+  position: absolute;
+  left: -4px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.term-panel__resizer::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--t-fast) var(--ease);
+}
+
+.term-panel__resizer:hover::after,
+.term-panel__resizer:focus-visible::after {
+  background: var(--accent);
+}
+
+.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.panel-resizing * {
+  cursor: col-resize !important;
+}
+
+/* 面板头：tab 条（横向滚动）＋ 工具钮（＋/最大化/收起） */
+.term-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 8px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.term-panel__tabs {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 6px;
+}
+
+.term-panel__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* 面板窄列里 tab 收紧最大宽（页面态 220px 不适用） */
+.term-panel__tabs .term-tab {
+  max-width: 150px;
+  flex-shrink: 0;
+  padding-bottom: 6px;
+}
+
+.term-panel__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-bottom: 6px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-faint);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.term-panel__btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.term-panel__btn:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.term-panel__btn--on {
+  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* 面板头连接断开指示点（品牌灯的全局面部提示，面板内直连相关） */
+.term-panel__conn {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  margin: 0 4px 10px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: conn-pulse 1.2s var(--ease) infinite;
+}
+
+.term-panel__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+}
+
+.term-panel__body .term-area {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--term-bg);
+  overflow: hidden;
+}
+
+.term-panel__body .term-blank {
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-card);
+}
+
+/* 收起态右缘 rail：顶部一枚终端钮（= 应用右上角），活跃会话数角标 */
+.term-rail {
+  width: 40px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--hairline);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 10px;
+}
+
+.term-rail__btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.term-rail__btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.term-rail__btn:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.term-rail__count {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  font-weight: 600;
+}
