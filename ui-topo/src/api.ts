@@ -49,6 +49,9 @@ export interface ChannelView {
 
 export interface TopologyMember {
   device: string;
+  /** 画布坐标（编辑器拖拽位置；0/0 视为未摆位，前端圆形布局兜底）。 */
+  x: number;
+  y: number;
   note?: string;
 }
 
@@ -56,6 +59,10 @@ export interface TopologyLink {
   /** 设备 id（拓扑成员维度）。 */
   from: string;
   to: string;
+  /** from 端设备上的物理端口标签（如 "GE1/1/1"，自由文本）。 */
+  from_port?: string;
+  /** to 端设备上的物理端口标签（如 "eth0"）。 */
+  to_port?: string;
   label?: string;
 }
 
@@ -84,12 +91,16 @@ export interface TopologyDetail extends Topology {
 
 export interface MemberInput {
   device: string;
+  x?: number;
+  y?: number;
   note?: string;
 }
 
 export interface LinkInput {
   from: string;
   to: string;
+  from_port?: string;
+  to_port?: string;
   label?: string;
 }
 

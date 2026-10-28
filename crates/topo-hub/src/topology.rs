@@ -8,8 +8,13 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TopologyMember {
-    /// 被测设备 id（device.rs 注册表）。
+    /// 被测设备 id（device.rs 注册表）。同一设备可加入多个拓扑（引用不独占）。
     pub device: String,
+    /// 画布横坐标（编辑器拖拽位置持久化；旧数据/未摆过的为 0，前端圆形布局兜底）。
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -33,6 +38,12 @@ pub struct Topology {
 pub struct TopologyLink {
     pub from: String,
     pub to: String,
+    /// from 端设备上的端口标签（如 "GE1/1/1"，自由文本——物理口不一定是接入通道）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_port: Option<String>,
+    /// to 端设备上的端口标签（如 "eth0"）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_port: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
@@ -42,6 +53,10 @@ pub struct TopologyLink {
 pub struct MemberInput {
     pub device: String,
     #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
     pub note: Option<String>,
 }
 
@@ -50,6 +65,10 @@ pub struct MemberInput {
 pub struct LinkInput {
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub from_port: Option<String>,
+    #[serde(default)]
+    pub to_port: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -201,6 +220,8 @@ fn migrate_legacy(raw: &str) -> (Vec<Topology>, Vec<crate::device::Device>, bool
                 .filter_map(|m| {
                     wrap(&m.kind, &m.key).map(|device| TopologyMember {
                         device,
+                        x: 0.0,
+                        y: 0.0,
                         note: m.note.clone(),
                     })
                 })
@@ -290,6 +311,13 @@ pub fn update(
     }
     if let Some(m) = members {
         topo.members = resolve_members(m)?;
+        // members 整体替换而 links 未提供时，剪除指向已移除成员的悬空连线
+        // （与画布编辑器删除节点级联删线的语义一致；links 提供时会整体重建，无需处理）。
+        if links.is_none() {
+            let ids: std::collections::HashSet<&str> =
+                topo.members.iter().map(|m| m.device.as_str()).collect();
+            topo.links.retain(|l| ids.contains(l.from.as_str()) && ids.contains(l.to.as_str()));
+        }
     }
     if let Some(l) = links {
         topo.links = resolve_links(l, &topo.members)?;
@@ -311,16 +339,21 @@ pub fn delete(id: &str) -> Result<Topology, String> {
     Ok(removed)
 }
 
-/// 成员解析：device 可传 id 或名称，须存在于注册表；收集全部错误一次报告。
+/// 成员解析：device 可传 id 或名称，须存在于注册表；同一设备重复出现时保留
+/// 首个（节点 id 即设备 id，重复成员会让画布渲染未定义）；收集全部错误一次报告。
 fn resolve_members(inputs: &[MemberInput]) -> Result<Vec<TopologyMember>, String> {
     let mut members = Vec::with_capacity(inputs.len());
+    let mut seen = std::collections::HashSet::new();
     let mut errors = Vec::new();
     for input in inputs {
         match crate::device::find(&input.device) {
-            Some(d) => members.push(TopologyMember {
+            Some(d) if seen.insert(d.id.clone()) => members.push(TopologyMember {
                 device: d.id,
+                x: input.x,
+                y: input.y,
                 note: input.note.clone().filter(|n| !n.trim().is_empty()),
             }),
+            Some(_) => {} // 重复成员：保留首个
             None => errors.push(format!(
                 "设备「{}」不存在（device_list 可查，先 device_create 注册）",
                 input.device
@@ -334,7 +367,8 @@ fn resolve_members(inputs: &[MemberInput]) -> Result<Vec<TopologyMember>, String
     }
 }
 
-/// 连线解析：from/to 经设备解析（id 或名称），须是本拓扑成员且不自环。
+/// 连线解析：from/to 经设备解析（id 或名称），须是本拓扑成员且不自环；
+/// 同一对设备（含反向）重复时保留首个（边 id 由设备对构成，重复会撞 id）。
 fn resolve_links(
     inputs: &[LinkInput],
     members: &[TopologyMember],
@@ -350,19 +384,27 @@ fn resolve_links(
         Ok(d.id)
     };
     let mut links = Vec::with_capacity(inputs.len());
+    let mut seen = std::collections::HashSet::new();
     let mut errors = Vec::new();
     for input in inputs {
         match (resolve_end(&input.from), resolve_end(&input.to)) {
             (Ok(f), Ok(t)) => {
                 if f == t {
                     errors.push(format!("连线「{} ↔ {}」两端是同一设备", input.from, input.to));
-                } else {
-                    links.push(TopologyLink {
-                        from: f,
-                        to: t,
-                        label: input.label.clone().filter(|l| !l.trim().is_empty()),
-                    });
+                    continue;
                 }
+                // 无序对归一后去重（同向/反向重复都只保留首个）
+                let key = if f < t { (f.clone(), t.clone()) } else { (t.clone(), f.clone()) };
+                if !seen.insert(key) {
+                    continue;
+                }
+                links.push(TopologyLink {
+                    from: f,
+                    to: t,
+                    from_port: input.from_port.clone().filter(|p| !p.trim().is_empty()),
+                    to_port: input.to_port.clone().filter(|p| !p.trim().is_empty()),
+                    label: input.label.clone().filter(|l| !l.trim().is_empty()),
+                });
             }
             (Err(e), _) | (_, Err(e)) => errors.push(e),
         }
@@ -386,6 +428,8 @@ mod tests {
     fn member(device: &str) -> MemberInput {
         MemberInput {
             device: device.into(),
+            x: 0.0,
+            y: 0.0,
             note: None,
         }
     }
@@ -394,6 +438,8 @@ mod tests {
         LinkInput {
             from: from.into(),
             to: to.into(),
+            from_port: None,
+            to_port: None,
             label: None,
         }
     }
@@ -484,6 +530,106 @@ mod tests {
 
         delete(&t.id).unwrap();
         device::delete(&dev_b.id, &state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_can_join_multiple_topologies() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let state = make_state();
+        let (a, b) = seed_devices(&state).await;
+        let dev_a = device::find(&a).unwrap();
+
+        let t1 = create(&unique_name("拓扑一"), "", &[member(&a), member(&b)], &[]).unwrap();
+        let t2 = create(&unique_name("拓扑二"), "", &[member(&a)], &[]).unwrap();
+        // 同一设备出现在两个拓扑（引用不独占），各自成员视图独立
+        assert!(t1.members.iter().any(|m| m.device == dev_a.id));
+        assert!(t2.members.iter().any(|m| m.device == dev_a.id));
+        // 两拓扑均可加载
+        assert_eq!(load().len(), 2);
+        // 设备删除仍被两拓扑引用拦截
+        let err = device::delete(&dev_a.id, &state).unwrap_err();
+        assert!(err.contains(&t1.name) && err.contains(&t2.name), "{err}");
+
+        delete(&t1.id).unwrap();
+        delete(&t2.id).unwrap();
+        device::delete(&dev_a.id, &state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn link_ports_and_positions_roundtrip() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let state = make_state();
+        let (a, b) = seed_devices(&state).await;
+
+        let m = |d: &str, x: f64, y: f64| MemberInput {
+            device: d.into(),
+            x,
+            y,
+            note: None,
+        };
+        let l = LinkInput {
+            from: a.clone(),
+            to: b.clone(),
+            from_port: Some("GE1/1/1".into()),
+            to_port: Some("  ".into()), // 空白端口 → None
+            label: Some("上联".into()),
+        };
+        let t = create(&unique_name("端口拓扑"), "", &[m(&a, 120.5, -40.0), m(&b, 0.0, 0.0)], &[l]).unwrap();
+
+        let [ma, mb] = [&t.members[0], &t.members[1]];
+        assert_eq!((ma.x, ma.y), (120.5, -40.0));
+        assert_eq!((mb.x, mb.y), (0.0, 0.0), "未摆位坐标原样保存");
+        let link = &t.links[0];
+        assert_eq!(link.from_port.as_deref(), Some("GE1/1/1"));
+        assert_eq!(link.to_port, None, "空白端口标签过滤为 None");
+        assert_eq!(link.label.as_deref(), Some("上联"));
+
+        // 落盘重读 round-trip
+        let re = find(&t.id).unwrap();
+        assert_eq!(re.members[0].x, 120.5);
+        assert_eq!(re.links[0].from_port.as_deref(), Some("GE1/1/1"));
+
+        delete(&t.id).unwrap();
+        for d in crate::device::load() {
+            let _ = device::delete(&d.id, &state);
+        }
+    }
+
+    #[tokio::test]
+    async fn update_members_prunes_dangling_links_and_dedupes() {
+        let _g = TEST_LOCK.lock().unwrap();
+        ensure_test_config_dir();
+        crate::test_support::reset_stores();
+        let state = make_state();
+        let (a, b) = seed_devices(&state).await;
+        let dev_b = device::find(&b).unwrap().id;
+
+        // 重复成员/重复连线（含反向）在创建时去重
+        let t = create(
+            &unique_name("去重拓扑"),
+            "",
+            &[member(&a), member(&a), member(&b)],
+            &[link(&a, &b), link(&a, &b), link(&b, &a)],
+        )
+        .unwrap();
+        assert_eq!(t.members.len(), 2, "重复成员只保留一个");
+        assert_eq!(t.links.len(), 1, "同对设备连线（含反向重复）只保留一条");
+
+        // members 整体替换而 links 未提供：悬空连线被剪除
+        let updated = update(&t.id, None, None, Some(&[member(&a)]), None).unwrap();
+        assert_eq!(updated.members.len(), 1);
+        assert!(
+            updated.links.is_empty(),
+            "指向被移除成员的连线应剪除，实际: {:?}",
+            updated.links
+        );
+
+        delete(&t.id).unwrap();
+        device::delete(&dev_b, &state).unwrap();
     }
 
     #[tokio::test]

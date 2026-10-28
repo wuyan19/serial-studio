@@ -101,11 +101,18 @@ impl TopoTools {
         }
         for l in &topo.links {
             let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
+            // 端口标签进设备名（"ESG6220:GE1/1/1"），与 Web 图视图同形
+            let from = match &l.from_port {
+                Some(p) => format!("{}:{p}", name_of(&l.from)),
+                None => name_of(&l.from),
+            };
+            let to = match &l.to_port {
+                Some(p) => format!("{}:{p}", name_of(&l.to)),
+                None => name_of(&l.to),
+            };
             let label = l.label.as_deref().unwrap_or("");
             lines.push(format!(
-                "连接 {} ↔ {}{}",
-                name_of(&l.from),
-                name_of(&l.to),
+                "连接 {from} ↔ {to}{}",
                 if label.is_empty() { String::new() } else { format!(" · {label}") }
             ));
         }
@@ -115,7 +122,7 @@ impl TopoTools {
     async fn topo_create(&self, args: Value) -> Value {
         let parsed: Result<CreateArgs, _> = serde_json::from_value(args);
         let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 name（必填）、description?、members: [{device, note?}]、links: [{from, to, label?}]".into());
+            return error_text("参数解析失败：需要 name（必填）、description?、members: [{device, note?, x?, y?}]、links: [{from, to, from_port?, to_port?, label?}]".into());
         };
         match topology::create(&a.name, &a.description, &a.members, &a.links) {
             Ok(t) => {
@@ -514,7 +521,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "topo_get",
-                "description": "查看拓扑详情：成员清单（设备/端点、展示名、地址、在线状态、备注）。成员键即 lease_acquire 可用的引用。",
+                "description": "查看拓扑详情：成员清单（被测设备、通道明细、在线状态、备注）与设备间连线（两端端口标签）。成员设备 id 或名称即 lease_acquire 可用的引用。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -525,7 +532,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "topo_create",
-                "description": "创建拓扑。成员键两种粒度：设备 id（如 SSH 设备 uuid、远端设备 id、local=本机全部串口）或端口键（本机 COM3、sshUuid::shell、别名/昵称作用域亦可，服务端定型）。键须真实存在，全部合法才创建。links 描述设备间连线（拓扑图渲染用），from/to 引用成员键。",
+                "description": "创建拓扑。成员=被测设备引用（device_list 可查，同一设备可加入多个拓扑），links 描述设备间连线（拓扑图渲染用），两端可标物理端口（from_port/to_port，如 GE1/1/1、eth0）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -537,7 +544,9 @@ impl McpExtension for TopoTools {
                                 "type": "object",
                                 "properties": {
                                     "device": { "type": "string", "description": "被测设备 id 或名称（device_list 可查）" },
-                                    "note": { "type": "string", "description": "备注，如「被测主板」（可选）" }
+                                    "note": { "type": "string", "description": "备注，如「被测主板」（可选）" },
+                                    "x": { "type": "number", "description": "画布横坐标（可选，Web 图编辑器位置）" },
+                                    "y": { "type": "number", "description": "画布纵坐标（可选）" }
                                 },
                                 "required": ["device"]
                             }
@@ -549,7 +558,9 @@ impl McpExtension for TopoTools {
                                 "properties": {
                                     "from": { "type": "string", "description": "成员设备 id 或名称" },
                                     "to": { "type": "string", "description": "成员设备 id 或名称" },
-                                    "label": { "type": "string", "description": "连线说明，如 eth0↔port1（可选）" }
+                                    "from_port": { "type": "string", "description": "from 端设备上的物理端口标签，如 GE1/1/1（可选）" },
+                                    "to_port": { "type": "string", "description": "to 端设备上的物理端口标签，如 eth0（可选）" },
+                                    "label": { "type": "string", "description": "连线说明（可选）" }
                                 },
                                 "required": ["from", "to"]
                             }
@@ -560,7 +571,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "topo_update",
-                "description": "更新拓扑：name/description/members/links 提供才更新，members/links 提供时整体替换（键同样须全部合法）。",
+                "description": "更新拓扑：name/description/members/links 提供才更新，members/links 提供时整体替换（须全部合法；members 替换后指向已移除成员的存量连线会随之剪除）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -573,7 +584,9 @@ impl McpExtension for TopoTools {
                                 "type": "object",
                                 "properties": {
                                     "device": { "type": "string" },
-                                    "note": { "type": "string" }
+                                    "note": { "type": "string" },
+                                    "x": { "type": "number" },
+                                    "y": { "type": "number" }
                                 },
                                 "required": ["device"]
                             }
@@ -585,6 +598,8 @@ impl McpExtension for TopoTools {
                                 "properties": {
                                     "from": { "type": "string" },
                                     "to": { "type": "string" },
+                                    "from_port": { "type": "string" },
+                                    "to_port": { "type": "string" },
                                     "label": { "type": "string" }
                                 },
                                 "required": ["from", "to"]
@@ -623,7 +638,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "device_create",
-                "description": "注册被测设备。channels 为接入通道：{type:serial,port=端口键}（本机 COM4 或级联键 devB::COM4）与 {type:ssh,ref=SSH 凭据 id}（凭据可在 SSH 管理先建；同一端口/凭据只能属于一台设备）。",
+                "description": "注册被测设备。channels 为接入通道：{type:serial,port=端口键}（本机 COM4 或级联键 devB::COM4）与 {type:ssh,...内联连接配置}（host/port/username/auth；同一端口/主机凭据只能属于一台设备）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -636,8 +651,14 @@ impl McpExtension for TopoTools {
                                 "type": "object",
                                 "properties": {
                                     "type": { "type": "string", "enum": ["serial", "ssh"] },
-                                    "port": { "type": "string", "description": "type=serial 时的端口键" },
-                                    "ref": { "type": "string", "description": "type=ssh 时的凭据 id" }
+                                    "port": { "type": "string", "description": "端口：type=serial 时为端口键（本机 COM4 或级联键 devB::COM4）；type=ssh 时为 TCP 端口号（数字，缺省 22）" },
+                                    "host": { "type": "string", "description": "type=ssh 时目标主机" },
+                                    "username": { "type": "string", "description": "type=ssh 时的登录用户" },
+                                    "nickname": { "type": "string", "description": "type=ssh 时的展示昵称（可选）" },
+                                    "auth": {
+                                        "type": "object",
+                                        "description": "type=ssh 时的认证：{type:agent} / {type:password,password} / {type:key,key_path}"
+                                    }
                                 },
                                 "required": ["type"]
                             }
@@ -662,8 +683,11 @@ impl McpExtension for TopoTools {
                                 "type": "object",
                                 "properties": {
                                     "type": { "type": "string", "enum": ["serial", "ssh"] },
-                                    "port": { "type": "string" },
-                                    "ref": { "type": "string" }
+                                    "port": { "type": "string", "description": "serial=端口键；ssh=TCP 端口号（数字，缺省 22）" },
+                                    "host": { "type": "string" },
+                                    "username": { "type": "string" },
+                                    "nickname": { "type": "string" },
+                                    "auth": { "type": "object" }
                                 },
                                 "required": ["type"]
                             }

@@ -28,3 +28,4 @@
 # topo-hub 前端
 /ui-topo/node_modules
 /ui-topo/dist
+/target-smoke

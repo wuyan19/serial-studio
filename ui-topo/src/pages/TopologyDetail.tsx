@@ -163,7 +163,11 @@ export default function TopologyDetail() {
         <p className="meta-line">
           连线：
           {detail.links
-            .map((l) => `${nameOf(l.from)} ↔ ${nameOf(l.to)}${l.label ? `（${l.label}）` : ""}`)
+            .map((l) => {
+              const f = l.from_port ? `${nameOf(l.from)}:${l.from_port}` : nameOf(l.from);
+              const t = l.to_port ? `${nameOf(l.to)}:${l.to_port}` : nameOf(l.to);
+              return `${f} ↔ ${t}${l.label ? `（${l.label}）` : ""}`;
+            })
             .join("；")}
         </p>
       )}

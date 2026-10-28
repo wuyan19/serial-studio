@@ -2,6 +2,7 @@
  *  「终端」按钮直达右侧终端面板（不跳页）；裸端口入口在面板的「打开端口」。
  *  占用 = 设备级（leases.grants.device join）。 */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   api,
   channelPortKey,
@@ -12,6 +13,7 @@ import {
   type Device,
   type LeaseView,
   type PortView,
+  type Topology,
 } from "../api";
 import { ws } from "../ws";
 import { useShell } from "../App";
@@ -22,7 +24,9 @@ import type { DeviceDetailInfo } from "../components/dialogs";
 export default function Devices() {
   const { openTerminal } = useShell();
   const [devices, setDevices] = useState<Device[]>([]);
-  const [leases, setLeases] = useState<LeaseView[]>([]);  const [ports, setPorts] = useState<PortView[]>([]);
+  const [leases, setLeases] = useState<LeaseView[]>([]);
+  const [ports, setPorts] = useState<PortView[]>([]);
+  const [topos, setTopos] = useState<Topology[]>([]);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Device | null>(null);
   const [creating, setCreating] = useState(false);
@@ -36,6 +40,7 @@ export default function Devices() {
       .catch((e) => setError(String(e.message ?? e)));
     api.leases().then(setLeases).catch(() => {});
     api.ports().then(setPorts).catch(() => {});
+    api.topologies().then(setTopos).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -80,6 +85,12 @@ export default function Devices() {
     );
   };
 
+  /** 设备所属拓扑（可多属——引用不独占，卡片与详情均展示）。 */
+  const toposOf = useCallback(
+    (deviceId: string) => topos.filter((t) => t.members.some((m) => m.device === deviceId)),
+    [topos],
+  );
+
   const channelState = (d: Device, i: number) => {
     const c = d.channels[i];
     if (c.type === "serial") {
@@ -100,6 +111,10 @@ export default function Devices() {
         ...(d.model ? [{ label: "型号", value: d.model }] : []),
         ...(d.location ? [{ label: "位置", value: d.location }] : []),
         { label: "通道", value: String(d.channels.length) },
+        {
+          label: "所属拓扑",
+          value: toposOf(d.id).map((t) => t.name).join("、") || "—",
+        },
       ],
       statusNode: lease ? (
         <span>
@@ -153,6 +168,15 @@ export default function Devices() {
                 {(d.model || d.location) && (
                   <div className="dev-card__sub" title={[d.model, d.location].filter(Boolean).join(" · ")}>
                     {[d.model, d.location].filter(Boolean).join(" · ")}
+                  </div>
+                )}
+                {toposOf(d.id).length > 0 && (
+                  <div className="dev-card__topos" title="所属拓扑（点击进入）">
+                    {toposOf(d.id).map((t) => (
+                      <Link key={t.id} to={`/topologies/${t.id}`} className="dev-topo-chip">
+                        {t.name}
+                      </Link>
+                    ))}
                   </div>
                 )}
                 <ul className="dev-card__channels">

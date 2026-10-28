@@ -1,10 +1,12 @@
 import { useMemo } from "react";
-import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { leaseOfDevice, type LeaseView, type Topology } from "../api";
+import { autoHandle, memberPosition, topoEdgeTypes, topoNodeTypes } from "../components/topo-canvas";
 
-/** 拓扑图：节点 = 成员设备（通道列为小字），边 = links（设备维度）。
- * 圆形自动布局，节点可拖；占用中的设备描边高亮。V2 不持久化布局。 */
+/** 拓扑图（只读）：节点 = 成员设备（通道列为小字），边 = links（两端端口标签
+ * + 说明）。节点位置取成员坐标（编辑器摆位持久化），未摆位的旧数据圆形布局兜底；
+ * 占用中的设备描边高亮。 */
 export default function TopologyGraph({
   topo,
   nameOf,
@@ -20,42 +22,34 @@ export default function TopologyGraph({
 }) {
   const { nodes, edges } = useMemo(() => {
     const memberIds = topo.members.map((m) => m.device);
-    const radius = Math.max(120, 55 * memberIds.length);
-    const nodeList: Node[] = memberIds.map((id, i) => {
-      const occupied = leaseOfDevice(id, leases);
-      const angle = (2 * Math.PI * i) / Math.max(memberIds.length, 1) - Math.PI / 2;
-      const chans = subtitleOf(id);
-      return {
-        id,
-        position: { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius },
-        data: {
-          label: `${nameOf(id)}${chans ? `\n${chans}` : ""}${occupied ? "\n● 占用中" : ""}`,
-        },
-        style: {
-          background: "var(--surface)",
-          color: "var(--ink)",
-          border: `1px solid ${occupied ? "var(--warn)" : "var(--hairline)"}`,
-          borderRadius: 12,
-          padding: "10px 16px",
-          fontSize: 13,
-          lineHeight: 1.55,
-          maxWidth: 240,
-          whiteSpace: "pre-line",
-          textAlign: "center",
-          boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
-        },
-      };
-    });
-    const edgeList: Edge[] = topo.links.map((l, i) => ({
-      id: `e${i}`,
+    const positions = topo.members.map((m, i) => memberPosition(m, i, memberIds.length));
+    const posOf = (deviceId: string) => {
+      const i = topo.members.findIndex((m) => m.device === deviceId);
+      return i >= 0 ? positions[i] : { x: 0, y: 0 };
+    };
+    const nodeList = topo.members.map((m, i) => ({
+      id: m.device,
+      type: "device" as const,
+      position: positions[i],
+      data: {
+        device: m.device,
+        label: nameOf(m.device),
+        subtitle: subtitleOf(m.device),
+        occupied: Boolean(leaseOfDevice(m.device, leases)),
+      },
+    }));
+    const edgeList = topo.links.map((l, i) => ({
+      id: `e${i}-${l.from}-${l.to}`,
+      type: "port" as const,
       source: l.from,
       target: l.to,
-      label: l.label,
-      style: { stroke: "var(--ink-faint)", strokeWidth: 1.5 },
-      labelStyle: { fill: "var(--ink-dim)", fontSize: 11 },
-      labelBgStyle: { fill: "var(--surface-2)" },
-      labelBgPadding: [6, 3],
-      labelBgBorderRadius: 4,
+      sourceHandle: autoHandle(posOf(l.from), posOf(l.to)),
+      targetHandle: autoHandle(posOf(l.to), posOf(l.from)),
+      data: {
+        from_port: l.from_port,
+        to_port: l.to_port,
+        label: l.label,
+      },
     }));
     return { nodes: nodeList, edges: edgeList };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -66,6 +60,8 @@ export default function TopologyGraph({
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        nodeTypes={topoNodeTypes}
+        edgeTypes={topoEdgeTypes}
         fitView
         nodesConnectable={false}
         proOptions={{ hideAttribution: false }}
