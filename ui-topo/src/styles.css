@@ -3541,6 +3541,12 @@ button {
   max-width: 980px;
 }
 
+/* 数据页（设备网格/详情表+图）解除 980 可读性上限——全宽利用，否则右侧大片
+   空白且 auto-fill 网格少一列；文字/表单页保留窄帽。 */
+.page--wide {
+  max-width: none;
+}
+
 .page--fill {
   max-width: none;
   height: 100%;

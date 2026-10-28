@@ -278,7 +278,7 @@ export function AboutDialog({ version, onClose }: { version: string; onClose: ()
           <p className="about__tagline">
             AI 设备调试的拓扑管理平台
             <br />
-            拓扑 / 租约 / 设备库 / 终端 · MCP & WebSocket
+            拓扑 / 设备 / 租约 · 终端面板 · MCP & WebSocket
             <br />
             MCP Url http://IP:PORT/mcp
           </p>
@@ -323,7 +323,7 @@ export function RemoteDialog({
         <h3 className="dialog__title">
           <IconGlobe /> 添加远程设备
         </h3>
-        <div className="dialog__sub">连接远程 Serial Studio 服务（其端口并入设备库）</div>
+        <div className="dialog__sub">连接远程 Serial Studio 服务（其端口并入设备页）</div>
         <ConfigRow label="地址">
           <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>

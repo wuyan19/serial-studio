@@ -1,6 +1,6 @@
 /** 应用壳：左侧导航 + 顶栏全局入口（主题切换/SSH 设备/添加远端/设置/关于）+ 右侧终端面板。
  * 全局对话框（设置/关于/SSH 管理/添加远端）在此挂载，页面经 context 请求打开。
- * WS 数据面连接随壳启动（单例，终端面板/设备库/SSH 管理共用）。 */
+ * WS 数据面连接随壳启动（单例，终端面板/设备页/SSH 管理共用）。 */
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
@@ -40,7 +40,7 @@ export const useShell = () => useContext(ShellContext);
 
 const nav = [
   { to: "/", label: "拓扑", icon: <IconTopology /> },
-  { to: "/devices", label: "设备库", icon: <IconPlug /> },
+  { to: "/devices", label: "设备", icon: <IconPlug /> },
   { to: "/leases", label: "占用", icon: <IconLock /> },
 ];
 

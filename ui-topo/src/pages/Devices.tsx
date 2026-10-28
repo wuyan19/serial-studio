@@ -118,7 +118,7 @@ export default function Devices() {
   };
 
   return (
-    <section className="page">
+    <section className="page page--wide">
       <div className="page-head">
         <h1>设备</h1>
         <button className="btn btn--primary" onClick={() => setCreating(true)}>

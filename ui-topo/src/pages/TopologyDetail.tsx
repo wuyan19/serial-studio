@@ -61,7 +61,7 @@ export default function TopologyDetail() {
   };
 
   return (
-    <section className="page">
+    <section className="page page--wide">
       <div className="page-head">
         <h1>{detail.name}</h1>
         <div className="row-actions">
