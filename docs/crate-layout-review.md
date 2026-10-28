@@ -40,6 +40,6 @@ QuickJS 引擎与宿主机文件函数（`read_file`/`write_file`/`append_file`/
 
 ## 处置
 
-- **不在 main 上拆**：当前只有一个消费者，纯结构性重构风险与收益不成比例；v0.15.0 稳定发布中。
-- **topo-hub P0 直接依赖 ss-server lib**（拖 axum 全家无害——它自己也是 axum 服务）；P1 边界清晰后拆出 `ss-device` crate（`ssh/`、`device/`、`address.rs`、`protocol.rs`、PortView 组合逻辑、设备相关 store），ss-server 瘦身为适配器，重构一次完成并合回 main，此时 main 获得同样的瘦身收益。
-- core 的脚本引擎短期不动（波及面大且无第二形态需求）；README 安全描述与实际能力先行对齐。
+- ~~**不在 main 上拆**~~ → **已拆（2026-10-27，提交 09d883f，topo-hub 分支）**
+- ~~**topo-hub P0 直接依赖 ss-server lib**~~ → **已依赖；P2.6 边界定型后拆出 `ss-device` crate**：ssh/、device/、address.rs、protocol.rs、remotes_store、port_meta_store、config.rs（config_dir）+ DeviceView/PortView 类型与纯函数。ss-server 瘦身为适配器+组合逻辑+组装根，经 `pub use` 重导出设备域——下游零改动。依赖链：topo-hub → ss-server → ss-device → ss-core。**待合回 main**（main 获得同样瘦身收益）。
+- core 的脚本引擎短期不动（波及面大且无第二形态需求）；README 安全描述与实际能力先行对齐（待办）。
