@@ -5200,6 +5200,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss-device"
+version = "0.15.0"
+dependencies = [
+ "dirs",
+ "futures-util",
+ "hex",
+ "russh",
+ "serde",
+ "serde_json",
+ "ss-core",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ss-server"
 version = "0.15.0"
 dependencies = [
@@ -5218,6 +5235,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ss-core",
+ "ss-device",
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",

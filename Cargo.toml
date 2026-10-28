@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/server", "crates/tauri-app", "crates/topo-hub"]
+members = ["crates/core", "crates/device", "crates/server", "crates/tauri-app", "crates/topo-hub"]
 
 [workspace.package]
 version = "0.15.0"
@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 # 内部 crate
 ss-core = { path = "crates/core" }
+ss-device = { path = "crates/device" }
 ss-server = { path = "crates/server" }
 
 # 异步运行时

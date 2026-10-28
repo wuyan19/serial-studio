@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 ss-core = { workspace = true }
+ss-device = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
