@@ -94,7 +94,8 @@ export default function TopologyDetail() {
       {view === "graph" ? (
         <TopologyGraph topo={detail} nameOf={nameOf} subtitleOf={subtitleOf} leases={leases} />
       ) : (
-        <table>
+        <div className="table-wrap">
+          <table>
           <thead>
             <tr>
               <th>设备</th>
@@ -155,7 +156,8 @@ export default function TopologyDetail() {
               );
             })}
           </tbody>
-        </table>
+          </table>
+        </div>
       )}
       {view === "table" && detail.links.length > 0 && (
         <p className="meta-line">

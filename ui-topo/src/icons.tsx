@@ -330,3 +330,27 @@ export function IconChevronsRight({ className }: IconProps) {
     </Svg>
   );
 }
+
+/** 拓扑 —— 三节点辐辏（星型拓扑的最小形）。 */
+export function IconTopology({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <circle cx="12" cy="5" r="2.4" />
+      <circle cx="5" cy="19" r="2.4" />
+      <circle cx="19" cy="19" r="2.4" />
+      <path d="M12 7.4v3.4" />
+      <path d="M12 10.8 6.2 17.2" />
+      <path d="M12 10.8l5.8 6.4" />
+    </Svg>
+  );
+}
+
+/** 占用 —— 锁（设备级独占写权）。 */
+export function IconLock({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V7.5a4 4 0 0 1 8 0V11" />
+    </Svg>
+  );
+}

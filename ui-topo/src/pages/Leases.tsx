@@ -52,7 +52,8 @@ export default function Leases() {
           </p>
         </div>
       ) : (
-        <table>
+        <div className="table-wrap">
+          <table>
           <thead>
             <tr>
               <th>持有者</th>
@@ -88,7 +89,8 @@ export default function Leases() {
               </tr>
             ))}
           </tbody>
-        </table>
+          </table>
+        </div>
       )}
     </section>
   );

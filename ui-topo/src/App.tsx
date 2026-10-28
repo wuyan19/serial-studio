@@ -14,6 +14,7 @@ import {
   SshManagerDialog,
 } from "./components/dialogs";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
+import { IconGear, IconGlobe, IconInfo, IconLock, IconPlug, IconTopology } from "./icons";
 import type { SshHost } from "./types";
 
 type DialogKind = null | "settings" | "about" | "ssh" | "remote";
@@ -38,9 +39,9 @@ export const ShellContext = createContext<ShellCtx>({
 export const useShell = () => useContext(ShellContext);
 
 const nav = [
-  { to: "/", label: "拓扑" },
-  { to: "/devices", label: "设备库" },
-  { to: "/leases", label: "占用" },
+  { to: "/", label: "拓扑", icon: <IconTopology /> },
+  { to: "/devices", label: "设备库", icon: <IconPlug /> },
+  { to: "/leases", label: "占用", icon: <IconLock /> },
 ];
 
 export default function App() {
@@ -119,24 +120,29 @@ export default function App() {
             className="brand"
             title={connUp ? "已连接服务器" : "连接断开，重连中…"}
           >
-            <span className={`brand__dot${connUp ? "" : " brand__dot--off"}`} /> topo-hub
+            <span className={`brand__dot${connUp ? "" : " brand__dot--off"}`} />
+            <span className="brand-text">topo-hub</span>
           </div>
           <nav>
             {nav.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.to === "/"}>
-                {n.label}
+              <NavLink key={n.to} to={n.to} end={n.to === "/"} title={n.label}>
+                {n.icon}
+                <span className="nav-label">{n.label}</span>
               </NavLink>
             ))}
           </nav>
           <div className="sidebar__tools">
             <button className="tool-btn" onClick={() => openDialog("remote")} title="添加远程设备">
-              添加远端
+              <IconGlobe />
+              <span className="nav-label">添加远端</span>
             </button>
             <button className="tool-btn" onClick={() => openDialog("settings")} title="设置">
-              设置
+              <IconGear />
+              <span className="nav-label">设置</span>
             </button>
             <button className="tool-btn" onClick={() => openDialog("about")} title="关于">
-              关于
+              <IconInfo />
+              <span className="nav-label">关于</span>
             </button>
             <select
               className="theme-select"
