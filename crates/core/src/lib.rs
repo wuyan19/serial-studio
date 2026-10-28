@@ -32,6 +32,6 @@ pub use port_task::{PortCommand, PortHandle};
 pub use rx_buffer::RxBuffer;
 pub use script::{
     run_script, run_script_with_timeout, Script, ScriptError, ScriptLogSink, ScriptParam,
-    ScriptRunOutcome,
+    ScriptRunOutcome, WriteGateFn,
 };
 pub use types::*;

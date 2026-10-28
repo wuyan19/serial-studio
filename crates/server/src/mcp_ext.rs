@@ -32,7 +32,7 @@ pub trait McpExtension: Send + Sync + 'static {
         state: &'a AppState,
     ) -> Pin<Box<dyn Future<Output = Option<Value>> + Send + 'a>>;
 
-    /// 内置工具执行前的准入检查（如 topo-hub 的写闸：MCP 写类操作须持租约）。
+    /// 内置工具执行前的准入检查（如 topo-hub 写闸：MCP 写类操作须持租约）。
     /// 仅对内置工具调用；返回 Some(结果) = 拦截（isError 标记），None = 放行。
     /// 默认全放行。
     fn intercept<'a>(
@@ -43,6 +43,17 @@ pub trait McpExtension: Send + Sync + 'static {
         _state: &'a AppState,
     ) -> Pin<Box<dyn Future<Output = Option<Value>> + Send + 'a>> {
         Box::pin(async move { None })
+    }
+
+    /// 脚本内写操作的逐次准入闸（send/clear 每次调用前执行）。
+    /// 返回 None = 不检查（UI/Tauri 场景）；Some(gate) = 注入到脚本引擎。
+    /// 默认 None。
+    fn script_gate(
+        &self,
+        _principal: Option<&str>,
+        _state: &AppState,
+    ) -> Option<ss_core::WriteGateFn> {
+        None
     }
 }
 
@@ -73,6 +84,21 @@ pub(crate) async fn intercept(
     for ext in extensions {
         if let Some(denied) = ext.intercept(name, args.clone(), principal, state).await {
             return Some(denied);
+        }
+    }
+    None
+}
+
+/// 脚本写闸辅助：按注册顺序询问扩展，首个 Some 即作为脚本引擎的逐次闸。
+/// 无扩展提供则返回 None（脚本内 send/clear 不检查——UI/Tauri 场景）。
+pub fn script_gate(
+    extensions: &[Arc<dyn McpExtension>],
+    principal: Option<&str>,
+    state: &AppState,
+) -> Option<ss_core::WriteGateFn> {
+    for ext in extensions {
+        if let Some(gate) = ext.script_gate(principal, state) {
+            return Some(gate);
         }
     }
     None

@@ -333,12 +333,15 @@ fn append_log_line(path: &std::path::Path, port: &str, message: &str, warn_once:
 /// MCP 是同步请求/响应,客户端无法中途喊停,且无限 JSON-RPC 调用有 DoS 风险,故保留超时兜底;
 /// 内部建一个永不 set 的 abort flag。WS/Tauri 路径请直接调 [`run_script_with_timeout`]
 /// 传 `None` 超时 + 外部 abort(支持长跑 + 停止按钮)。
+pub type WriteGateFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 pub async fn run_script(
     port: &str,
     script: &Script,
     manager: Arc<SerialManager>,
     args: HashMap<String, String>,
     log_file: Option<std::path::PathBuf>,
+    write_gate: Option<WriteGateFn>,
 ) -> ScriptRunOutcome {
     let abort = Arc::new(AtomicBool::new(false));
     // MCP 不暴露暂停(无 pause 工具),flag 恒 false——仅为满足 core 签名。
@@ -357,6 +360,7 @@ pub async fn run_script(
         paused,
         Some(sink.clone()),
         log_file.clone(),
+        write_gate,
     )
     .await;
     // 读取时序:Ok/失败/panic 路径经 oneshot happens-before,所有 push 已完成,快照完备;
@@ -402,6 +406,7 @@ pub async fn run_script_with_timeout(
     // Some 时 log() 第三写:追加落盘该文件(策略/命名在 server 侧 script_logs,core 不感知配置)。
     // 见 append_log_line:失败只 warn 不中断。
     log_file: Option<std::path::PathBuf>,
+    write_gate: Option<WriteGateFn>,
 ) -> Result<(), ScriptError> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
@@ -429,6 +434,7 @@ pub async fn run_script_with_timeout(
                 paused,
                 log_sink,
                 log_file,
+                write_gate,
             ))
         });
         let result = match std::panic::catch_unwind(run) {
@@ -486,6 +492,7 @@ async fn run_script_inner(
     paused: Arc<AtomicBool>,
     log_sink: Option<ScriptLogSink>,
     log_file: Option<std::path::PathBuf>,
+    write_gate: Option<WriteGateFn>,
 ) -> Result<(), ScriptError> {
     let deadline = timeout.as_ref().map(|t| Instant::now() + *t);
 
@@ -534,12 +541,20 @@ async fn run_script_inner(
                 {
                     let mgr = manager.clone();
                     let dp = port.clone();
+                    let wg = write_gate.clone();
                     globals.set(
                         "send",
                         Func::from(Async(move |data: String, port: Option<String>| {
                             let mgr = mgr.clone();
                             let p = port.unwrap_or_else(|| dp.clone());
+                            let gate = wg.clone();
                             async move {
+                                if let Some(g) = gate.as_ref() {
+                                    if let Err(msg) = g(&p) {
+                                        tracing::warn!("script send gated: {}", msg);
+                                        return Ok(Some(format!("send gated ({}): {}", p, msg)));
+                                    }
+                                }
                                 match mgr.send(&p, &data, "text", true).await {
                                     Ok(_) => Ok::<Option<String>, rquickjs::Error>(None),
                                     Err(e) => {
@@ -588,12 +603,20 @@ async fn run_script_inner(
                 {
                     let mgr = manager.clone();
                     let dp = port.clone();
+                    let wg = write_gate.clone();
                     globals.set(
                         "clear",
                         Func::from(Async(move |port: Option<String>| {
                             let mgr = mgr.clone();
                             let p = port.unwrap_or_else(|| dp.clone());
+                            let gate = wg.clone();
                             async move {
+                                if let Some(g) = gate.as_ref() {
+                                    if let Err(msg) = g(&p) {
+                                        tracing::warn!("script clear gated: {}", msg);
+                                        return Ok(Some(format!("clear gated ({}): {}", p, msg)));
+                                    }
+                                }
                                 match mgr.clear_buffer(&p).await {
                                     Ok(_) => Ok::<Option<String>, rquickjs::Error>(None),
                                     Err(e) => {
@@ -941,6 +964,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -968,6 +992,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1024,6 +1049,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         match result {
@@ -1048,6 +1074,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1067,6 +1094,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1087,6 +1115,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
@@ -1102,6 +1131,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1129,6 +1159,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         match result {
@@ -1161,6 +1192,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         stopper.await.unwrap();
@@ -1198,6 +1230,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         stopper.await.unwrap();
@@ -1240,6 +1273,7 @@ mod tests {
                 paused_flag(),
                 None,
                 None,
+            None,
             ),
             run_script_with_timeout(
                 "COM0",
@@ -1252,6 +1286,7 @@ mod tests {
                 paused_flag(),
                 None,
                 None,
+            None,
             ),
         );
         stopper.await.unwrap();
@@ -1305,6 +1340,7 @@ mod tests {
                 paused,
                 None,
                 None,
+            None,
             ),
         )
         .await
@@ -1347,6 +1383,7 @@ mod tests {
                 paused,
                 None,
                 None,
+            None,
             ),
         )
         .await
@@ -1403,6 +1440,7 @@ mod tests {
                 paused,
                 None,
                 None,
+            None,
             ),
         )
         .await
@@ -1450,6 +1488,7 @@ mod tests {
                     paused_flag(),
                     None,
                     None,
+                None,
                 ),
             )
             .await
@@ -1469,6 +1508,7 @@ mod tests {
                 paused_a,
                 None,
                 None,
+            None,
             ),
         )
         .await
@@ -1501,6 +1541,7 @@ mod tests {
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(result.is_ok(), "log 不应中断脚本: {:?}", result);
@@ -1544,7 +1585,7 @@ mod tests {
             params: vec![],
             code: r#"log("x"); log("y")"#.to_string(),
         };
-        let outcome = run_script("COM0", &script, m, HashMap::new(), None).await;
+        let outcome = run_script("COM0", &script, m, HashMap::new(), None, None).await;
         assert!(
             outcome.result.is_ok(),
             "MCP 入口 log 不应 panic/中断: {:?}",
@@ -1563,7 +1604,7 @@ mod tests {
             params: vec![],
             code: r#"log("before"); throw new Error("boom")"#.to_string(),
         };
-        let outcome = run_script("COM0", &script, m, HashMap::new(), None).await;
+        let outcome = run_script("COM0", &script, m, HashMap::new(), None, None).await;
         assert!(
             matches!(&outcome.result, Err(ScriptError::Script(msg)) if msg == "boom"),
             "应失败且消息正确: {:?}",
@@ -1589,6 +1630,7 @@ mod tests {
             paused_flag(),
             Some(sink.clone()),
             None,
+        None,
         )
         .await;
         assert!(
@@ -1714,6 +1756,7 @@ throw new Error(JSON.stringify(out));"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1740,6 +1783,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1768,6 +1812,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1808,6 +1853,7 @@ if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(r.is_ok(), "块拼接应还原整文件 b64: {:?}", r);
@@ -1839,6 +1885,7 @@ read_b64_chunk({p}, 0, 4);"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1863,6 +1910,7 @@ read_b64_chunk({p}, 0, 4);"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -1889,6 +1937,7 @@ read_b64_chunk({p}, 0, 4);"#,
                 paused_flag(),
                 None,
                 None,
+            None,
             )
             .await
         };
@@ -1967,6 +2016,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(r.is_ok(), "写文件应成功: {:?}", r);
@@ -1993,6 +2043,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             None,
+        None,
         )
         .await;
         assert!(
@@ -2018,6 +2069,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             Some(lf.clone()),
+        None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -2042,7 +2094,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             params: vec![],
             code: "await sleep(1)".into(),
         };
-        let out = run_script("COM0", &no_log, m.clone(), HashMap::new(), Some(lf.clone())).await;
+        let out = run_script("COM0", &no_log, m.clone(), HashMap::new(), Some(lf.clone()), None).await;
         assert!(out.result.is_ok());
         assert!(out.log_file.is_none(), "零 log() 不应给路径");
         assert!(!lf.exists(), "零 log() 不应创建文件");
@@ -2053,7 +2105,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             params: vec![],
             code: r#"log("x")"#.into(),
         };
-        let out = run_script("COM0", &with_log, m, HashMap::new(), Some(lf.clone())).await;
+        let out = run_script("COM0", &with_log, m, HashMap::new(), Some(lf.clone()), None).await;
         assert!(out.result.is_ok());
         assert_eq!(
             out.log_file.as_deref(),

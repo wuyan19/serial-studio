@@ -774,6 +774,7 @@ async fn run_script(
             None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
             // 落盘策略唯一在 script_logs(开关开才 Some);日志文件经设置页「打开目录」查看
             ss_server::script_logs::log_file_for(&port, Some(&name)),
+            None, // Tauri GUI 非 MCP 来源,写闸不适用
         )
         .await;
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);

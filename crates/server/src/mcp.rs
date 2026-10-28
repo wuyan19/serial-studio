@@ -368,8 +368,8 @@ async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppSta
         "serial_status" => tool_serial_status(arguments, state).await,
         "serial_grep" => tool_serial_grep(arguments, state).await,
         "serial_clear" => tool_serial_clear(arguments, state).await,
-        "serial_debug_script" => tool_serial_debug_script(arguments, state).await,
-        "serial_run_script" => tool_serial_run_script(arguments, state).await,
+        "serial_debug_script" => tool_serial_debug_script(arguments, principal, state).await,
+        "serial_run_script" => tool_serial_run_script(arguments, principal, state).await,
         "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
         "serial_get_script" => tool_serial_get_script(arguments).await,
         "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
@@ -731,7 +731,7 @@ async fn tool_serial_clear(args: Value, state: &AppState) -> Value {
 }
 
 /// 临时执行调用方提供的 JS 代码(serial_debug_script):调通后可 save 落库。
-async fn tool_serial_debug_script(args: Value, state: &AppState) -> Value {
+async fn tool_serial_debug_script(args: Value, principal: Option<&str>, state: &AppState) -> Value {
     let code = match args.get("code").and_then(|c| c.as_str()) {
         Some(c) => c,
         None => return error_text("Missing required parameter: code".into()),
@@ -744,13 +744,13 @@ async fn tool_serial_debug_script(args: Value, state: &AppState) -> Value {
         params: Vec::new(),
         code: code.to_string(),
     };
-    execute_script(state, &args, script, run_args, None).await
+    execute_script(state, &args, principal, script, run_args, None).await
 }
 
 /// 执行脚本库(scripts.json)中已保存的脚本(serial_run_script):按 name 取出后走与
 /// serial_debug_script 相同的执行路径(闸门/预检/并发上限/日志返回)。读到即快照——
 /// run 期间 save/delete 覆盖同名脚本不影响本次执行(scripts_store 的 LOCK 只保证读不与写交错)。
-async fn tool_serial_run_script(args: Value, state: &AppState) -> Value {
+async fn tool_serial_run_script(args: Value, principal: Option<&str>, state: &AppState) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return error_text("Missing required parameter: name".into()),
@@ -767,16 +767,18 @@ async fn tool_serial_run_script(args: Value, state: &AppState) -> Value {
     // name 查找先于 execute_script 内的闸门:属只读元数据访问(list 工具本可见),无害;
     // 执行能力仍统一由闸门拦截。
     let run_args = merge_run_args(&script.params, args.get("args"));
-    execute_script(state, &args, script, run_args, Some(&name)).await
+    execute_script(state, &args, principal, script, run_args, Some(&name)).await
 }
 
-/// 脚本执行统一路径(enable_scripting 闸门 → resolve_port → 端口预检 → 并发上限 →
-/// run_script → 日志随响应返回)。serial_debug_script 与 serial_run_script 共用,
+/// 脚本执行统一路径(enable_scripting 闸门 → 扩展写闸 → resolve_port → 端口预检 →
+/// 并发上限 → run_script → 日志随响应返回)。serial_debug_script 与 serial_run_script 共用,
 /// 执行 JS 的工具必经此路——闸门语义单一真相,新增执行类工具不会漏拦。
 /// `script_name` 用于落盘日志文件命名(debug 临时执行为 None)。
+/// `principal`：调用方身份（token），用于扩展的逐次写闸（脚本内 send/clear 逐次检查）。
 async fn execute_script(
     state: &AppState,
     args: &Value,
+    principal: Option<&str>,
     script: ss_core::Script,
     run_args: std::collections::HashMap<String, String>,
     script_name: Option<&str>,
@@ -805,11 +807,13 @@ async fn execute_script(
     // 落盘策略唯一在 script_logs(开关开才 Some)。MCP 响应内日志有 200 条/16KiB 上限,
     // 落盘是找回超限日志的手段——outcome 带回实际写过的路径,拼进响应供 read_file 读回。
     let log_file = crate::script_logs::log_file_for(&port, script_name);
+    // 逐次写闸：从扩展获取 gate 函数（topo-hub 租约闸注入），脚本内每次 send/clear 检查。
+    let write_gate = crate::mcp_ext::script_gate(&state.mcp_extensions, principal, state);
     let ss_core::ScriptRunOutcome {
         result,
         logs,
         log_file,
-    } = ss_core::run_script(&port, &script, manager.clone(), run_args, log_file).await;
+    } = ss_core::run_script(&port, &script, manager.clone(), run_args, log_file, write_gate).await;
     // 日志随结果返回(MCP 无实时推送出口):成功/失败/超时均拼上 log() 收集的输出,AI 才能调试脚本。
     // 空日志省略该段,避免噪音。
     let (mut text, ok) = match result {

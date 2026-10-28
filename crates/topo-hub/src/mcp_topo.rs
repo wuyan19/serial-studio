@@ -783,4 +783,20 @@ impl McpExtension for TopoTools {
             }
         })
     }
+
+    /// 脚本写闸：返回一个逐次检查的闭包（脚本内每次 send/call 调用）。
+    /// 与 intercept 共用同一租约闸——脚本持有的端口/设备必须被本会话租约覆盖。
+    fn script_gate(
+        &self,
+        principal: Option<&str>,
+        _state: &AppState,
+    ) -> Option<ss_core::WriteGateFn> {
+        if !self.leases.gate_enabled() {
+            return None;
+        }
+        // gate 需要 'static 闭包（脚本线程 Send）——把 token clone 进去
+        let token = principal?.to_string();
+        let leases = Arc::clone(&self.leases);
+        Some(Arc::new(move |port: &str| leases.gate(Some(&token), port)))
+    }
 }
