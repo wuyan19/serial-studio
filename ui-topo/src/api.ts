@@ -241,6 +241,25 @@ export function sshChannelLabel(ch: SshChannel): string {
   return ch.nickname?.trim() || `${ch.username}@${ch.host}`;
 }
 
+/** 通道在端口表中的可见状态（镜像服务端 Channel::covers 两粒度语义）：
+ * 串口精确匹配端口键，SSH 按复合键首段（凭据 id）匹配。 */
+export function channelStatus(
+  ch: DeviceChannel,
+  ports: PortView[],
+): { present: boolean; opened?: boolean; holders?: number } {
+  if (ch.type === "serial") {
+    const row = ports.find((p) => p.name === ch.port);
+    return { present: !!row, opened: row?.opened, holders: row?.holders };
+  }
+  const rows = ports.filter((p) => p.name.split("::")[0] === ch.id);
+  return { present: rows.length > 0, opened: rows[0]?.opened, holders: rows[0]?.holders };
+}
+
+/** 通道展示文案（卡片/图节点小字共用）：串口取端口键，SSH 取昵称/user@host。 */
+export function channelLabel(ch: DeviceChannel): string {
+  return ch.type === "serial" ? `串口 ${ch.port}` : `SSH ${sshChannelLabel(ch)}`;
+}
+
 /** 时间戳显示（iso → 本地短格式）。 */
 export function fmtTime(iso: string): string {
   const d = new Date(iso);

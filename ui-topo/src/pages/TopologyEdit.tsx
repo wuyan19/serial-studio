@@ -237,7 +237,8 @@ function TopologyEditInner() {
       const t = editing
         ? await api.updateTopology(id!, body)
         : await api.createTopology(body);
-      navigate(`/topologies/${t.id}`);
+      // 详情页已撤：回总览并锚点聚焦刚保存的卡片
+      navigate(`/#topo-${t.id}`);
     } catch (e) {
       setError(String((e as Error).message ?? e));
     } finally {

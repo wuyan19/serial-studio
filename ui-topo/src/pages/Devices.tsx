@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   api,
+  channelLabel,
   channelPortKey,
+  channelStatus,
   fmtTime,
   leaseOfDevice,
   sshChannelLabel,
@@ -91,15 +93,7 @@ export default function Devices() {
     [topos],
   );
 
-  const channelState = (d: Device, i: number) => {
-    const c = d.channels[i];
-    if (c.type === "serial") {
-      const row = ports.find((p) => p.name === c.port);
-      return { present: !!row, opened: row?.opened, holders: row?.holders };
-    }
-    const rows = ports.filter((p) => p.name.split("::")[0] === c.id);
-    return { present: rows.length > 0, opened: rows[0]?.opened, holders: rows[0]?.holders };
-  };
+  const channelState = (c: Device["channels"][number]) => channelStatus(c, ports);
 
   const detailInfo = (d: Device): DeviceDetailInfo => {
     const lease = leaseOfDevice(d.id, leases);
@@ -124,10 +118,7 @@ export default function Devices() {
         <span className="muted">空闲</span>
       ),
       ports: [],
-      portsText:
-        d.channels
-          .map((c) => (c.type === "serial" ? `串口 ${c.port}` : `SSH ${sshChannelLabel(c)}`))
-          .join(" · ") || "无通道",
+      portsText: d.channels.map((c) => channelLabel(c)).join(" · ") || "无通道",
       hint: "占用为设备级（全部通道独占）；终端从通道行打开。",
     };
   };
@@ -173,7 +164,7 @@ export default function Devices() {
                 {toposOf(d.id).length > 0 && (
                   <div className="dev-card__topos" title="所属拓扑（点击进入）">
                     {toposOf(d.id).map((t) => (
-                      <Link key={t.id} to={`/topologies/${t.id}`} className="dev-topo-chip">
+                      <Link key={t.id} to={`/#topo-${t.id}`} className="dev-topo-chip">
                         {t.name}
                       </Link>
                     ))}
@@ -181,10 +172,9 @@ export default function Devices() {
                 )}
                 <ul className="dev-card__channels">
                   {d.channels.map((c, i) => {
-                    const st = channelState(d, i);
+                    const st = channelState(c);
                     const key = channelPortKey(c);
-                    const label =
-                      c.type === "serial" ? (c.port ?? "") : sshChannelLabel(c);
+                    const label = c.type === "serial" ? (c.port ?? "") : sshChannelLabel(c);
                     return (
                       <li key={i} className="dev-channel" title={key}>
                         <span className={`dev-badge ${c.type === "serial" ? "dev-badge--serial" : "dev-badge--ssh"}`}>

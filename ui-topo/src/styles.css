@@ -3624,56 +3624,118 @@ button.link {
   border-color: var(--hairline);
 }
 
-/* 拓扑卡片 */
-.topo-list {
-  list-style: none;
-  padding: 0;
+/* 拓扑总览大卡片（详情页已撤，信息全在卡上：图+成员+连线+元信息）。
+   min() 兜底窄屏——轨道下限不越过容器宽，否则 <650px 视口横向破版 */
+.topo-big-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.topo-big-card {
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: 16px 18px;
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.topo-card {
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
-  padding: 12px 16px;
-  background: var(--surface);
+  min-width: 0;
   transition: border-color var(--t-med) var(--ease);
 }
 
-.topo-card:hover {
+.topo-big-card:hover {
   border-color: var(--ink-faint);
 }
 
-.topo-main {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+/* 锚点聚焦（设备页拓扑 chip / 编辑保存后跳入）——短暂高亮 */
+.topo-big-card--flash {
+  border-color: var(--accent);
+  box-shadow: var(--field-focus-ring);
 }
 
-.topo-name {
+.topo-big-card__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topo-big-card__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.topo-big-card__name {
   font-size: var(--fs-md);
   font-weight: 600;
   color: var(--ink);
-  text-decoration: none;
-  margin-right: auto;
-}
-
-.topo-name:hover { text-decoration: underline; }
-
-.topo-desc {
-  margin: 4px 0 0;
-  color: var(--ink-faint);
-}
-
-/* 成员设备名单行小字（拓扑卡第三行） */
-.topo-members {
-  margin: 6px 0 0;
-  color: var(--ink-dim);
-  font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.topo-big-card__desc {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.topo-big-card__members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.topo-member {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topo-member__name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.topo-member .chan-list {
+  flex: 1;
+  min-width: 0;
+}
+
+.topo-big-card__links {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.topo-big-card__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 8px;
+}
+
+/* 大卡内嵌图：矮容器（.graph 默认 480px 留给独立场景）。双类提升优先级——
+   本段在 .graph 规则之前，单类 .graph--card 会被其后的 height:480 覆盖 */
+.graph.graph--card {
+  height: 280px;
+  margin: 0;
 }
 
 /* 卡内图标操作（编辑/删除）——与设备卡脚部同形制 */
@@ -4839,7 +4901,7 @@ table tbody tr:hover td {
   color: var(--accent);
 }
 
-/* 只读图（详情页）隐藏锚点视觉：visibility 保布局——锚点位置测量依赖
+/* 只读图（总览大卡内嵌）隐藏锚点视觉：visibility 保布局——锚点位置测量依赖
    getBoundingClientRect，display:none 会把全部锚点量到 (0,0)。 */
 .graph .react-flow__handle {
   visibility: hidden;

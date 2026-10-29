@@ -1,9 +1,8 @@
 import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
-import { createBrowserRouter, RouterProvider, useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, createBrowserRouter, RouterProvider, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import App, { useShell } from "./App";
 import Topologies from "./pages/Topologies";
-import TopologyDetail from "./pages/TopologyDetail";
 import TopologyEdit from "./pages/TopologyEdit";
 import Devices from "./pages/Devices";
 import Leases from "./pages/Leases";
@@ -25,6 +24,12 @@ function TerminalRedirect() {
   return <p className="muted">正在跳转…</p>;
 }
 
+/** 拓扑详情页已撤（信息并入总览大卡片）：旧深链带 id 锚点直达对应卡。 */
+function TopoRedirect() {
+  const { id } = useParams();
+  return <Navigate to={id ? `/#topo-${id}` : "/"} replace />;
+}
+
 const router = createBrowserRouter([
   {
     path: "/",
@@ -32,7 +37,8 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Topologies /> },
       { path: "topologies/new", element: <TopologyEdit /> },
-      { path: "topologies/:id", element: <TopologyDetail /> },
+      // 详情页已撤（信息并入总览大卡片）——旧深链锚点直达对应卡
+      { path: "topologies/:id", element: <TopoRedirect /> },
       { path: "topologies/:id/edit", element: <TopologyEdit /> },
       { path: "devices", element: <Devices /> },
       { path: "leases", element: <Leases /> },

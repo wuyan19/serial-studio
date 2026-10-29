@@ -6,19 +6,22 @@ import { autoHandle, memberPosition, topoEdgeTypes, topoNodeTypes } from "../com
 
 /** 拓扑图（只读）：节点 = 成员设备（通道列为小字），边 = links（两端端口标签
  * + 说明）。节点位置取成员坐标（编辑器摆位持久化），未摆位的旧数据圆形布局兜底；
- * 占用中的设备描边高亮。 */
+ * 占用中的设备描边高亮。card=true 为大卡片内嵌形态（矮容器）。 */
 export default function TopologyGraph({
   topo,
   nameOf,
   subtitleOf,
   leases,
+  card,
 }: {
   topo: Topology;
-  /** 设备 id → 显示名（详情快照优先、注册表兜底，由调用方注入）。 */
+  /** 设备 id → 显示名（注册表翻译，由调用方注入）。 */
   nameOf: (deviceId: string) => string;
   /** 设备 id → 节点小字（通道摘要）。 */
   subtitleOf: (deviceId: string) => string | undefined;
   leases: LeaseView[];
+  /** 大卡片内嵌形态（矮容器，隐藏缩放控件）。 */
+  card?: boolean;
 }) {
   const { nodes, edges } = useMemo(() => {
     const memberIds = topo.members.map((m) => m.device);
@@ -56,7 +59,7 @@ export default function TopologyGraph({
   }, [topo, leases, nameOf, subtitleOf]);
 
   return (
-    <div className="graph">
+    <div className={card ? "graph graph--card" : "graph"}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -64,10 +67,11 @@ export default function TopologyGraph({
         edgeTypes={topoEdgeTypes}
         fitView
         nodesConnectable={false}
+        nodesDraggable={!card}
         proOptions={{ hideAttribution: false }}
       >
         <Background color="var(--hairline)" gap={20} />
-        <Controls showInteractive={false} />
+        {!card && <Controls showInteractive={false} />}
       </ReactFlow>
     </div>
   );
