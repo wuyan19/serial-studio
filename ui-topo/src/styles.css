@@ -3711,15 +3711,6 @@ button.link {
   min-width: 0;
 }
 
-.topo-big-card__links {
-  margin: 0;
-  color: var(--ink-dim);
-  font-size: var(--fs-sm);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-}
-
 .topo-big-card__foot {
   display: flex;
   justify-content: space-between;
@@ -4303,9 +4294,11 @@ button.link {
 /* 通道列：类型徽章 + 文字的行内清单 */
 .chan-list {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: flex-start;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  overflow: hidden;
 }
 
 .chan-item {

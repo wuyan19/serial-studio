@@ -180,20 +180,6 @@ export default function Topologies() {
                 })}
                 {t.members.length === 0 && <li className="muted">无成员设备</li>}
               </ul>
-              {t.links.length > 0 && (
-                <p className="topo-big-card__links">
-                  {t.links.map((l, i) => {
-                    const f = l.from_port ? `${nameOf(l.from)}:${l.from_port}` : nameOf(l.from);
-                    const to = l.to_port ? `${nameOf(l.to)}:${l.to_port}` : nameOf(l.to);
-                    return (
-                      <span key={i}>
-                        {f} ↔ {to}
-                        {l.label ? `（${l.label}）` : ""}
-                      </span>
-                    );
-                  })}
-                </p>
-              )}
               <div className="topo-big-card__foot">
                 <span>更新于 {fmtTime(t.updated_at)}</span>
                 <button

@@ -1,5 +1,5 @@
 /** 设备管理：被测设备卡（通道清单/在线态/占用徽章/每通道开终端/编辑/删除）。
- *  「终端」按钮直达右侧终端面板（不跳页）；裸端口入口在面板的「打开端口」。
+ *  「打开」按钮直达右侧终端面板（不跳页）；裸端口入口在面板的「打开端口」。
  *  占用 = 设备级（leases.grants.device join）。 */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -119,7 +119,7 @@ export default function Devices() {
       ),
       ports: [],
       portsText: d.channels.map((c) => channelLabel(c)).join(" · ") || "无通道",
-      hint: "占用为设备级（全部通道独占）；终端从通道行打开。",
+      hint: "占用为设备级（全部通道独占）；通道行「打开」进终端。",
     };
   };
 
@@ -192,7 +192,7 @@ export default function Devices() {
                           className="dev-channel__term"
                           onClick={() => openTerminal(key)}
                         >
-                          终端
+                          打开
                         </button>
                       </li>
                     );
