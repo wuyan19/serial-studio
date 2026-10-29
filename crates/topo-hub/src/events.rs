@@ -15,9 +15,11 @@ use tokio_stream::StreamExt;
 pub async fn sse(
     State(state): State<TopoState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // 注意 data() 不可省：SSE 规范要求事件带 data 行才派发——只设 event 名的
+    // 事件在浏览器 EventSource 永远不触发（curl 看得到原始字节，测不出来）。
     let topo = BroadcastStream::new(state.topo_bus.subscribe())
-        .filter_map(|_| Some(Ok(Event::default().event("topo_changed"))));
+        .filter_map(|_| Some(Ok(Event::default().event("topo_changed").data("1"))));
     let lease = BroadcastStream::new(state.lease_bus.subscribe())
-        .filter_map(|_| Some(Ok(Event::default().event("lease_changed"))));
+        .filter_map(|_| Some(Ok(Event::default().event("lease_changed").data("1"))));
     Sse::new(futures_util::stream::select(topo, lease)).keep_alive(KeepAlive::default())
 }
