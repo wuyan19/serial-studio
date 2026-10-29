@@ -4690,7 +4690,7 @@ table tbody tr:hover td {
   border: 2px solid var(--bg);
 }
 
-/* 连线中点标签：两端端口（GE1/1/1 ⇄ eth0）+ 说明小字 */
+/* 连线中点标签：说明小字（端口标签分居两端，见 --end） */
 .port-edge__label {
   position: absolute;
   pointer-events: none;
@@ -4701,11 +4701,15 @@ table tbody tr:hover td {
   background: var(--surface-2);
   border-radius: 4px;
   padding: 3px 8px;
-}
-
-.port-edge__ports {
   font-size: 11px;
   color: var(--ink-dim);
+}
+
+/* 连线两端端口标签：贴近各自设备（空间邻近即归属），比中点签更轻 */
+.port-edge__label--end {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
 }
 
 .port-edge__note {

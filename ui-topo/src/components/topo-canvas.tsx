@@ -1,12 +1,13 @@
 /** 拓扑画布共享件：DeviceNode 节点 + PortEdge 端口标签边 + 圆形布局兜底。
  * 编辑器（可交互）与详情图（只读）共用；节点/边类型与样式集中在此。 */
-import { memo } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   BaseEdge,
   EdgeLabelRenderer,
   getBezierPath,
   Handle,
   Position,
+  useStore,
   type Edge,
   type EdgeProps,
   type Node,
@@ -68,6 +69,11 @@ export interface PortEdgeData extends Record<string, unknown> {
 
 export type PortFlowEdge = Edge<PortEdgeData, "port">;
 
+/** 连线两端端口标签位置：沿真实路径取 14%/86%（贴近各自设备，空间邻近即
+ * 归属）。视觉间距（流坐标间距 × 当前 zoom）不足时回退中点合并"p1 ⇄ p2"。 */
+const END_FRACTION = 0.14;
+const MIN_VISUAL_GAP = 44;
+
 const PortEdge = memo(function PortEdge(props: EdgeProps<PortFlowEdge>) {
   const [path, labelX, labelY] = getBezierPath({
     sourceX: props.sourceX,
@@ -78,7 +84,43 @@ const PortEdge = memo(function PortEdge(props: EdgeProps<PortFlowEdge>) {
     targetPosition: props.targetPosition,
   });
   const { from_port, to_port, label } = props.data ?? {};
-  const ports = [from_port?.trim(), to_port?.trim()].filter(Boolean).join(" ⇄ ");
+  const fromText = from_port?.trim();
+  const toText = to_port?.trim();
+  const measureRef = useRef<SVGPathElement>(null);
+  const [ends, setEnds] = useState<{
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    gap: number;
+  } | null>(null);
+  const zoom = useStore((s) => s.transform[2]);
+
+  // 贝塞尔按曲率外凸，直线插值会偏——量真实路径（隐藏 path，getPointAtLength）
+  useEffect(() => {
+    const el = measureRef.current;
+    if (!el || (!fromText && !toText)) {
+      return;
+    }
+    const total = el.getTotalLength();
+    const f = el.getPointAtLength(total * END_FRACTION);
+    const t = el.getPointAtLength(total * (1 - END_FRACTION));
+    setEnds({
+      from: { x: f.x, y: f.y },
+      to: { x: t.x, y: t.y },
+      gap: Math.hypot(t.x - f.x, t.y - f.y),
+    });
+  }, [path, fromText, toText]);
+
+  const split = ends !== null && ends.gap * zoom >= MIN_VISUAL_GAP;
+  const sel = props.selected ? " port-edge__label--sel" : "";
+  const chip = (text: string, pos: { x: number; y: number }) => (
+    <div
+      className={`port-edge__label port-edge__label--end${sel}`}
+      style={{ transform: `translate(-50%, -50%) translate(${pos.x}px, ${pos.y}px)` }}
+    >
+      {text}
+    </div>
+  );
+
   return (
     <>
       <BaseEdge
@@ -90,17 +132,29 @@ const PortEdge = memo(function PortEdge(props: EdgeProps<PortFlowEdge>) {
             : null),
         }}
       />
-      {(ports || label) && (
-        <EdgeLabelRenderer>
+      {(fromText || toText) && (
+        <path ref={measureRef} d={path} fill="none" stroke="none" style={{ pointerEvents: "none" }} />
+      )}
+      <EdgeLabelRenderer>
+        {split && fromText && chip(fromText, ends!.from)}
+        {split && toText && chip(toText, ends!.to)}
+        {!split && (fromText || toText) && (
           <div
-            className={`port-edge__label${props.selected ? " port-edge__label--sel" : ""}`}
+            className={`port-edge__label${sel}`}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
-            {ports && <span className="port-edge__ports">{ports}</span>}
-            {label && <span className="port-edge__note">{label}</span>}
+            {[fromText, toText].filter(Boolean).join(" ⇄ ")}
           </div>
-        </EdgeLabelRenderer>
-      )}
+        )}
+        {label && (
+          <div
+            className={`port-edge__label${sel}`}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+          >
+            <span className="port-edge__note">{label}</span>
+          </div>
+        )}
+      </EdgeLabelRenderer>
     </>
   );
 });
