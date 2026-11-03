@@ -880,3 +880,117 @@ fn ssh_open_error_wire_shape() {
         ss_core::SerialError::OpenFailed { detail: None, .. }
     ));
 }
+
+#[tokio::test]
+async fn ws_ssh_test_preserves_confirmation_errors_without_opening_channels() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct ProbeServer(Arc<AtomicUsize>);
+    impl server::Handler for ProbeServer {
+        type Error = russh::Error;
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            password: &str,
+        ) -> Result<Auth, Self::Error> {
+            if password == "correct-password" {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                })
+            }
+        }
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<russh::server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            reply.accept().await;
+            Ok(())
+        }
+    }
+
+    type Ws = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn test_reply(ws: &mut Ws) -> serde_json::Value {
+        ws.send(Message::Text(
+            r#"{"action":"ssh_test","host_id":"probe"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == "ssh_test_result" {
+                    return value;
+                }
+            }
+            panic!("connection closed before SSH test reply");
+        })
+        .await
+        .unwrap()
+    }
+
+    let dir = std::env::temp_dir().join(format!("ss-ssh-probe-{}", uuid::Uuid::new_v4()));
+    let previous = std::env::var_os("SERIAL_STUDIO_CONFIG_DIR");
+    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let channels = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_channels = Arc::clone(&channels);
+    let config = Arc::new(server_config());
+    let ssh_server = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            let handler = ProbeServer(Arc::clone(&server_channels));
+            tokio::spawn(async move {
+                let _ = server::run_stream(config, socket, handler).await;
+            });
+        }
+    });
+    let (url, manager) = boot_ws().await;
+    manager.update_registry(vec![record("probe", "127.0.0.1", port)]);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let unknown = test_reply(&mut ws).await;
+    assert_eq!(unknown["ok"], false);
+    assert_eq!(unknown["ssh"]["kind"], "host_key_unknown");
+    assert!(unknown["ssh"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .starts_with("SHA256:"));
+    assert!(!unknown["ssh"]["keyType"].as_str().unwrap().is_empty());
+    assert!(!unknown["message"].as_str().unwrap().is_empty());
+
+    trust(&manager, "probe").await;
+    let passed = test_reply(&mut ws).await;
+    assert_eq!(passed["ok"], true);
+    assert_eq!(passed["message"], "");
+    assert!(passed.get("ssh").is_none());
+
+    let mut wrong = record("probe", "127.0.0.1", port);
+    wrong.auth = SshAuthRecord::Password {
+        password: "wrong-password".into(),
+    };
+    manager.update_registry(vec![wrong]);
+    let rejected = test_reply(&mut ws).await;
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["ssh"]["kind"], "auth_failed");
+    assert_eq!(channels.load(Ordering::SeqCst), 0);
+    ws.close(None).await.unwrap();
+    ssh_server.abort();
+    match previous {
+        Some(value) => std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", value),
+        None => std::env::remove_var("SERIAL_STUDIO_CONFIG_DIR"),
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

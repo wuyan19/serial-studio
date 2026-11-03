@@ -200,6 +200,11 @@ export type SshOpenError =
   | { kind: "host_key_changed"; known: string; received: string; keyType: string }
   | { kind: "other"; message: string };
 
+export interface SshTestState {
+  status: "testing" | "ok" | "fail";
+  message?: string;
+}
+
 export interface SrvSettings {
   ws_host: string;
   ws_port: number;

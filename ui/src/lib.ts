@@ -1,4 +1,5 @@
 import type { ConnConfig, Macro, PortId, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
+import { parseDeviceShareUrl } from "./device-share";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -288,7 +289,7 @@ export function initConn(): ConnConfig {
     case "local":
       return { host: "127.0.0.1", port: 18700 };
     default:
-      return loadConn();
+      return parseDeviceShareUrl(location.href) ?? loadConn();
   }
 }
 

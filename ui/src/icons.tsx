@@ -6,6 +6,12 @@
 
 type IconProps = { className?: string };
 
+export function IconShare({ className }: IconProps) {
+  return <Svg className={className}>
+    <path d="M12 15V3m-4 4 4-4 4 4M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8" />
+  </Svg>;
+}
+
 function Svg({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <svg

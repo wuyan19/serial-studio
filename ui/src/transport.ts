@@ -4,6 +4,12 @@ import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
 import type { PortGroupsOperation, PortGroupsSnapshot } from "./port-groups";
 import type { LibraryChanges, LibraryKind, LibrarySnapshot } from "./library-protocol";
 
+export interface SshTestResult {
+  ok: boolean;
+  message: string;
+  ssh?: SshOpenError;
+}
+
 /** acquire 结果：区分首开与附加（附加时 config 为端口实际配置，请求的配置被忽略）。 */
 export interface AcquiredResult {
   port: string;
@@ -90,7 +96,7 @@ export interface Transport {
   /** 全量覆盖注册表（内存权威；后端先落盘再同步会话池）。 */
   sshSave(hosts: SshHost[]): Promise<void>;
   /** 测试连接（建连+认证+即拆）；结果也经 onSshTestResult 推送。 */
-  sshTest(hostId: string): Promise<{ ok: boolean; message: string }>;
+  sshTest(hostId: string): Promise<SshTestResult>;
   /** 分配下一个空闲实例名（shell / shell@N，最小空闲）。 */
   sshNextInstance(hostId: string, base: string): Promise<string>;
   /** 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。 */
@@ -258,7 +264,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private scriptSkillController: Controller<string> | null = null;
   /** SSH 管理面在途请求：ssh_list 单槽（快照语义）；test/next 按 host_id 路由（可并发）。 */
   private sshListController: Controller<void> | null = null;
-  private sshTestControllers = new Map<string, Controller<{ ok: boolean; message: string }>>();
+  private sshTestControllers = new Map<string, Controller<SshTestResult>>();
   private sshInstanceControllers = new Map<string, Controller<string>>();
   private portGroupsRequests = new Map<string, Controller<PortGroupsSnapshot> & { timer: ReturnType<typeof setTimeout> }>();
   private portGroupsRequestId = 0;
@@ -440,7 +446,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
           }
           break;
         case "ssh_test_result": {
-          const r = { ok: !!msg.ok, message: (msg.message as string) ?? "" };
+          const r: SshTestResult = { ok: !!msg.ok, message: (msg.message as string) ?? "" };
+          if (msg.ssh) r.ssh = msg.ssh as SshOpenError;
           this.handlers.sshTestResult.forEach((cb) => cb(msg.host_id, r.ok, r.message));
           this.sshTestControllers.get(msg.host_id)?.resolve(r);
           this.sshTestControllers.delete(msg.host_id);
@@ -651,7 +658,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     // 此处不再等回执——save 后 UI 状态由前端持有,推送仅同步其它客户端。
   }
   async sshTest(hostId: string) {
-    const result = new Promise<{ ok: boolean; message: string }>((resolve, reject) => {
+    const result = new Promise<SshTestResult>((resolve, reject) => {
       this.sshTestControllers.set(hostId, { resolve, reject });
     });
     await this.send(JSON.stringify({ action: "ssh_test", host_id: hostId }));
@@ -898,9 +905,9 @@ export class LocalTransport extends TransportEventBase implements Transport {
     this.handlers.sshHosts.forEach((cb) => cb(hosts)); // 成功回推新表(本地权威即所发)
   }
   async sshTest(hostId: string) {
-    const [ok, message] = await tauriInvoke<[boolean, string]>("ssh_test", { hostId });
+    const [ok, message, ssh] = await tauriInvoke<[boolean, string, SshOpenError?]>("ssh_test", { hostId });
     this.handlers.sshTestResult.forEach((cb) => cb(hostId, ok, message));
-    return { ok, message };
+    return ssh ? { ok, message, ssh } : { ok, message };
   }
   async sshNextInstance(hostId: string, base: string) {
     return tauriInvoke<string>("ssh_next_instance", { hostId, base });

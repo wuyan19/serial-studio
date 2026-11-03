@@ -136,6 +136,8 @@ pub enum ServerMsg {
         host_id: String,
         ok: bool,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ssh: Option<crate::ssh::SshOpenError>,
     },
     /// ssh_next_instance 的直接回复:name = 分配的实例裸名(shell / shell@N)。
     SshInstance {

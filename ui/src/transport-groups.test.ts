@@ -48,6 +48,34 @@ describe("shared configuration transports", () => {
     return { transport, socket };
   }
 
+  it("preserves SSH test classifications and fingerprints over WebSocket", async () => {
+    const { transport, socket } = remote();
+    const testing = transport.sshTest("new-host");
+    const ssh = { kind: "host_key_unknown", fingerprint: "SHA256:fixture", keyType: "ssh-ed25519" };
+    socket.receive({ type: "ssh_test_result", host_id: "new-host", ok: false, message: "Confirm fingerprint", ssh });
+    await expect(testing).resolves.toEqual({ ok: false, message: "Confirm fingerprint", ssh });
+    expect(socket.sent).toEqual([{ action: "ssh_test", host_id: "new-host" }]);
+  });
+
+  it("supports legacy test replies without structured SSH errors", async () => {
+    const { transport, socket } = remote();
+    const testing = transport.sshTest("legacy-host");
+    socket.receive({ type: "ssh_test_result", host_id: "legacy-host", ok: true, message: "" });
+    await expect(testing).resolves.toEqual({ ok: true, message: "" });
+  });
+
+  it("keeps structured desktop test errors and accepts older two-field replies", async () => {
+    const ssh = { kind: "auth_failed", method: "password" };
+    const invoke = vi.fn(async (command: string) => command === "ssh_test" ? [false, "Authentication failed", ssh] : undefined);
+    mockIPC(invoke, { shouldMockEvents: true });
+    const transport = new LocalTransport();
+    transports.push(transport);
+    await expect(transport.sshTest("new-host")).resolves.toEqual({ ok: false, message: "Authentication failed", ssh });
+    invoke.mockResolvedValueOnce([true, ""]);
+    await expect(transport.sshTest("legacy-host")).resolves.toEqual({ ok: true, message: "" });
+    expect(invoke).toHaveBeenCalledWith("ssh_test", { hostId: "new-host" });
+  });
+
   it("correlates simultaneous responses independently from broadcast snapshots", async () => {
     const { transport, socket } = remote();
     const changed = vi.fn();
