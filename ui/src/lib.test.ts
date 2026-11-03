@@ -17,8 +17,35 @@ import {
   timestampForFileName,
   upsertNamed,
   wireToPid,
+  sshTabTarget,
 } from "./lib";
 import type { RemoteDevice, ScriptParam } from "./types";
+
+describe("SSH tab duplication routes", () => {
+  it("keeps the server route and original endpoint for an instance", () => {
+    expect(sshTabTarget({ name: "ssh-device::shell@3", kind: "ssh" })).toEqual({ hostId: "ssh-device", base: "shell" });
+    expect(sshTabTarget({ name: "ssh-device::console", kind: "ssh" })).toEqual({ hostId: "ssh-device", base: "console" });
+  });
+
+  it("preserves cascaded routes and adds the Web transport domain only once", () => {
+    const target = sshTabTarget({ name: "relay::child::ssh-device::shell@2", kind: "ssh" })!;
+    expect(target).toEqual({ hostId: "relay::child::ssh-device", base: "shell" });
+    expect(wireToPid("browser-server", portIdOf(target.hostId, "shell@4"))).toBe("browser-server::relay::child::ssh-device::shell@4");
+  });
+
+  it("rejects serial and unknown endpoints even when their names look like SSH", () => {
+    expect(sshTabTarget({ name: "device::shell", kind: "serial" }, true)).toBeUndefined();
+    expect(sshTabTarget({ name: "device::shell", kind: "tcp" }, true)).toBeUndefined();
+    expect(sshTabTarget({ name: "device::shell" })).toBeUndefined();
+    expect(sshTabTarget(undefined, true)).toBeUndefined();
+  });
+
+  it("only permits missing metadata when a known legacy SSH host matches", () => {
+    expect(sshTabTarget({ name: "ssh-device::shell@2" }, true)).toEqual({ hostId: "ssh-device", base: "shell" });
+    expect(sshTabTarget({ name: "shell", kind: "ssh" })).toBeUndefined();
+    expect(sshTabTarget({ name: "ssh-device::", kind: "ssh" })).toBeUndefined();
+  });
+});
 
 describe("portIdOf / parsePortId", () => {
   it("往返一致", () => {

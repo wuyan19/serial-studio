@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -13,6 +14,49 @@ import { describe, expect, it } from "vitest";
 const themeTs = readFileSync(new URL("theme.ts", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const stylesCss = readFileSync(new URL("styles.css", import.meta.url), "utf8");
+
+function initialTheme(saved: string | null, light: boolean, unavailable = false) {
+  const attributes: Record<string, string> = {};
+  const values = new Map<string, string>();
+  if (saved !== null) values.set("serial-studio-theme", saved);
+  const script = indexHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  if (!script) throw new Error("Missing startup theme script");
+  runInNewContext(script, {
+    document: { documentElement: { setAttribute: (key: string, value: string) => { attributes[key] = value; } } },
+    localStorage: {
+      getItem: (key: string) => {
+        if (unavailable) throw new Error("Storage unavailable");
+        return values.get(key) ?? null;
+      },
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    },
+    window: { matchMedia: () => ({ matches: light }) },
+  });
+  return { attributes, values };
+}
+
+describe("startup theme selection", () => {
+  it("uses the Codex system variant for new users", () => {
+    expect(initialTheme(null, true).attributes).toMatchObject({ "data-theme": "codex-light", "data-lum": "light" });
+    expect(initialTheme(null, false).attributes).toMatchObject({ "data-theme": "codex", "data-lum": "dark" });
+  });
+
+  it("keeps all existing saved theme choices", () => {
+    for (const { id, lum } of themes) {
+      expect(initialTheme(id, lum !== "light").attributes).toMatchObject({ "data-theme": id, "data-lum": lum });
+    }
+  });
+
+  it("preserves the legacy theme migration", () => {
+    const result = initialTheme("light", false);
+    expect(result.attributes["data-theme"]).toBe("linear-light");
+    expect(result.values.get("serial-studio-theme")).toBe("linear-light");
+  });
+
+  it("provides a readable fallback without browser storage", () => {
+    expect(initialTheme(null, true, true).attributes).toMatchObject({ "data-theme": "codex", "data-lum": "dark" });
+  });
+});
 
 /** 从 theme.ts 源码按序提取 (id, lum) 对——只认对象字面量里的带引号值,
  *  ThemeDef 接口的 `id: string` / `lum: "dark" | "light"` 声明不会命中前者的 id,

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh" data-theme="linear" data-lum="dark">
+<html lang="zh" data-theme="codex" data-lum="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -9,7 +9,10 @@
          不再请求 Google Fonts:离线可用,也免去字体异步就位的终端 fit 竞态 -->
     <style>
       html, body, #root { margin: 0; height: 100%; }
-      html { background: #0a0b0d; color-scheme: dark; }
+      html { background: #212120; color-scheme: dark; }
+      html[data-theme="codex"] { background: #212120; }
+      html[data-theme="codex-light"] { background: #ffffff; color-scheme: light; }
+      html[data-theme="linear"] { background: #0a0b0d; }
       /* 新增主题:在此加首帧背景色规则(防白闪),与 styles.css 的 token 覆盖块对应 */
       html[data-theme="linear-light"] { background: #f4f5f6; color-scheme: light; }
       html[data-theme="apple"] { background: #161617; }
@@ -31,6 +34,7 @@
       // lightIds 与 THEMES 各条的 lum="light" 同步——data-lum 驱动 styles.css 浅色家族共用层。
       (function () {
         var ids = [
+          "codex", "codex-light",
           "linear", "linear-light",
           "apple", "apple-light",
           "raycast", "raycast-light",
@@ -40,6 +44,7 @@
         ];
         var legacy = { dark: "linear", light: "linear-light" };
         var lightIds = {
+          "codex-light": 1,
           "linear-light": 1, "apple-light": 1, "raycast-light": 1,
           "superhuman-light": 1, "claude-light": 1, "cursor": 1, "stripe": 1,
         };
@@ -59,12 +64,12 @@
           } else {
             t =
               window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
-                ? "linear-light"
-                : "linear";
+                ? "codex-light"
+                : "codex";
           }
           apply(t);
         } catch (e) {
-          apply("linear");
+          apply("codex");
         }
       })();
     </script>

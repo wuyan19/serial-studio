@@ -160,6 +160,54 @@ function searchColors(match: string, active: string, border: string): ISearchDec
  *  新主题三处登记:此处 + styles.css token 块 + index.html 首帧脚本。 */
 export const THEMES = [
   {
+    id: "codex",
+    label: "Codex · 暗",
+    family: "Codex",
+    lum: "dark",
+    term: {
+      background: "#212120", foreground: "#eeeee9",
+      cursor: "#eeeee9", cursorAccent: "#212120",
+      selectionBackground: "#363633",
+      black: "#191918", brightBlack: "#a2a29a",
+      red: "#e49c95", brightRed: "#efb3ac",
+      green: "#92cba2", brightGreen: "#b5ddbe",
+      yellow: "#e1b878", brightYellow: "#efd1a3",
+      blue: "#a3bedb", brightBlue: "#c2d4e7",
+      magenta: "#cbaaca", brightMagenta: "#ddc6dc",
+      cyan: "#9bcac5", brightCyan: "#bbddd9",
+      white: "#eeeee9", brightWhite: "#ffffff",
+    },
+    search: searchColors("#49493e", "#6d6d54", "#ceceab"),
+    cm: {
+      keyword: "#cbaaca", string: "#92cba2", number: "#e1b878",
+      comment: "#a2a29a", func: "#a3bedb", type: "#9bcac5", defVar: "#eeeee9",
+    },
+  },
+  {
+    id: "codex-light",
+    label: "Codex · 亮",
+    family: "Codex",
+    lum: "light",
+    term: {
+      background: "#ffffff", foreground: "#252524",
+      cursor: "#252524", cursorAccent: "#ffffff",
+      selectionBackground: "#e6e6e3",
+      black: "#252524", brightBlack: "#656560",
+      red: "#aa423b", brightRed: "#a53830",
+      green: "#31734e", brightGreen: "#28653e",
+      yellow: "#946217", brightYellow: "#80520c",
+      blue: "#436b99", brightBlue: "#345c8a",
+      magenta: "#875786", brightMagenta: "#764675",
+      cyan: "#397471", brightCyan: "#2b6562",
+      white: "#454542", brightWhite: "#252524",
+    },
+    search: searchColors("#ecebd2", "#dcd9a6", "#777349"),
+    cm: {
+      keyword: "#875786", string: "#31734e", number: "#946217",
+      comment: "#656560", func: "#436b99", type: "#397471", defVar: "#252524",
+    },
+  },
+  {
     id: "linear",
     label: "Linear · 暗",
     family: "Linear",
@@ -306,8 +354,8 @@ function isTheme(v: string): v is Theme {
 /** 跟随系统明暗偏好选默认主题。 */
 function systemTheme(): Theme {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "linear-light"
-    : "linear";
+    ? "codex-light"
+    : "codex";
 }
 
 function readDom(): Theme {

@@ -1,32 +1,33 @@
-//! 宏持久化：配置目录 macros.json（系统 app data 目录，见 config::config_dir）。
-//!
-//! 宏是**用户配置**，由前端（Tauri 控制面 invoke）读写，跟着用户走。
-//! 服务端不持有宏状态——run_macro 时前端把整个 Macro 对象发来执行。
-//! 首次运行无文件 → 空（无内置示例，由用户自己创建）。
+//! Macro persistence shared by desktop and Web clients.
 
 use ss_core::Macro;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-fn path() -> Option<PathBuf> {
-    Some(crate::config::config_dir()?.join("macros.json"))
+static LOCK: Mutex<()> = Mutex::new(());
+
+fn path() -> Result<PathBuf, String> {
+    Ok(crate::config::config_dir()
+        .ok_or("无法定位配置目录")?
+        .join("macros.json"))
 }
 
-/// 读 macros.json（不存在或解析失败 → 空）。
 pub fn load() -> BTreeMap<String, Macro> {
-    match path() {
-        Some(p) if p.exists() => match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => BTreeMap::new(),
-        },
-        _ => BTreeMap::new(),
-    }
+    load_checked().unwrap_or_default()
 }
 
-/// 写 macros.json。
-pub fn save(map: &BTreeMap<String, Macro>) -> Result<(), String> {
-    let p = path().ok_or("无法定位配置目录")?;
-    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
-    std::fs::write(&p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
-    Ok(())
+pub fn load_checked() -> Result<BTreeMap<String, Macro>, String> {
+    let _guard = LOCK.lock().map_err(|_| "宏库锁不可用")?;
+    crate::libraries::read_checked(&path()?)
+}
+
+pub fn save(items: &BTreeMap<String, Macro>) -> Result<(), String> {
+    let _guard = LOCK.lock().map_err(|_| "宏库锁不可用")?;
+    crate::libraries::write_atomic(&path()?, items)
+}
+
+pub fn patch(changes: &crate::libraries::Changes) -> Result<BTreeMap<String, Macro>, String> {
+    let _guard = LOCK.lock().map_err(|_| "宏库锁不可用")?;
+    crate::libraries::patch_locked(&path()?, changes)
 }

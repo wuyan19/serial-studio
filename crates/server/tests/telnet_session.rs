@@ -70,6 +70,9 @@ async fn boot() -> (
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         manager: manager.clone(),
         event_bus: event_bus.clone(),
         meta_bus: Arc::new(meta_tx),

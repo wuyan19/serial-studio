@@ -60,8 +60,8 @@ export type SessionAction =
   | { type: "port_opened_evt"; devId: string; port: string }
   /** 设备物理断开（USB 拔出）→ 保留 tab，仅标记断开待重连。 */
   | { type: "port_disconnected_evt"; devId: string; port: string }
-  /** acquire 成功（首开或附加）：记录实际配置、建 tab、进焦点 group；断开标记一并清除。 */
-  | { type: "port_acquired"; pid: PortId; config: SerialConfig }
+  /** Acquire uses an optional source group so asynchronous duplication preserves its destination. */
+  | { type: "port_acquired"; pid: PortId; config: SerialConfig; groupId?: string }
   /** 移除端口（用户主动关 + 远端被关共用）：清 openPorts/portConfigs/groups/layout。 */
   | { type: "prune_port"; pid: PortId }
   /** 聚焦指定 group。 */
@@ -175,14 +175,14 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
       const disconnectedPorts = s.disconnectedPorts.has(pid)
         ? new Set([...s.disconnectedPorts].filter((p) => p !== pid))
         : s.disconnectedPorts;
-      // 进焦点 group 并设为活动端口。端口唯一归属（INV-1）：已在某 group（重连重放、
-      // tab 期间被挪动）则保持原归属不动，只追加新开的端口——否则会同时出现在两个 group。
-      const cur = s.groups[s.focusedGroupId];
+      // Preserve existing ownership on reconnect; only new tabs use the requested destination.
+      const targetGroupId = a.groupId && s.groups[a.groupId] ? a.groupId : s.focusedGroupId;
+      const cur = s.groups[targetGroupId];
       const alreadyGrouped = groupOf(s.groups, pid) !== undefined;
       const groups = cur && !alreadyGrouped
         ? {
             ...s.groups,
-            [s.focusedGroupId]: {
+            [targetGroupId]: {
               ...cur,
               ports: cur.ports.includes(pid) ? cur.ports : [...cur.ports, pid],
               activePort: pid,

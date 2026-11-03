@@ -37,6 +37,23 @@ describe("port_acquired", () => {
     expect(s2.groups.g1.ports.length).toBe(1);
   });
 
+  it("keeps an asynchronously duplicated SSH tab in the requested group after focus changes", () => {
+    let s = withPorts("COM3", "ssh::shell");
+    s = sessionReducer(s, { type: "drop_half", port: "ssh::shell", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "set_focused_group", groupId: "g1" });
+    s = sessionReducer(s, { type: "port_acquired", pid: "ssh::shell@2", config: CFG, groupId: "g2" });
+    expect(s.groups.g2.ports).toEqual(["ssh::shell", "ssh::shell@2"]);
+    expect(s.groups.g2.activePort).toBe("ssh::shell@2");
+    expect(s.groups.g1.ports).toEqual(["COM3"]);
+    expect(s.focusedGroupId).toBe("g1");
+  });
+
+  it("falls back to the focused group when the requested group was removed", () => {
+    const s = sessionReducer(withPorts("COM3"), { type: "port_acquired", pid: "ssh::shell@2", config: CFG, groupId: "removed" });
+    expect(s.groups.g1.ports).toEqual(["COM3", "ssh::shell@2"]);
+    expect(Object.keys(s.groups)).toEqual(["g1"]);
+  });
+
   it("acquire 成功清除断开标记（重连路径）", () => {
     let s = withPorts("COM3");
     // 本地 transport 的线名已是复合键(pid ≡ 线名,wireToPid 直通)

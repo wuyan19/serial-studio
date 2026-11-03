@@ -44,6 +44,7 @@ import {
   sanitizeFileName,
   saveConfig,
   saveConn,
+  sshTabTarget,
   tauriInvoke,
   wireToPid,
 } from "./lib";
@@ -57,9 +58,10 @@ import {
   useNamedLibrary,
 } from "./library";
 import { LocalTransport, RemoteTransport, type OpenError, type Transport } from "./transport";
+import { usePortGroups } from "./use-port-groups";
+import { sharedLibrarySource } from "./shared-library";
 import {
   AboutDialog,
-  ActivityIcon,
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
@@ -93,29 +95,19 @@ import {
 } from "./components";
 import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
 import { TitleBar } from "./components/titlebar";
+import { ContextMenu, type ContextMenuItem } from "./components/context-menu";
+import { ConnectionLauncher, WorkspaceSettingsMenu, WorkspaceSidebar, type WorkspacePanel } from "./components/workspace";
 import {
   IconAlert,
-  IconBolt,
   IconClose,
-  IconCode,
-  IconGear,
-  IconGlobe,
   IconInfo,
-  IconKeyboard,
-  IconPlug,
   IconPower,
-  IconSliders,
   IconTrash,
-  IconShirt,
-  IconCheck,
-  IconSsh,
 } from "./icons";
-import { getTheme, setTheme, subscribe, toggleTheme, THEMES, type Theme } from "./theme";
+import { getTheme, setTheme, subscribe, toggleTheme, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
-
-/* 主题图标/清单均从 theme.ts 注册表读取(THEMES),此处不再持有映射表。 */
 
 /** 把 SerialConfig 渲染成仪器读数字符串：115200 8N1 · LF */
 function formatConfig(c: SerialConfig): string {
@@ -318,8 +310,13 @@ export default function App() {
     });
   }, []);
   type ActivityView = "ports" | "macros" | "scripts" | null;
-  // 默认展开端口面板:空终端区的引导文案("从左侧 PORTS 打开一个串口")依赖它在场
+  // A null activity keeps the icon rail visible while the remembered panel stays mounted.
   const [activity, setActivity] = useState<ActivityView>("ports");
+  const lastActivity = useRef<WorkspacePanel>("ports");
+  if (activity) lastActivity.current = activity;
+  const sidebarPanel = activity ?? lastActivity.current;
+  const [sidebarQuery, setSidebarQuery] = useState("");
+  const [connectionLauncherOpen, setConnectionLauncherOpen] = useState(false);
   /** 打开对应面板即视为"已查看" → 清未读红角标。 */
   useEffect(() => {
     if (activity === "macros") setMacroUnseen(new Set());
@@ -328,7 +325,7 @@ export default function App() {
   /** 侧栏宽度(可拖动调整,localStorage 持久化,clamp 180–480)。 */
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem("sidebar-width"));
-    return saved >= 180 && saved <= 480 ? saved : 240;
+    return saved >= 180 && saved <= 480 ? saved : 280;
   });
   const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
   /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
@@ -343,6 +340,12 @@ export default function App() {
   const [manageMenu, setManageMenu] = useState(false);
   /** 主题选择菜单(按注册表顺序平铺列出全部主题)。 */
   const [themeMenu, setThemeMenu] = useState(false);
+  useEffect(() => {
+    if (activity === null) {
+      setThemeMenu(false);
+      setManageMenu(false);
+    }
+  }, [activity]);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
@@ -429,8 +432,29 @@ export default function App() {
     () => ({ confirm: libConfirm, notify: libNotify, error: libError }),
     [libConfirm, libNotify, libError]
   );
-  const macroLib = useNamedLibrary(MACRO_SPEC, libUI);
-  const scriptLib = useNamedLibrary(SCRIPT_SPEC, libUI);
+  // The command transport stays stable while library adapters follow the selected service.
+  const transportsRef = useRef<Map<string, Transport>>(new Map());
+  /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
+   *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
+   *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
+   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。
+   *  remotes 经 ref 读取(web 改连换 key)——**绝不能进依赖**:本回调是
+   *  cmdTransport→openPort→bindTransport 身份链的头,一旦随 remotes 变化,本地
+   *  transport effect 会拆掉重建(注释自称"常驻"却守不住),重建窗口内后端
+   *  devices-changed 等事件无人监听→首添设备卡死"连接中…";已开端口的 RX
+   *  Channel 也随旧实例作废(串口变哑)。 */
+  const cmdTransport = useCallback(
+    (): Transport | undefined =>
+      transportsRef.current.get(isLocal ? "local" : (remotesRef.current[0]?.id ?? "")),
+    // isLocal 是模块常量(getMode 逐 render 同值);remotesRef 每 render 刷新
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  const libraryScope = isLocal ? "local" : `${remotes[0]?.host}:${remotes[0]?.port}`;
+  const macroSource = useMemo(() => sharedLibrarySource<Macro>("macros", libraryScope, cmdTransport), [libraryScope, cmdTransport]);
+  const scriptSource = useMemo(() => sharedLibrarySource<Script>("scripts", libraryScope, cmdTransport), [libraryScope, cmdTransport]);
+  const macroLib = useNamedLibrary(MACRO_SPEC, libUI, macroSource);
+  const scriptLib = useNamedLibrary(SCRIPT_SPEC, libUI, scriptSource);
   // 解构成 JSX 原名，侧栏/编辑器零改动
   const {
     items: macros,
@@ -449,6 +473,7 @@ export default function App() {
     collapsed: macroCollapsed,
     toggleGroup: toggleMacroGroup,
     groupNames: macroGroupNames,
+    reload: reloadMacros,
   } = macroLib;
   const {
     items: scripts,
@@ -474,6 +499,12 @@ export default function App() {
    *  两处会各挂一个 InlineAliasInput 互抢焦点、随即互触 blur 全部关闭（表现为进不去编辑态）。
    *  where 把编辑态钉在触发处，杜绝两个 input 并存。 */
   const [aliasEdit, setAliasEdit] = useState<{ port: string; where: "list" | "tab" } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ port: PortId; groupId: string; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (tabMenu && !openPorts.includes(tabMenu.port)) setTabMenu(null);
+  }, [tabMenu, openPorts]);
+  const sshCreatingRef = useRef(false);
+  const [sshCreating, setSshCreating] = useState(false);
   /** 宏批量导出对话框是否打开。 */
   const [exportMacrosOpen, setExportMacrosOpen] = useState(false);
   const [exportScriptsOpen, setExportScriptsOpen] = useState(false);
@@ -482,8 +513,6 @@ export default function App() {
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
-  // 多 Transport 实例：key=devId。本地 "local" 常驻，远程按引用计数懒建/销（见 transport effect）。
-  const transportsRef = useRef<Map<string, Transport>>(new Map());
   /** 每设备 Transport 的回调取消函数（dispose 时清理）。 */
   const unsubsByDev = useRef<Map<string, (() => void)[]>>(new Map());
   /** 每远程设备上次连接地址（host:port）；变化时强制销毁重建（Web 改连接 / 编辑设备 host）。 */
@@ -525,25 +554,8 @@ export default function App() {
     activityRef.current.set(port, e);
   };
 
-  // 脚本入口显隐：本地主权恒显；远程/Web 取决于服务端 enable_scripting
-  const showScripts = isLocal || scriptEnabled;
-
-  /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
-   *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
-   *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
-   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。
-   *  remotes 经 ref 读取(web 改连换 key)——**绝不能进依赖**:本回调是
-   *  cmdTransport→openPort→bindTransport 身份链的头,一旦随 remotes 变化,本地
-   *  transport effect 会拆掉重建(注释自称"常驻"却守不住),重建窗口内后端
-   *  devices-changed 等事件无人监听→首添设备卡死"连接中…";已开端口的 RX
-   *  Channel 也随旧实例作废(串口变哑)。 */
-  const cmdTransport = useCallback(
-    (): Transport | undefined =>
-      transportsRef.current.get(isLocal ? "local" : (remotesRef.current[0]?.id ?? "")),
-    // isLocal 是模块常量(getMode 逐 render 同值);remotesRef 每 render 刷新
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+  // Library visibility is independent from permission to execute remote scripts.
+  const showScripts = true;
 
   /** pid → 列表行（经 sessionRef 直读最新态）：稳定回调（openPort 等）与 render
    *  作用域共用同一访问器——ingest 定型的 pid 与结构化元数据（kind/device）的
@@ -570,13 +582,13 @@ export default function App() {
 
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
    *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
-  const openPort = useCallback(async (pid: PortId, config: SerialConfig) => {
+  const openPort = useCallback(async (pid: PortId, config: SerialConfig, groupId?: string) => {
     try {
       // transport 命令面收完整 pid:本地 IPC 直传(Rust 规范化),WS 侧剥首段成远端线名
       const res = await cmdTransport()?.open(pid, config);
       if (!res) return undefined;
       // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
-      dispatch({ type: "port_acquired", pid, config: res.config });
+      dispatch({ type: "port_acquired", pid, config: res.config, groupId });
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置。SSH 等非串口无
         // 波特率语义（线上 kind 判别；老 server 缺省按串口文案）。
@@ -737,6 +749,29 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     },
     [setCaptureSession, takeCaptureQueue],
   );
+
+  const stopTabCapture = (pid: PortId) => {
+    const current = captureSessionsRef.current.get(pid);
+    const tail = takeCaptureQueue(pid);
+    const next = new Map(captureSessionsRef.current);
+    next.delete(pid);
+    captureSessionsRef.current = next;
+    setCaptureSession(pid, undefined);
+    captureQueuesRef.current.delete(pid);
+    if (current?.id !== undefined) {
+      finishCapture(pid, { id: current.id }, tail, (e) => libError(`记录保存失败：${String(e)}`));
+    }
+  };
+
+  const toggleTabCapture = (pid: PortId) => {
+    if (!isLocal || !sessionRef.current.openPorts.includes(pid)) return;
+    if (captureSessionsRef.current.get(pid)?.id !== undefined) {
+      stopTabCapture(pid);
+    } else {
+      setRecBarByPort((previous) => new Map(previous).set(pid, true));
+      void selectCaptureFile(pid);
+    }
+  };
 
   // 攒批刷盘:onData 热路径只入队(零 await),此处 500ms 定时合并追加。同口单飞
   // (上批在途则留到下 tick,防同 id 并发写乱序);写失败 → 停会话 + toast。
@@ -920,8 +955,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         t.list();
       }),
       t.onScriptsChanged(() => {
-        // 脚本库变更(MCP/Tauri 写入)→ 重新 load_scripts,不必重启
-        reloadScripts();
+        // Macro and script changes share the server library invalidation channel.
+        void reloadMacros();
+        void reloadScripts();
       }),
       t.onError((msg) => {
         libError(msg);
@@ -965,7 +1001,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         });
       }),
     ];
-  }, [openPort, prunePort, reloadScripts, libError, pushToast]);
+  }, [openPort, prunePort, reloadMacros, reloadScripts, libError, pushToast]);
 
   // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
   // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。重建窗口还会丢
@@ -1071,6 +1107,15 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   }, [isLocal, connConfig.host, connConfig.port]);
 
+  useEffect(() => {
+    if (!isLocal && !connected) return;
+    void reloadMacros();
+    void reloadScripts();
+  }, [isLocal, connected, libraryScope, reloadMacros, reloadScripts]);
+
+  const sharedGroups = usePortGroups(cmdTransport, isLocal || connected,
+    isLocal ? "local" : `${remotes[0]?.host}:${remotes[0]?.port}`);
+
   // 改连反馈：设置页「应用并重连」后以 toast 报告结果(成功/超时失败),不再点了没反应。
   const [pendingConn, setPendingConn] = useState<string | null>(null);
   // 成功判定:pendingConn 置位后 connected 稳定为 true ≥800ms——给旧连接 teardown→重建留时间,
@@ -1128,17 +1173,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。
-  // 远程窗口虽 isTauri() 为真，但连的是远程服务，版本应反映服务端而非本机 app。
-  // 连接时序由 RemoteTransport.send() 内部 await open 兜底，挂载即取也不会踩 CONNECTING 异常。
   useEffect(() => {
-    const t = transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "");
-    t?.getVersion().then(({ version, enableScripting }) => {
+    let stale = false;
+    setScriptEnabled(false);
+    if (!isLocal && !connected) return;
+    const t = cmdTransport();
+    void t?.getVersion().then(({ version, enableScripting }) => {
+      if (stale) return;
       setVersion(version);
       setScriptEnabled(enableScripting);
     }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => { stale = true; };
+  }, [isLocal, connected, libraryScope, cmdTransport]);
 
   // 侧栏宽度持久化(随用户走,localStorage)
   useEffect(() => {
@@ -1347,6 +1393,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
         onCloseTab={closePort}
         onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
+        onTabContextMenu={(port, position) => setTabMenu({ port, groupId: g.id, ...position })}
         onCommitAlias={commitAlias}
         onCancelAlias={() => setAliasEdit(null)}
         onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
@@ -1413,6 +1460,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
 
   const doRun = (name: string, args: Record<string, string>) => {
+    if (!isLocal && !scriptEnabled) {
+      libError("该服务未开启远程脚本执行；可查看和编辑脚本，请在服务端设置中开启后运行");
+      return;
+    }
     // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
     // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
     const mainPort = activePort ?? "";
@@ -1428,6 +1479,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     transport.runScript(name, mainPort, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
+    if (!isLocal && !scriptEnabled) {
+      libError("该服务未开启远程脚本执行；可查看和编辑脚本，请在服务端设置中开启后运行");
+      return;
+    }
     // 脚本声明了参数 → 弹收集框;否则直接跑。
     if (scripts[name]?.params?.length) {
       setPendingRun(name);
@@ -1567,15 +1622,22 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 新建终端：先向 server 要空闲实例名（shell / shell@N）再走标准 open。
    *  pid 经 transport 域定型（wireToPid）——web 形态需 remote:: 前缀，与事件
    *  回流键同源；此前手拼 hostId::name 在 web 形态与数据帧键错位（终端哑）。 */
-  const newShellSession = async (hostId: string) => {
+  const newShellSession = async (hostId: string, base = "shell", groupId?: string) => {
+    if (sshCreatingRef.current) return;
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
+    sshCreatingRef.current = true;
+    setSshCreating(true);
     try {
-      const name = await cmdTransport()?.sshNextInstance(hostId, "shell");
+      const name = await transport.sshNextInstance(hostId, base);
       if (name) {
-        const domain = cmdTransport()?.devId ?? "local";
-        await openPort(wireToPid(domain, portIdOf(hostId, name)), DEFAULT_CONFIG);
+        await openPort(wireToPid(transport.devId, portIdOf(hostId, name)), DEFAULT_CONFIG, groupId);
       }
     } catch (e) {
       libError(`新建终端失败：${String(e)}`);
+    } finally {
+      sshCreatingRef.current = false;
+      setSshCreating(false);
     }
   };
 
@@ -1818,6 +1880,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     "tab.select": (arg) => selectTab(Number(arg)),
   };
   const modalOpen = !!(
+    connectionLauncherOpen ||
     settingsOpen ||
     aboutOpen ||
     skillOpen ||
@@ -1841,11 +1904,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
-  const menuOpen = themeMenu || manageMenu;
+  const menuOpen = themeMenu || manageMenu || tabMenu !== null;
 
   // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!themeMenu && !manageMenu) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -1855,11 +1918,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [menuOpen]);
+  }, [themeMenu, manageMenu]);
 
   // 任一对话框模态打开 → 收起菜单(避免菜单浮层压在模态之上)
   useEffect(() => {
     if (modalOpen) {
+      setTabMenu(null);
       setThemeMenu(false);
       setManageMenu(false);
     }
@@ -1906,94 +1970,54 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     return () => window.clearTimeout(id);
   }, [modalOpen]);
 
+  const duplicateTarget = tabMenu ? sshTabTarget(portRowOf(tabMenu.port), Boolean(sshHostOfPid(tabMenu.port))) : undefined;
+  const tabMenuItems: ContextMenuItem[] = tabMenu ? [
+    { label: "重命名 tab", onSelect: () => setAliasEdit({ port: tabMenu.port, where: "tab" }) },
+    { label: "清空屏幕", onSelect: () => terminalsRef.current.get(tabMenu.port)?.term.clear() },
+    { sep: true },
+    {
+      label: captureSessions.get(tabMenu.port)?.id !== undefined ? "停止日志记录" : "开启日志记录…",
+      disabled: !isLocal,
+      hint: isLocal ? undefined : "仅本地桌面",
+      onSelect: () => toggleTabCapture(tabMenu.port),
+    },
+    ...(duplicateTarget ? [
+      { sep: true },
+      {
+        label: "复制 tab",
+        disabled: sshCreating,
+        onSelect: () => void newShellSession(duplicateTarget.hostId, duplicateTarget.base, tabMenu.groupId),
+      },
+    ] : []),
+  ] : [];
+
   return (
     <div className="app">
       {/* 自绘标题栏:仅 Tauri 桌面(本地/远程窗口);Web 模式浏览器自带窗口管理 */}
       {isTauri() && <TitleBar />}
       <div className="app__body">
-      {/* 活动栏：44px 窄竖条 */}
-      <div className="activity-bar">
-        <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
-        <ActivityIcon
-          icon={<IconBolt className="act-icon__svg" />}
-          title="宏"
-          active={activity === "macros"}
-          onClick={() => setActivity(activity === "macros" ? null : "macros")}
-          badge={macroRunning ? "run" : macroFailed ? "alert" : undefined}
-        />
-        {showScripts && (
-          <ActivityIcon
-            icon={<IconCode className="act-icon__svg" />}
-            title="脚本"
-            active={activity === "scripts"}
-            onClick={() => setActivity(activity === "scripts" ? null : "scripts")}
-            badge={scriptRunning ? "run" : scriptFailed ? "alert" : undefined}
-          />
-        )}
-        <div className="activity-bar__spacer" />
-        {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
-        {/* SSH 设备管理：不限定桌面形态（设计上注册表在 server 侧，Web 形态也能管理；预览为 localStorage） */}
-        <ActivityIcon icon={<IconSsh className="act-icon__svg" />} title="SSH 设备" active={sshManagerOpen} onClick={() => openSshManager()} />
-        <div className="manage">
-          <ActivityIcon
-            icon={<IconShirt className="act-icon__svg" />}
-            title="主题"
-            active={themeMenu}
-            onClick={() => setThemeMenu(!themeMenu)}
-          />
-          {themeMenu && (
-            <>
-              <div className="manage-backdrop" onClick={() => setThemeMenu(false)} />
-              <div className="manage-menu">
-                {THEMES.map((def) => {
-                  const current = def.id === theme;
-                  return (
-                    <button
-                      key={def.id}
-                      className="manage-menu__item"
-                      data-current={current || undefined}
-                      onClick={() => {
-                        setTheme(def.id);
-                        setThemeMenu(false);
-                      }}
-                    >
-                      {/* 勾选占位对齐:非当前项隐藏勾,保持文本同列 */}
-                      <span style={{ display: "inline-flex", visibility: current ? "visible" : "hidden" }}>
-                        <IconCheck />
-                      </span>
-                      {def.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
-        <div className="manage">
-          <ActivityIcon icon={<IconSliders className="act-icon__svg" />} title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
-          {manageMenu && (
-            <>
-              <div className="manage-backdrop" onClick={() => setManageMenu(false)} />
-              <div className="manage-menu">
-                <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
-                  <IconGear /> 设置
-                </button>
-                <button className="manage-menu__item" onClick={() => { setShortcutsOpen(true); setManageMenu(false); }}>
-                  <IconKeyboard /> 快捷键
-                </button>
-                <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
-                  <IconInfo /> 关于
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* 次侧栏：当前活动项内容，收起时不占位 */}
-      {activity && (
-        <>
-        <aside className="sidebar" style={{ width: sidebarWidth }}>
+        <WorkspaceSidebar
+          panel={sidebarPanel}
+          collapsed={activity === null}
+          onToggle={() => setActivity(activity === null ? lastActivity.current : null)}
+          onPanel={(panel) => { setActivity(panel); if (panel !== sidebarPanel) setSidebarQuery(""); }}
+          showScripts={showScripts}
+          counts={{ ports: portGroups.reduce((sum, group) => sum + (group.kind === "ssh" ? 1 : group.ports.length), 0), macros: Object.keys(macros).length, scripts: Object.keys(scripts).length }}
+          running={{ macros: macroRunning, scripts: scriptRunning }}
+          failed={{ macros: macroFailed, scripts: scriptFailed }}
+          query={sidebarQuery}
+          onQuery={setSidebarQuery}
+          onNew={() => sidebarPanel === "ports" ? setConnectionLauncherOpen(true) : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
+          onRemote={isTauri() ? () => setRemoteOpen(true) : undefined}
+          connected={connected}
+          width={sidebarWidth}
+          tools={<WorkspaceSettingsMenu
+            theme={theme} themeMenu={themeMenu} onThemeMenu={setThemeMenu} onTheme={setTheme}
+            manageMenu={manageMenu} onManageMenu={setManageMenu}
+            onSettings={() => setSettingsOpen(true)}
+            onShortcuts={() => setShortcutsOpen(true)} onAbout={() => setAboutOpen(true)}
+          />}
+        >
           {(!isTauri() || isRemote) && (
             <div className="sidebar__conn">
               <span className={`dot ${connected ? "on" : "off"}`} />
@@ -2001,13 +2025,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </div>
           )}
 
-          {activity === "ports" && (
+          {sidebarPanel === "ports" && (
             <PortsPanel
+              grouping={sharedGroups.grouping}
+              groupsReady={sharedGroups.ready}
+              groupsError={sharedGroups.error}
+              onUpdateGroups={sharedGroups.update}
+              onToggleCustomGroup={sharedGroups.toggleCollapsed}
+              visible={activity !== null}
               portGroups={portGroups}
+              query={sidebarQuery}
               remotes={remotes}
               portCollapsed={portCollapsed}
               onTogglePortGroup={togglePortGroup}
               activePort={activePort}
+              openPorts={openPorts}
               aliasEditPort={aliasEdit?.where === "list" ? aliasEdit.port : null}
               onSetAliasEdit={(pid) => setAliasEdit({ port: pid, where: "list" })}
               onTriggerPort={triggerPort}
@@ -2030,6 +2062,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 )
               }
               onSshAction={onSshAction}
+              onNewSshTerminal={(pid) => {
+                const target = sshTabTarget(portRowOf(pid), Boolean(sshHostOfPid(pid)));
+                if (target) void newShellSession(target.hostId, target.base);
+              }}
               onClosePort={(pid) => closePort(pid)}
               onCopyPortKey={(row) => {
                 void copyText(row.name).then((ok) => {
@@ -2038,13 +2074,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 });
               }}
               onShowPortDetail={(pid) => setPortDetail(pid)}
-              onRefresh={() => refreshPorts()}
+              onRefresh={() => { refreshPorts(); sharedGroups.reload(); }}
             />
           )}
 
-          {activity === "macros" && (
+          {sidebarPanel === "macros" && (
             <NamedLibraryPanel
-              title={<>MACROS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
+              query={sidebarQuery}
+              title={<>宏{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={macros}
               hasItems={Object.keys(macros).length > 0}
               collapsed={macroCollapsed}
@@ -2055,10 +2092,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onImportFile={onImportFile}
               onExport={() => setExportMacrosOpen(true)}
               exportTitle="导出宏（可多选 / 全选）"
-              onNew={() => openMacroEditor(null)}
               newItemLabel="宏"
-              emptyHint="无宏（点 ＋ 新增）"
-              storageHint={!isLocal ? "Web 模式：宏保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
+              emptyHint="暂无宏，点击上方“新建宏”添加"
+              storageHint={!isLocal ? "宏库与所连服务共用，修改会同步到桌面及其他页面。" : undefined}
               renderRow={(name) => (
                 <MacroRow
                   key={name}
@@ -2086,9 +2122,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </NamedLibraryPanel>
           )}
 
-          {activity === "scripts" && (
+          {sidebarPanel === "scripts" && (
             <NamedLibraryPanel
-              title={<>SCRIPTS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
+              query={sidebarQuery}
+              title={<>脚本{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={scripts}
               hasItems={Object.keys(scripts).length > 0}
               collapsed={scriptCollapsed}
@@ -2099,10 +2136,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onImportFile={onImportScripts}
               onExport={() => setExportScriptsOpen(true)}
               exportTitle="导出脚本（可多选 / 全选）"
-              onNew={() => openScriptEditor(null)}
               newItemLabel="脚本"
-              emptyHint="无脚本（点 ＋ 新增）"
-              storageHint={!isLocal ? "Web 模式：脚本保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
+              emptyHint="暂无脚本，点击上方“新建脚本”添加"
+              storageHint={!isLocal ? scriptEnabled ? "脚本库与所连服务共用，修改会同步到桌面及其他页面。" : "脚本库与所连服务共用；当前可查看和编辑，服务未开启远程脚本执行。" : undefined}
               extraActions={
                 <button
                   className="icon-btn"
@@ -2154,8 +2190,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               />
             </NamedLibraryPanel>
           )}
-        </aside>
-        <div
+        </WorkspaceSidebar>
+        {activity && <div
           className="sidebar-resizer"
           onMouseDown={(e) => {
             e.preventDefault();
@@ -2177,11 +2213,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             window.addEventListener("mousemove", onMove);
             window.addEventListener("mouseup", onUp);
           }}
-          onDoubleClick={() => setSidebarWidth(240)}
+          onDoubleClick={() => setSidebarWidth(280)}
           title="拖动调整宽度（双击重置）"
-        />
-        </>
-      )}
+        />}
 
       <main className="main">
         {errorMsg && (
@@ -2316,6 +2350,17 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           </div>
         )}
       </main>
+
+      {tabMenu && <ContextMenu
+        x={tabMenu.x} y={tabMenu.y} items={tabMenuItems}
+        onClose={(reason) => { setTabMenu(null); if (reason === "escape" || reason === "item") activeTerm?.term.focus(); }}
+      />}
+
+      {connectionLauncherOpen && <ConnectionLauncher
+        onClose={() => setConnectionLauncherOpen(false)}
+        onSerial={() => { setConnectionLauncherOpen(false); setPortPaletteOpen(true); }}
+        onSsh={() => { setConnectionLauncherOpen(false); openSshManager(); }}
+      />}
 
       {/* 串口配置对话框（key=pendingPort：换端口重挂，别名输入状态重置） */}
       {pendingPort && (

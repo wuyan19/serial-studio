@@ -900,6 +900,7 @@ mod tests {
             "inst-mcp-test",
         ));
         AppState {
+            port_groups: Arc::new(crate::port_groups::PortGroupsStore::memory("inst-mcp-test")),
             manager: Arc::new(SerialManager::new(
                 event_bus.clone(),
                 Arc::new(RealPortOpener),

@@ -7,7 +7,9 @@ pub mod address;
 pub mod config;
 pub mod device;
 pub mod macros_store;
+pub mod libraries;
 mod mcp;
+pub mod port_groups;
 pub mod port_meta_store;
 pub mod protocol;
 pub mod remotes_store;
@@ -66,6 +68,7 @@ pub enum ScriptKind {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub port_groups: Arc<port_groups::PortGroupsStore>,
     pub manager: Arc<SerialManager>,
     pub event_bus: Arc<EventBus>,
     /// 端口元数据（别名等）变更广播。set_alias 后通知所有 WS/IPC 客户端刷新列表，
@@ -138,6 +141,7 @@ pub fn create_state() -> AppState {
         settings::load().enable_scripting,
     ));
     AppState {
+        port_groups: Arc::new(port_groups::PortGroupsStore::from_config(&instance_id)),
         manager,
         event_bus,
         meta_bus: Arc::new(meta_tx),

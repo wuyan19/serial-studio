@@ -167,6 +167,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
+    let mut groups_rx = state.port_groups.subscribe();
+    let groups_store = state.port_groups.clone();
+    let groups_out = out_tx.clone();
+    let groups_task = tokio::spawn(async move {
+        loop {
+            match groups_rx.recv().await {
+                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(snapshot) = groups_store.get() {
+                        if groups_out
+                            .send(to_json(ServerMsg::PortGroupsChanged { snapshot }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     // 主循环：client 命令 + 输出发送
     loop {
         tokio::select! {
@@ -212,6 +234,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     // 先停本连接的事件转发，再释放占有份额；末位口才拆毁，事件广播给其它仍在的客户端
+    groups_task.abort();
     event_task.abort();
     meta_task.abort();
     script_task.abort();
@@ -268,6 +291,26 @@ fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
     })
 }
 
+async fn send_library_result(
+    request_id: String,
+    result: Result<crate::libraries::Snapshot, String>,
+    state: &AppState,
+    out_tx: &mpsc::Sender<OutFrame>,
+) {
+    let (items, error) = match result {
+        Ok(snapshot) => (Some(snapshot.items), None),
+        Err(error) => (None, Some(error)),
+    };
+    let _ = out_tx
+        .send(to_json(ServerMsg::LibraryResult {
+            request_id,
+            items,
+            error,
+            server_id: state.instance_id.to_string(),
+        }))
+        .await;
+}
+
 async fn handle_client_msg(
     text: &str,
     state: &AppState,
@@ -290,6 +333,57 @@ async fn handle_client_msg(
     };
 
     match msg {
+        ClientMsg::LibraryGet { request_id, kind } => {
+            send_library_result(
+                request_id,
+                crate::libraries::get(kind, &state.instance_id),
+                state,
+                out_tx,
+            )
+            .await;
+        }
+        ClientMsg::LibraryPatch {
+            request_id,
+            kind,
+            changes,
+        } => {
+            let result = crate::libraries::patch(kind, &changes, &state.instance_id);
+            if result.is_ok() && !changes.is_empty() {
+                let _ = state.script_bus.send(());
+            }
+            send_library_result(request_id, result, state, out_tx).await;
+        }
+        ClientMsg::PortGroupsGet { request_id } => {
+            let result = state.port_groups.get();
+            let (snapshot, error) = match result {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(error)),
+            };
+            let _ = out_tx
+                .send(to_json(ServerMsg::PortGroupsResult {
+                    request_id,
+                    snapshot,
+                    error,
+                }))
+                .await;
+        }
+        ClientMsg::PortGroupsUpdate {
+            request_id,
+            operation,
+        } => {
+            let result = state.port_groups.update(operation);
+            let (snapshot, error) = match result {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(error)),
+            };
+            let _ = out_tx
+                .send(to_json(ServerMsg::PortGroupsResult {
+                    request_id,
+                    snapshot,
+                    error,
+                }))
+                .await;
+        }
         ClientMsg::List => {
             let ports = crate::list_ports_with_meta(state).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;

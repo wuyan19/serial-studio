@@ -108,6 +108,21 @@ fn show_system_menu(window: tauri::WebviewWindow) {
 fn show_system_menu() {}
 
 #[tauri::command]
+async fn get_port_groups(
+    state: tauri::State<'_, AppState>,
+) -> Result<ss_server::port_groups::Snapshot, String> {
+    state.port_groups.get()
+}
+
+#[tauri::command]
+async fn update_port_groups(
+    state: tauri::State<'_, AppState>,
+    operation: ss_server::port_groups::Operation,
+) -> Result<ss_server::port_groups::Snapshot, String> {
+    state.port_groups.update(operation)
+}
+
+#[tauri::command]
 async fn get_settings() -> Result<Settings, String> {
     Ok(ss_server::settings::load())
 }
@@ -178,9 +193,33 @@ async fn load_macros() -> Result<std::collections::BTreeMap<String, ss_core::Mac
 /// 保存用户宏到 macros.json。
 #[tauri::command]
 async fn save_macros(
+    state: tauri::State<'_, AppState>,
     macros: std::collections::BTreeMap<String, ss_core::Macro>,
 ) -> Result<(), String> {
-    ss_server::macros_store::save(&macros)
+    ss_server::macros_store::save(&macros)?;
+    let _ = state.script_bus.send(());
+    Ok(())
+}
+
+#[tauri::command]
+async fn library_get(
+    state: tauri::State<'_, AppState>,
+    kind: ss_server::libraries::Kind,
+) -> Result<ss_server::libraries::Snapshot, String> {
+    ss_server::libraries::get(kind, &state.instance_id)
+}
+
+#[tauri::command]
+async fn library_patch(
+    state: tauri::State<'_, AppState>,
+    kind: ss_server::libraries::Kind,
+    changes: ss_server::libraries::Changes,
+) -> Result<ss_server::libraries::Snapshot, String> {
+    let result = ss_server::libraries::patch(kind, &changes, &state.instance_id)?;
+    if !changes.is_empty() {
+        let _ = state.script_bus.send(());
+    }
+    Ok(result)
 }
 
 /// 加载远程设备列表（配置目录 remotes.json）。桌面端持久化，跟着机器走。
@@ -902,7 +941,22 @@ fn spawn_event_emitter(
     meta_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
     script_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
     devices: std::sync::Arc<ss_server::device::DeviceClientManager>,
+    port_groups: std::sync::Arc<ss_server::port_groups::PortGroupsStore>,
 ) {
+    let app_groups = app.clone();
+    let mut groups_rx = port_groups.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match groups_rx.recv().await {
+                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(snapshot) = port_groups.get() {
+                        let _ = app_groups.emit("port-groups-changed", snapshot);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     let app_meta = app.clone(); // 第二个 spawn 用；下面的 async move 会 move 掉 app
     let app_script = app.clone(); // 第三个 spawn（script_bus）用
     let app_dev = app.clone(); // 第四个 spawn（device_bus）用
@@ -1130,7 +1184,7 @@ fn run_gui() {
             tray::setup(app.handle());
 
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
-            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone());
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone(), state.port_groups.clone());
 
             // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
             // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。
@@ -1157,6 +1211,10 @@ fn run_gui() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            library_get,
+            library_patch,
+            get_port_groups,
+            update_port_groups,
             get_settings,
             save_settings,
             apply_settings,

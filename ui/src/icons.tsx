@@ -265,6 +265,14 @@ export function IconCheck({ className }: IconProps) {
   );
 }
 
+export function IconListFilter({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M3 6h18M6 12h12M10 18h4" />
+    </Svg>
+  );
+}
+
 /** 强制断电——强制关闭:踢掉远程客户端。 */
 export function IconPower({ className }: IconProps) {
   return (
