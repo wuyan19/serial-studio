@@ -464,7 +464,8 @@ impl SshManager {
 /// 取空闲而非单调递增:关掉 @2 后再新建复用 @2,避免长期运行序号无界增长
 /// (与 UI 预览的"只增"略有差异——tab 已关即无混淆对象,复用无害)。
 pub fn next_instance_key(host_id: &str, base: &str, occupied_full_keys: &[String]) -> String {
-    let base_key = format!("{host_id}{}{base}", ss_core::PORT_KEY_SEP);
+    let host_prefix = format!("{host_id}{}", ss_core::PORT_KEY_SEP);
+    let base_key = format!("{host_prefix}{base}");
     let taken: HashSet<&str> = occupied_full_keys
         .iter()
         .filter(|k| {
@@ -472,7 +473,7 @@ pub fn next_instance_key(host_id: &str, base: &str, occupied_full_keys: &[String
                 && k.len() > base_key.len()
                 && k.as_bytes()[base_key.len()] == b'@'
         })
-        .map(|k| ss_core::split_port_key(k).1)
+        .filter_map(|k| k.strip_prefix(&host_prefix))
         .collect();
     if !occupied_full_keys.contains(&base_key) {
         return base.to_string();
@@ -516,6 +517,40 @@ mod tests {
     fn next_instance_ignores_other_hosts() {
         let occ = vec![key("h2::shell"), key("h2::shell@2"), key("h::shell")];
         assert_eq!(next_instance_key("h", "shell", &occ), "shell@2");
+    }
+
+    #[test]
+    fn next_instance_cascaded_host_appends_smallest_free() {
+        let occ = vec![
+            key("remote::ssh::shell"),
+            key("remote::ssh::shell@2"),
+            key("remote::ssh::shell@3"),
+        ];
+        assert_eq!(next_instance_key("remote::ssh", "shell", &occ), "shell@4");
+    }
+
+    #[test]
+    fn next_instance_cascaded_host_ignores_other_paths() {
+        let occ = vec![
+            key("remote::ssh::shell"),
+            key("other::ssh::shell@2"),
+            key("remote::other::shell@2"),
+            key("remote::ssh::console@2"),
+        ];
+        assert_eq!(next_instance_key("remote::ssh", "shell", &occ), "shell@2");
+    }
+
+    #[test]
+    fn next_instance_deeply_cascaded_host_reuses_gap() {
+        let occ = vec![
+            key("remote::child::ssh::console"),
+            key("remote::child::ssh::console@2"),
+            key("remote::child::ssh::console@4"),
+        ];
+        assert_eq!(
+            next_instance_key("remote::child::ssh", "console", &occ),
+            "console@3"
+        );
     }
 
     /// open 端点校验:未定义端点 → OpenFailed(注册表语义,不碰网络)。

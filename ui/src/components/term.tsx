@@ -412,6 +412,7 @@ export function GroupView({
   onSwitchTab,
   onCloseTab,
   onRenameTab,
+  onTabContextMenu,
   onCommitAlias,
   onCancelAlias,
   onFocusGroup,
@@ -440,6 +441,7 @@ export function GroupView({
   onSwitchTab: (port: string) => void;
   onCloseTab: (port: string) => void;
   onRenameTab: (port: string) => void;
+  onTabContextMenu: (port: string, position: { x: number; y: number }) => void;
   onCommitAlias: (port: string, alias: string) => void;
   onCancelAlias: () => void;
   onFocusGroup: () => void;
@@ -559,6 +561,12 @@ export function GroupView({
                 if (!editingThis) onSwitchTab(port);
               }}
               onDoubleClick={() => onRenameTab(port)}
+              onContextMenu={(e) => {
+                if (editingThis) return;
+                e.preventDefault();
+                onSwitchTab(port);
+                onTabContextMenu(port, { x: e.clientX, y: e.clientY });
+              }}
               title={`切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
             >
               <span className="tab__dot" />
@@ -609,7 +617,7 @@ export function GroupView({
         {group.ports.length === 0 && (
           <div className="term-empty">
             <IconPlug className="term-empty__icon" />
-            <div>从左侧 PORTS 打开一个串口开始收发</div>
+            <div>从左侧连接列表或“新建连接”打开串口或 SSH 终端</div>
             {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
                 现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。
                 动作被解绑(combo 空)时不渲染键帽,只留文字——不显示"—"残影 */}

@@ -1,6 +1,8 @@
 import type { Macro, PortInfo, Script, SerialConfig, SshHost, SshOpenError } from "./types";
 import { Channel } from "@tauri-apps/api/core";
 import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
+import type { PortGroupsOperation, PortGroupsSnapshot } from "./port-groups";
+import type { LibraryChanges, LibraryKind, LibrarySnapshot } from "./library-protocol";
 
 /** acquire 结果：区分首开与附加（附加时 config 为端口实际配置，请求的配置被忽略）。 */
 export interface AcquiredResult {
@@ -63,6 +65,11 @@ export interface Transport {
   onMetaChanged(cb: () => void): () => void;
   /** 脚本库(scripts.json)变更——重新 load_scripts(MCP/Tauri 写入后及时同步,不必重启)。 */
   onScriptsChanged(cb: () => void): () => void;
+  getLibrary(kind: LibraryKind): Promise<LibrarySnapshot>;
+  patchLibrary(kind: LibraryKind, changes: LibraryChanges): Promise<LibrarySnapshot>;
+  getPortGroups(): Promise<PortGroupsSnapshot>;
+  updatePortGroups(operation: PortGroupsOperation): Promise<PortGroupsSnapshot>;
+  onPortGroups(cb: (snapshot: PortGroupsSnapshot) => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
@@ -127,6 +134,7 @@ export interface TransportEventsMap {
   holders: (port: string, holders: number) => void;
   metaChanged: () => void;
   scriptsChanged: () => void;
+  portGroups: (snapshot: PortGroupsSnapshot) => void;
   error: (msg: string) => void;
   macroResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
   scriptResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
@@ -151,6 +159,7 @@ abstract class TransportEventBase {
     holders: new Set(),
     metaChanged: new Set(),
     scriptsChanged: new Set(),
+    portGroups: new Set(),
     error: new Set(),
     macroResult: new Set(),
     scriptResult: new Set(),
@@ -201,6 +210,10 @@ abstract class TransportEventBase {
     this.handlers.scriptsChanged.add(cb);
     return () => { this.handlers.scriptsChanged.delete(cb); };
   }
+  onPortGroups(cb: TransportEventsMap["portGroups"]) {
+    this.handlers.portGroups.add(cb);
+    return () => { this.handlers.portGroups.delete(cb); };
+  }
   onMacroResult(cb: TransportEventsMap["macroResult"]) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
@@ -247,6 +260,10 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private sshListController: Controller<void> | null = null;
   private sshTestControllers = new Map<string, Controller<{ ok: boolean; message: string }>>();
   private sshInstanceControllers = new Map<string, Controller<string>>();
+  private portGroupsRequests = new Map<string, Controller<PortGroupsSnapshot> & { timer: ReturnType<typeof setTimeout> }>();
+  private portGroupsRequestId = 0;
+  private libraryRequests = new Map<string, Controller<LibrarySnapshot> & { timer: ReturnType<typeof setTimeout> }>();
+  private libraryRequestId = 0;
   /** WS 就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。每次重连重建。 */
   private openPromise!: Promise<void>;
   private openResolve: () => void = () => {};
@@ -313,6 +330,32 @@ export class RemoteTransport extends TransportEventBase implements Transport {
       }
       const msg = JSON.parse(e.data);
       switch (msg.type) {
+        case "library_result": {
+          const request = this.libraryRequests.get(msg.request_id);
+          if (request) {
+            clearTimeout(request.timer);
+            this.libraryRequests.delete(msg.request_id);
+            if (msg.error) request.reject(new Error(String(msg.error)));
+            else if (msg.items && typeof msg.items === "object" && !Array.isArray(msg.items) && typeof msg.server_id === "string") {
+              request.resolve({ items: msg.items, serverId: msg.server_id });
+            } else request.reject(new Error("宏 / 脚本库返回了无效响应"));
+          }
+          break;
+        }
+        case "port_groups_changed":
+          this.handlers.portGroups.forEach((cb) => cb(msg.snapshot as PortGroupsSnapshot));
+          break;
+        case "port_groups_result": {
+          const request = this.portGroupsRequests.get(msg.request_id);
+          if (request) {
+            clearTimeout(request.timer);
+            this.portGroupsRequests.delete(msg.request_id);
+            if (msg.error) request.reject(new Error(String(msg.error)));
+            else if (msg.snapshot) request.resolve(msg.snapshot as PortGroupsSnapshot);
+            else request.reject(new Error("分组服务返回了无效响应"));
+          }
+          break;
+        }
         case "ports":
           // 推送模型：每个 ports 消息都推给所有订阅者（后到覆盖先到，避免 resolver 丢回复）
           this.handlers.ports.forEach((cb) => cb(msg.ports as PortInfo[]));
@@ -455,6 +498,10 @@ export class RemoteTransport extends TransportEventBase implements Transport {
 
   /** reject 所有在途请求（断连 / dispose），防 getVersion/getScriptSkill/open 的 Promise 永悬。 */
   private rejectPending(err: Error) {
+    this.libraryRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.libraryRequests.clear();
+    this.portGroupsRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.portGroupsRequests.clear();
     this.openResolvers.forEach((c) => c.reject(err));
     this.openResolvers.clear();
     this.versionController?.reject(err);
@@ -486,6 +533,50 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   async list() {
     await this.send(JSON.stringify({ action: "list" }));
   }
+  private async requestPortGroups(operation?: PortGroupsOperation): Promise<PortGroupsSnapshot> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `groups-${++this.portGroupsRequestId}`;
+    return new Promise<PortGroupsSnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.portGroupsRequests.delete(request_id);
+        reject(new Error("分组请求超时，请刷新确认保存结果"));
+      }, 10_000);
+      this.portGroupsRequests.set(request_id, { resolve, reject, timer });
+      try {
+        this.ws.send(JSON.stringify(operation
+          ? { action: "port_groups_update", request_id, operation }
+          : { action: "port_groups_get", request_id }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.portGroupsRequests.delete(request_id);
+        reject(error);
+      }
+    });
+  }
+  getPortGroups() { return this.requestPortGroups(); }
+  updatePortGroups(operation: PortGroupsOperation) { return this.requestPortGroups(operation); }
+  private async requestLibrary(kind: LibraryKind, changes?: LibraryChanges): Promise<LibrarySnapshot> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `library-${++this.libraryRequestId}`;
+    return new Promise<LibrarySnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.libraryRequests.delete(request_id);
+        reject(new Error("宏 / 脚本库请求超时，请刷新确认保存结果"));
+      }, 10_000);
+      this.libraryRequests.set(request_id, { resolve, reject, timer });
+      try {
+        this.ws.send(JSON.stringify(changes
+          ? { action: "library_patch", request_id, kind, changes }
+          : { action: "library_get", request_id, kind }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.libraryRequests.delete(request_id);
+        reject(error);
+      }
+    });
+  }
+  getLibrary(kind: LibraryKind) { return this.requestLibrary(kind); }
+  patchLibrary(kind: LibraryKind, changes: LibraryChanges) { return this.requestLibrary(kind, changes); }
   /** 远程形态无需主动拉:服务端 WS 打开即推 Devices 快照(ws.rs 会话入口),设备
    *  上下线再增量推送。此处空实现仅为满足接口——调用方订阅后统一触发一次。 */
   async listDevices() {}
@@ -610,6 +701,7 @@ export class LocalTransport extends TransportEventBase implements Transport {
   private disposed = false;
   /** per-port 字节流通道。Channel 无需 unlisten，关闭走 close_port_stream 摘除。 */
   private streamChannels = new Map<string, Channel<ArrayBuffer>>();
+  private configurationEventsReady: Promise<void>;
 
   /** 登记注销函数;实例已销毁则注册即撤销。 */
   private track(un: () => void) {
@@ -620,6 +712,13 @@ export class LocalTransport extends TransportEventBase implements Transport {
   constructor() {
     super();
     this.setupEvents();
+    this.configurationEventsReady = import("@tauri-apps/api/event").then(async ({ listen }) => {
+      this.track(await listen("scripts-changed", () => this.handlers.scriptsChanged.forEach((cb) => cb())));
+      if (this.disposed) return;
+      this.track(await listen<PortGroupsSnapshot>("port-groups-changed", (event) =>
+        this.handlers.portGroups.forEach((cb) => cb(event.payload))));
+    });
+    void this.configurationEventsReady.catch(() => {});
   }
 
   private setupEvents() {
@@ -674,10 +773,6 @@ export class LocalTransport extends TransportEventBase implements Transport {
           this.handlers.metaChanged.forEach((cb) => cb()))
       );
       this.track(
-        await listen("scripts-changed", () =>
-          this.handlers.scriptsChanged.forEach((cb) => cb()))
-      );
-      this.track(
         await listen("devices-changed", () => { void this.listDevices(); })
       );
     };
@@ -687,6 +782,26 @@ export class LocalTransport extends TransportEventBase implements Transport {
   async list() {
     const ports = await tauriInvoke<PortInfo[]>("list_ports");
     this.handlers.ports.forEach((cb) => cb(ports));
+  }
+  async getPortGroups() {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<PortGroupsSnapshot>("get_port_groups");
+  }
+  async getLibrary(kind: LibraryKind) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<LibrarySnapshot>("library_get", { kind });
+  }
+  async patchLibrary(kind: LibraryKind, changes: LibraryChanges) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<LibrarySnapshot>("library_patch", { kind, changes });
+  }
+  async updatePortGroups(operation: PortGroupsOperation) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<PortGroupsSnapshot>("update_port_groups", { operation });
   }
   /** 主动拉设备在线快照(事件只触发拉取,状态以后端为唯一真相)。 */
   async listDevices() {

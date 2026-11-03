@@ -14,6 +14,20 @@ use ss_core::SerialConfig;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
+    LibraryResult {
+        request_id: String,
+        items: Option<serde_json::Value>,
+        error: Option<String>,
+        server_id: String,
+    },
+    PortGroupsResult {
+        request_id: String,
+        snapshot: Option<crate::port_groups::Snapshot>,
+        error: Option<String>,
+    },
+    PortGroupsChanged {
+        snapshot: crate::port_groups::Snapshot,
+    },
     Ports {
         ports: Vec<crate::PortView>,
     },
@@ -151,6 +165,22 @@ pub struct DeviceStateView {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMsg {
+    LibraryGet {
+        request_id: String,
+        kind: crate::libraries::Kind,
+    },
+    LibraryPatch {
+        request_id: String,
+        kind: crate::libraries::Kind,
+        changes: crate::libraries::Changes,
+    },
+    PortGroupsGet {
+        request_id: String,
+    },
+    PortGroupsUpdate {
+        request_id: String,
+        operation: crate::port_groups::Operation,
+    },
     List,
     Open {
         port: String,

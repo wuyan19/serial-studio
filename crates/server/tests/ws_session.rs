@@ -65,6 +65,9 @@ async fn boot() -> (String, Arc<SerialManager>) {
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -372,6 +375,9 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         addresses.key_resolver_fn(),
     ));
     let state = AppState {
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -414,4 +420,47 @@ async fn open_by_alias_resolves_via_injected_resolver() {
 
     // 清理种子,不污染同进程后续行为
     ss_server::port_meta_store::set_alias("COM7", None).unwrap();
+}
+
+#[tokio::test]
+async fn port_groups_sync_across_clients_with_correlated_errors() {
+    let (url, manager) = boot().await;
+    let mut a = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    let mut b = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    // Initial lists establish that both subscriptions are installed before the update.
+    recv_until(&mut a, "\"type\":\"devices\"").await;
+    recv_until(&mut b, "\"type\":\"devices\"").await;
+    send_text(&mut a, r#"{"action":"port_groups_update","request_id":"create-1","operation":{"type":"create","name":"Lab"}}"#).await;
+    let result: serde_json::Value =
+        serde_json::from_str(&recv_until(&mut a, "\"type\":\"port_groups_result\"").await).unwrap();
+    assert_eq!(result["request_id"], "create-1");
+    assert_eq!(result["snapshot"]["names"], serde_json::json!(["Lab"]));
+    let changed: serde_json::Value =
+        serde_json::from_str(&recv_until(&mut b, "\"type\":\"port_groups_changed\"").await)
+            .unwrap();
+    assert_eq!(changed["snapshot"], result["snapshot"]);
+    send_text(&mut b, r#"{"action":"port_groups_update","request_id":"member-2","operation":{"type":"membership","kind":"port","id":"remote::COM3","name":"Lab","included":true}}"#).await;
+    let updated: serde_json::Value =
+        serde_json::from_str(&recv_until(&mut b, "\"type\":\"port_groups_result\"").await).unwrap();
+    assert_eq!(updated["request_id"], "member-2");
+    assert_eq!(
+        updated["snapshot"]["assignments"]["remote::COM3"],
+        serde_json::json!(["Lab"])
+    );
+    send_text(&mut a, r#"{"action":"port_groups_update","request_id":"invalid-3","operation":{"type":"create","name":" "}}"#).await;
+    let error: serde_json::Value =
+        serde_json::from_str(&recv_until(&mut a, "\"type\":\"port_groups_result\"").await).unwrap();
+    assert_eq!(error["request_id"], "invalid-3");
+    assert!(error["error"].as_str().is_some());
+    assert!(error["snapshot"].is_null());
+    send_text(
+        &mut a,
+        r#"{"action":"port_groups_get","request_id":"get-4"}"#,
+    )
+    .await;
+    let read: serde_json::Value =
+        serde_json::from_str(&recv_until(&mut a, "\"type\":\"port_groups_result\"").await).unwrap();
+    assert_eq!(read["request_id"], "get-4");
+    assert_eq!(read["snapshot"], updated["snapshot"]);
+    assert_eq!(manager.holder_count("remote::COM3").await, None);
 }

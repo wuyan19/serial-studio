@@ -73,9 +73,7 @@ fn read_locked(p: &Path) -> BTreeMap<String, Script> {
 }
 
 fn write_locked(p: &Path, map: &BTreeMap<String, Script>) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
-    std::fs::write(p, json).map_err(|e| format!("写入 {:?} 失败: {}", p, e))?;
-    Ok(())
+    crate::libraries::write_atomic(p, map)
 }
 
 // ===== 公开 API:无目录参数,定位配置目录(Tauri / MCP 调用) =====
@@ -85,6 +83,25 @@ pub fn load() -> BTreeMap<String, Script> {
     crate::config::config_dir()
         .map(|d| load_from(&d))
         .unwrap_or_default()
+}
+
+pub fn load_checked() -> Result<BTreeMap<String, Script>, String> {
+    let _guard = LOCK.lock().map_err(|_| "脚本库锁不可用")?;
+    let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
+    crate::libraries::read_checked(&file_at(&dir))
+}
+
+pub fn patch(changes: &crate::libraries::Changes) -> Result<BTreeMap<String, Script>, String> {
+    let dir = crate::config::config_dir().ok_or("无法定位配置目录")?;
+    patch_in(&dir, changes)
+}
+
+fn patch_in(
+    dir: &Path,
+    changes: &crate::libraries::Changes,
+) -> Result<BTreeMap<String, Script>, String> {
+    let _guard = LOCK.lock().map_err(|_| "脚本库锁不可用")?;
+    crate::libraries::patch_locked(&file_at(&dir), changes)
 }
 
 /// 全量写 scripts.json(前端 Tauri 用:内存权威整张覆盖)。
@@ -108,6 +125,41 @@ pub fn remove(name: &str) -> Result<Option<Script>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_library_patches_preserve_unrelated_entries_and_mcp_writes() {
+        let dir = fresh_dir();
+        upsert_in(&dir, "legacy", script("existing")).unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let dir = dir.clone();
+            tasks.push(std::thread::spawn(move || {
+                patch_in(
+                    &dir,
+                    &BTreeMap::from([(
+                        format!("web-{i}"),
+                        crate::libraries::Change {
+                            before: None,
+                            after: Some(serde_json::json!({"code":format!("code-{i}")})),
+                        },
+                    )]),
+                )
+                .unwrap();
+            }));
+        }
+        let mcp_dir = dir.clone();
+        tasks.push(std::thread::spawn(move || {
+            upsert_in(&mcp_dir, "mcp", script("external")).unwrap();
+        }));
+        for task in tasks {
+            task.join().unwrap();
+        }
+        let items = load_from(&dir);
+        assert_eq!(items.len(), 10);
+        assert_eq!(items["legacy"].code, "existing");
+        assert_eq!(items["mcp"].code, "external");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// 每个测试一个独立临时目录(进程 id + 计数),互不污染、可并发,不碰 exe 目录。
     fn fresh_dir() -> PathBuf {

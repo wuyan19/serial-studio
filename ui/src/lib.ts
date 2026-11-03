@@ -1,4 +1,4 @@
-import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
+import type { ConnConfig, Macro, PortId, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -173,6 +173,15 @@ export function wireToPid(devId: string, wirePort: string): PortId {
 export function displayPortName(pid: PortId): string {
   const idx = pid.lastIndexOf("::");
   return idx < 0 ? pid : pid.slice(idx + 2);
+}
+
+/** Preserve the server-side route when allocating a sibling SSH endpoint. */
+export function sshTabTarget(row: Pick<PortInfo, "name" | "kind"> | undefined, legacySsh = false): { hostId: string; base: string } | undefined {
+  if (!row || (row.kind === undefined ? !legacySsh : row.kind !== "ssh")) return undefined;
+  const index = row.name.lastIndexOf("::");
+  if (index <= 0) return undefined;
+  const base = row.name.slice(index + 2).split("@")[0];
+  return base ? { hostId: row.name.slice(0, index), base } : undefined;
 }
 
 // ===== 终端记录文件名 =====
