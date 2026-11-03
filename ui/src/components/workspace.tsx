@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefO
 import { createPortal } from "react-dom";
 import {
   IconBolt, IconCheck, IconCode, IconGear, IconGlobe, IconInfo,
-  IconKeyboard, IconPlug, IconPlus, IconShirt, IconSsh,
+  IconKeyboard, IconPlug, IconPlus, IconShare, IconShirt, IconSsh,
 } from "../icons";
 import { getFontSize, setFontSize, subscribeFont } from "../term-font";
 import { THEMES, type Theme } from "../theme";
@@ -21,7 +21,7 @@ function SidebarIcon() {
 
 export function WorkspaceSidebar({
   panel, onPanel, showScripts, counts, running, failed, query,
-  onQuery, onNew, onRemote, connected, width, collapsed, onToggle, tools, children,
+  onQuery, onNew, onRemote, onShare, connected, width, collapsed, onToggle, tools, children,
 }: {
   panel: WorkspacePanel;
   onPanel: (panel: WorkspacePanel) => void;
@@ -33,6 +33,7 @@ export function WorkspaceSidebar({
   onQuery: (query: string) => void;
   onNew: () => void;
   onRemote?: () => void;
+  onShare: () => void;
   connected: boolean;
   width: number;
   collapsed: boolean;
@@ -77,6 +78,7 @@ export function WorkspaceSidebar({
           })}
         </nav>
         <div className="sidebar__rail-footer">
+          <button className="workspace-footer-action" onClick={onShare} title="分享当前设备" aria-label="分享当前设备"><IconShare /></button>
           {onRemote && <button className="workspace-footer-action" onClick={onRemote} title="添加远程设备" aria-label="添加远程设备"><IconGlobe /></button>}
           {tools}
         </div>

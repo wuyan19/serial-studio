@@ -951,11 +951,11 @@ async fn handle_client_msg(
                 .registry_snapshot()
                 .into_iter()
                 .find(|r| r.id == host_id);
-            let result: Result<(), String> = match rec {
-                None => Err(format!("未知 SSH 设备: {host_id}")),
-                Some(rec) => crate::ssh::session::test_connection(rec)
-                    .await
-                    .map_err(|e| e.message()),
+            let result = match rec {
+                None => Err(crate::ssh::SshOpenError::into_freeform(format!(
+                    "未知 SSH 设备: {host_id}"
+                ))),
+                Some(rec) => crate::ssh::session::test_connection(rec).await,
             };
             match result {
                 Ok(()) => {
@@ -964,6 +964,7 @@ async fn handle_client_msg(
                             host_id,
                             ok: true,
                             message: String::new(),
+                            ssh: None,
                         }))
                         .await;
                 }
@@ -972,7 +973,8 @@ async fn handle_client_msg(
                         .send(to_json(ServerMsg::SshTestResult {
                             host_id,
                             ok: false,
-                            message: e,
+                            message: e.message(),
+                            ssh: Some(e),
                         }))
                         .await;
                 }

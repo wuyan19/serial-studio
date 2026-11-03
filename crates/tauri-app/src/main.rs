@@ -14,6 +14,7 @@
 //! 热重启：改监听配置 → invoke apply_settings → Supervisor.stop()+start()，
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
+mod share;
 mod tray;
 
 use clap::Parser;
@@ -509,12 +510,12 @@ async fn ssh_save(
     Ok(())
 }
 
-/// SSH 设备测试连接（建连+认证+即拆，不进会话池）。结果 (ok, 失败原因)。
+/// Test without creating a terminal; keep classified errors for confirmation dialogs.
 #[tauri::command]
 async fn ssh_test(
     state: tauri::State<'_, AppState>,
     host_id: String,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<ss_server::ssh::SshOpenError>), String> {
     let rec = state
         .ssh
         .registry_snapshot()
@@ -522,8 +523,8 @@ async fn ssh_test(
         .find(|r| r.id == host_id)
         .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
     match ss_server::ssh::session::test_connection(rec).await {
-        Ok(()) => Ok((true, String::new())),
-        Err(e) => Ok((false, e.message())),
+        Ok(()) => Ok((true, String::new(), None)),
+        Err(e) => Ok((false, e.message(), Some(e))),
     }
 }
 
@@ -1211,6 +1212,8 @@ fn run_gui() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            share::get_share_addresses,
+            share::get_local_share_hosts,
             library_get,
             library_patch,
             get_port_groups,

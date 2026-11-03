@@ -18,6 +18,7 @@ import type {
   SrvSettings,
   SshHost,
   SshOpenError,
+  SshTestState,
   TermInstance,
 } from "./types";
 import { leafGroupIds } from "./pane-tree";
@@ -60,6 +61,9 @@ import {
 import { LocalTransport, RemoteTransport, type OpenError, type Transport } from "./transport";
 import { usePortGroups } from "./use-port-groups";
 import { sharedLibrarySource } from "./shared-library";
+import type { DeviceShareAddress } from "./device-share";
+import { useShareClipboard } from "./use-share-clipboard";
+import { DeviceShareDialog } from "./components/device-share";
 import {
   AboutDialog,
   ConfirmDialog,
@@ -192,6 +196,8 @@ function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
  * 仪器风布局：活动栏 + 可收起次侧栏 + 通道条 + 主终端区。
  */
+type SshIssue = { error: SshOpenError } & ({ pid: PortId } | { hostId: string });
+
 export default function App() {
   // 运行形态（唯一判定点 lib.ts::getMode）：本地桌面 / 远程窗口 / Web
   const mode = getMode();
@@ -242,6 +248,9 @@ export default function App() {
     isLocal ? new Set() : new Set(["remote"]),
   );
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remotesReady, setRemotesReady] = useState(!isLocal);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [sharedDevice, setSharedDevice] = useState<DeviceShareAddress | null>(null);
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
   /** 通用设备详情弹窗目标(remote/ssh 按 id 实时查本地注册表;meta = 级联补充卡,
@@ -256,10 +265,9 @@ export default function App() {
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
   /** 独立编辑弹窗的设备（右键「编辑设备」/认证失败弹窗直达，不经管理列表）；null = 关。 */
   const [sshEditDirect, setSshEditDirect] = useState<SshHost | null>(null);
-  /** 测试连接结果：testing=测试中，ok=可达，fail=失败（原因经 toast）。 */
-  const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok" | "fail">>(new Map());
+  const [sshTests, setSshTests] = useState<Map<string, SshTestState>>(new Map());
   /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
-  const [sshIssue, setSshIssue] = useState<{ pid: PortId; error: SshOpenError } | null>(null);
+  const [sshIssue, setSshIssue] = useState<SshIssue | null>(null);
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
@@ -1168,6 +1176,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       .then((loaded) => {
         setRemotes(loaded);
         setExpandedRemotes(new Set(loaded.map((r) => r.id)));
+        setRemotesReady(true);
       })
       .catch((e) => console.error("加载远程设备失败", e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1494,20 +1503,30 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。
    *  重复地址由 RemoteDialog 内联拦截(含 Enter 路径),此处再兜一层防御——
    *  校验只在 UI 入口做等于只拦鼠标不拦键盘。 */
-  const addRemote = () => {
-    const host = remoteInput.host.trim();
-    if (!host) return;
-    if (remotes.some((r) => r.host === host && r.port === remoteInput.port)) return;
+  const addRemoteDevice = (input: { host: string; port: number; nickname?: string }) => {
+    const host = input.host.trim();
+    if (!host) return false;
+    if (remotes.some((r) => r.host === host && r.port === input.port)) return false;
     const id = crypto.randomUUID();
-    const dev: RemoteDevice = { id, host, port: remoteInput.port, nickname: remoteInput.nickname.trim() || undefined };
+    const dev: RemoteDevice = { id, host, port: input.port, nickname: input.nickname?.trim() || undefined };
     // 持久化在 updater 外调(StrictMode 双跑 updater,副作用内嵌会双发 save_remotes);
     // 重复地址已在上面拦截,这里基于当前闭包 remotes 计算即无并发风险。
     setRemotes((prev) => [...prev, dev]);
     if (isLocal) persistRemotes([...remotes, dev]);
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
+    return true;
+  };
+  const addRemote = () => {
+    if (!addRemoteDevice(remoteInput)) return;
     setRemoteInput({ host: "", port: 18700, nickname: "" });
     setRemoteOpen(false);
   };
+
+  const loadShareAddresses = useCallback(async (): Promise<DeviceShareAddress[]> => {
+    if (isLocal) return tauriInvoke<DeviceShareAddress[]>("get_share_addresses");
+    if (!connected) throw new Error("设备尚未连接，请连接后再分享");
+    return [{ host: connConfig.host, port: connConfig.port }];
+  }, [isLocal, connected, connConfig.host, connConfig.port]);
 
   /** 设备卡改名（空串 = 清除昵称，标题回退 host:port）。预校验 + updater 外持久化（同 addRemote）；
    * 落盘钩子 update_registry 对同 id 同地址仅昵称变 → 后端原地更新（连接不断，`新昵称::COM5` 寻址即时生效）。 */
@@ -1565,15 +1584,19 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   /** 保存（添加/编辑）SSH 设备：全量覆盖 server 侧注册表；乐观更新，失败回滚。 */
   const commitSshHost = async (host: SshHost, isNew: boolean) => {
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return false; }
     const next = isNew
       ? [...sshHosts, { ...host, id: crypto.randomUUID() }]
       : sshHosts.map((h) => (h.id === host.id ? host : h));
     setSshHosts(next);
     try {
-      await cmdTransport()?.sshSave(next);
+      await transport.sshSave(next);
+      return true;
     } catch (e) {
       setSshHosts(sshHosts);
       libError(`保存 SSH 设备失败：${String(e)}`);
+      return false;
     }
   };
 
@@ -1606,15 +1629,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   };
 
-  /** 测试连接：server 侧建连+认证+即拆（不进会话池）。失败原因经 toast。 */
+  // Keep verification and authentication actionable without opening a terminal.
   const testSsh = async (host: SshHost) => {
-    setSshTests((prev) => new Map(prev).set(host.id, "testing"));
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
+    setSshTests((prev) => new Map(prev).set(host.id, { status: "testing" }));
     try {
-      const r = await cmdTransport()?.sshTest(host.id);
-      setSshTests((prev) => new Map(prev).set(host.id, r?.ok ? "ok" : "fail"));
-      if (r && !r.ok && r.message) libError(`SSH 测试失败：${r.message}`);
+      const r = await transport.sshTest(host.id);
+      if (cmdTransport() !== transport) return;
+      setSshTests((prev) => new Map(prev).set(host.id, { status: r.ok ? "ok" : "fail", message: r.message }));
+      if (!r.ok && r.ssh && r.ssh.kind !== "other") {
+        setSshIssue({ hostId: host.id, error: r.ssh });
+      } else if (!r.ok && r.message) libError(`SSH 测试失败：${r.message}`);
     } catch (e) {
-      setSshTests((prev) => new Map(prev).set(host.id, "fail"));
+      if (cmdTransport() !== transport) return;
+      setSshTests((prev) => new Map(prev).set(host.id, { status: "fail", message: String(e) }));
       libError(`SSH 测试失败：${String(e)}`);
     }
   };
@@ -1641,29 +1670,37 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }
   };
 
-  /** 认证重输确认:更新保存的密码并立即重开(失败会再次进入闭环弹窗)。 */
-  const retrySshAuth = async (pid: PortId, password: string, updateSaved: boolean) => {
-    const host = sshHostOfPid(pid);
+  const sshIssueHost = (issue: SshIssue) => "hostId" in issue
+    ? sshHosts.find((host) => host.id === issue.hostId)
+    : sshHostOfPid(issue.pid);
+
+  const retrySshAuth = async (issue: SshIssue, password: string, updateSaved: boolean) => {
+    const host = sshIssueHost(issue);
     setSshIssue(null);
     if (!host) return;
     if (updateSaved) {
-      await commitSshHost({ ...host, auth: { type: "password", password } }, false);
+      if (!await commitSshHost({ ...host, auth: { type: "password", password } }, false)) return;
     }
-    await openPort(pid, DEFAULT_CONFIG);
+    if ("hostId" in issue) await testSsh(host);
+    else await openPort(issue.pid, DEFAULT_CONFIG);
   };
 
   /** 指纹信任确认:记录指纹(直连即断)并立即重开。 */
-  const trustSshHost = async (pid: PortId) => {
-    const host = sshHostOfPid(pid);
+  const trustSshHost = async (issue: SshIssue) => {
+    const host = sshIssueHost(issue);
     setSshIssue(null);
     if (!host) return;
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
     try {
-      await cmdTransport()?.sshTrustHost(host.id);
+      await transport.sshTrustHost(host.id);
     } catch (e) {
       libError(`信任指纹失败：${String(e)}`);
       return;
     }
-    await openPort(pid, DEFAULT_CONFIG);
+    if (cmdTransport() !== transport) return;
+    if ("hostId" in issue) await testSsh(host);
+    else await openPort(issue.pid, DEFAULT_CONFIG);
   };
 
   /** 侧栏 SSH 卡菜单动作分发。 */
@@ -1880,6 +1917,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     "tab.select": (arg) => selectTab(Number(arg)),
   };
   const modalOpen = !!(
+    shareOpen || sharedDevice ||
     connectionLauncherOpen ||
     settingsOpen ||
     aboutOpen ||
@@ -1905,6 +1943,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
   const menuOpen = themeMenu || manageMenu || tabMenu !== null;
+
+  useShareClipboard({ enabled: isLocal, ready: remotesReady, blocked: modalOpen || menuOpen, remotes, onShare: setSharedDevice });
 
   // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
   useEffect(() => {
@@ -2009,6 +2049,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onQuery={setSidebarQuery}
           onNew={() => sidebarPanel === "ports" ? setConnectionLauncherOpen(true) : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
           onRemote={isTauri() ? () => setRemoteOpen(true) : undefined}
+          onShare={() => setShareOpen(true)}
           connected={connected}
           width={sidebarWidth}
           tools={<WorkspaceSettingsMenu
@@ -2506,6 +2547,17 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           }}
         />
       )}
+      {shareOpen && <DeviceShareDialog loadAddresses={loadShareAddresses} onClose={() => setShareOpen(false)} />}
+      {sharedDevice && <ConfirmDialog
+        title="添加分享的远程设备？"
+        message={`剪贴板中发现设备分享链接：${sharedDevice.host}:${sharedDevice.port}。是否添加到远程设备列表？`}
+        confirmText="添加设备"
+        onConfirm={() => {
+          if (!addRemoteDevice(sharedDevice)) libNotify("此设备已在远程设备列表中");
+          setSharedDevice(null);
+        }}
+        onCancel={() => setSharedDevice(null)}
+      />}
       {remoteOpen && (
         <RemoteDialog
           input={remoteInput}
@@ -2654,36 +2706,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         };
         return <PortDetailDialog info={info} onClose={() => setPortDetail(null)} />;
       })()}
-      {sshIssue && (() => {
-        // 结构化 device.id 查属主(web 形态 pid 首段是连接桶,老查法失灵)
-        const host = sshHostOfPid(sshIssue.pid);
-        if (!host) return null;
-        const { error, pid } = sshIssue;
-        if (error.kind === "auth_failed") {
-          return (
-            <SshAuthDialog
-              host={host}
-              onRetryPassword={(pw, save) => void retrySshAuth(pid, pw, save)}
-              onEdit={() => {
-                setSshIssue(null);
-                setSshEditDirect(host);
-              }}
-              onCancel={() => setSshIssue(null)}
-            />
-          );
-        }
-        if (error.kind === "host_key_unknown" || error.kind === "host_key_changed") {
-          return (
-            <SshTrustDialog
-              host={host}
-              error={error}
-              onTrust={() => void trustSshHost(pid)}
-              onCancel={() => setSshIssue(null)}
-            />
-          );
-        }
-        return null;
-      })()}
       {sshManagerOpen && (
         <SshManagerDialog
           hosts={sshHosts}
@@ -2739,6 +2761,38 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
       {/* 确认弹窗:必须排在所有对话框之后——overlay 同 z-index 时后来者居上,
           放前面会被编辑器盖住(如编辑器 dirty 确认弹在编辑器下层不可见) */}
+      {sshIssue && (() => {
+        const host = sshIssueHost(sshIssue);
+        if (!host) return null;
+        const { error } = sshIssue;
+        const operation = "hostId" in sshIssue ? "test" : "connect";
+        if (error.kind === "auth_failed") {
+          return (
+            <SshAuthDialog
+              host={host}
+              operation={operation}
+              onRetryPassword={(pw, save) => void retrySshAuth(sshIssue, pw, save)}
+              onEdit={() => {
+                setSshIssue(null);
+                setSshEditDirect(host);
+              }}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        if (error.kind === "host_key_unknown" || error.kind === "host_key_changed") {
+          return (
+            <SshTrustDialog
+              host={host}
+              operation={operation}
+              error={error}
+              onTrust={() => void trustSshHost(sshIssue)}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        return null;
+      })()}
       {confirmState && (
         <ConfirmDialog
           title={confirmState.title}

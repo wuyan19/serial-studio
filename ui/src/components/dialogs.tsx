@@ -1,7 +1,7 @@
 /** 对话框族：串口配置、宏/脚本批量导出、设置面板、快捷键改键、关于（含在线更新）、
 脚本指南、添加远程设备、远程设备详情、脚本运行参数收集、通用确认弹窗。 */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost, SshOpenError } from "../types";
+import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost, SshOpenError, SshTestState } from "../types";
 import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
 import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
 import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
@@ -1143,8 +1143,7 @@ export function SshManagerDialog({
   onClose,
 }: {
   hosts: SshHost[];
-  /** 测试连接结果（真实 ssh_test 回执）：testing=测试中 / ok=可达 / fail=失败(行内 ✗) / undefined=未测。 */
-  testOf: (id: string) => "testing" | "ok" | "fail" | undefined;
+  testOf: (id: string) => SshTestState | undefined;
   /** 保存设备（isNew 区分添加/编辑；新建时 id 为空串，App 负责生成 UUID）。 */
   onCommit: (host: SshHost, isNew: boolean) => void;
   onDelete: (host: SshHost) => void;
@@ -1195,7 +1194,8 @@ export function SshManagerDialog({
                 <span>操作</span>
               </div>
               {hosts.map((h) => {
-                const tst = testOf(h.id);
+                const test = testOf(h.id);
+                const tst = test?.status;
                 const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : tst === "fail" ? "✗" : "—";
                 return (
                   <div key={h.id} className="ssh-table__row">
@@ -1206,7 +1206,7 @@ export function SshManagerDialog({
                       </span>
                     </span>
                     <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}${tst === "fail" ? " bad" : ""}`} title={tst === "ok" ? "可达" : tst === "fail" ? "失败（原因见提示）" : undefined}>
+                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}${tst === "fail" ? " bad" : ""}`} title={tst === "ok" ? "可达" : test?.message}>
                       {testText}
                     </span>
                     <span className="ssh-table__actions">
@@ -1220,6 +1220,7 @@ export function SshManagerDialog({
                         删除
                       </button>
                     </span>
+                    {tst === "fail" && test?.message && <span className="ssh-table__error" role="status">{test.message}</span>}
                   </div>
                 );
               })}
@@ -1461,11 +1462,13 @@ function SshHostForm({
  *  失败详情不上(标题+host 身份已足);method 差异等诊断信息留在 App 的 toast 里。 */
 export function SshAuthDialog({
   host,
+  operation = "connect",
   onRetryPassword,
   onEdit,
   onCancel,
 }: {
   host: SshHost;
+  operation?: "connect" | "test";
   onRetryPassword: (password: string, updateSaved: boolean) => void;
   onEdit: () => void;
   onCancel: () => void;
@@ -1475,7 +1478,7 @@ export function SshAuthDialog({
   const [updateSaved, setUpdateSaved] = useState(true);
   const canRetry = isPassword && password !== "";
   const confirm = () => {
-    if (canRetry) onRetryPassword(password, updateSaved);
+    if (canRetry) onRetryPassword(password, operation === "test" || updateSaved);
   };
   useDialogKeys({ onClose: onCancel, onEnter: confirm });
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1500,11 +1503,11 @@ export function SshAuthDialog({
                 autoComplete="new-password"
               />
             </ConfigRow>
-            <label className="ssh-dialog__check">
+            {operation !== "test" && <label className="ssh-dialog__check">
               <input type="checkbox" checked={updateSaved} onChange={(e) => setUpdateSaved(e.target.checked)} />
               同时更新已保存的密码
-            </label>
-            <p className="dialog__hint">重试成功前不会写盘;仅勾选更新时保存新密码。</p>
+            </label>}
+            <p className="dialog__hint">{operation === "test" ? "保存新密码后重新测试，不打开终端。" : "勾选更新时先保存新密码，再重新连接。"}</p>
           </>
         ) : (
           <>
@@ -1523,7 +1526,7 @@ export function SshAuthDialog({
         {isPassword && (
           <div className="btn-row">
             <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-            <button className="btn btn--primary" onClick={confirm} disabled={!canRetry}>重试连接</button>
+            <button className="btn btn--primary" onClick={confirm} disabled={!canRetry}>{operation === "test" ? "保存并重新测试" : "重试连接"}</button>
           </div>
         )}
       </div>
@@ -1535,11 +1538,13 @@ export function SshAuthDialog({
 export function SshTrustDialog({
   host,
   error,
+  operation = "connect",
   onTrust,
   onCancel,
 }: {
   host: SshHost;
   error: Extract<SshOpenError, { kind: "host_key_unknown" | "host_key_changed" }>;
+  operation?: "connect" | "test";
   onTrust: () => void;
   onCancel: () => void;
 }) {
@@ -1573,10 +1578,10 @@ export function SshTrustDialog({
             <ConfigRow label="本次收到">
               <code className="ssh-trust__fp">{error.received}</code>
             </ConfigRow>
-            <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并重连。</p>
+            <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并{operation === "test" ? "重新测试" : "重连"}。</p>
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-              <button className="btn btn--danger-solid" onClick={onTrust}>仍要信任并连接</button>
+              <button className="btn btn--danger-solid" onClick={onTrust}>{operation === "test" ? "仍要信任并测试" : "仍要信任并连接"}</button>
             </div>
           </>
         ) : (
@@ -1587,7 +1592,7 @@ export function SshTrustDialog({
             <p className="dialog__hint">算法 {error.keyType}(SHA256)。首次连接需确认服务器身份,信任后本机将记住该指纹。</p>
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-              <button className="btn btn--primary" onClick={onTrust}>信任并连接</button>
+              <button className="btn btn--primary" onClick={onTrust}>{operation === "test" ? "信任并测试" : "信任并连接"}</button>
             </div>
           </>
         )}
