@@ -233,6 +233,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    out_rx.close();
     // 先停本连接的事件转发，再释放占有份额；末位口才拆毁，事件广播给其它仍在的客户端
     groups_task.abort();
     event_task.abort();
@@ -240,6 +241,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     script_task.abort();
     device_task.abort();
     state.closers.lock().unwrap().remove(&session);
+    crate::ssh::files::release_owner(&state, &format!("ws:{session:?}")).await;
     // 本 session 启动的脚本跟着停(防 orphan:客户端断连后脚本继续占并发槽,无超时后变无界)
     let orphan_aborts: Vec<Arc<AtomicBool>> = state
         .script_runs
@@ -333,6 +335,29 @@ async fn handle_client_msg(
     };
 
     match msg {
+        ClientMsg::SshFiles {
+            request_id,
+            host_id,
+            operation,
+        } => {
+            let owner = format!("ws:{session:?}");
+            let response = crate::ssh::files::execute(state, &owner, &host_id, operation).await;
+            let (result, error) = match response {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(error)),
+            };
+            if out_tx
+                .send(to_json(ServerMsg::SshFilesResult {
+                    request_id,
+                    result,
+                    error,
+                }))
+                .await
+                .is_err()
+            {
+                crate::ssh::files::release_owner(state, &owner).await;
+            }
+        }
         ClientMsg::LibraryGet { request_id, kind } => {
             send_library_result(
                 request_id,

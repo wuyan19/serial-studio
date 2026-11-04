@@ -368,16 +368,6 @@ button {
   border-top: 1px solid var(--hairline);
   padding: 0 14px;
 }
-.sidebar__toggle-row {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 48px;
-  padding: 0;
-  flex-shrink: 0;
-}
-.sidebar__toggle-row .icon-btn { width: 40px; height: 40px; border-radius: 12px; }
-.sidebar__toggle-row svg { width: 21px; height: 21px; }
 .sidebar__content[hidden] { display: none; }
 .workspace-nav {
   display: flex;
@@ -429,8 +419,7 @@ button {
 .workspace-nav__item svg,
 .sidebar__rail-footer .workspace-footer-action svg { width: 22px; height: 22px; }
 .workspace-nav__item:hover,
-.sidebar__rail-footer .workspace-footer-action:hover,
-.sidebar__toggle-row .icon-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.sidebar__rail-footer .workspace-footer-action:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .workspace-nav__item.active { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
 .workspace-settings > .workspace-footer-action[aria-expanded="true"] { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
 .workspace-settings { width: 40px; flex-shrink: 0; }
@@ -1657,6 +1646,42 @@ button {
 }
 .group__tabs {
   flex-shrink: 0; /* 标签栏不被压缩，终端区占剩余 */
+}
+.group__tab-row {
+  display: flex;
+  flex-shrink: 0;
+  min-width: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.group__tab-row > .group__tabs {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.group__body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.group__body > .group__term { min-width: 0; }
+.ssh-files-toggle {
+  align-self: center;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 32px;
+  margin: 0 6px;
+  padding: 7px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ink-dim);
+  background: transparent;
+}
+.ssh-files-toggle:hover,
+.ssh-files-toggle[aria-expanded="true"] {
+  color: var(--ink);
+  background: var(--surface-3);
 }
 .pane-split {
   display: flex;
@@ -3761,3 +3786,12 @@ button {
   color: var(--ink-dim);
   cursor: pointer;
 }
+
+.ssh-files-slot {
+  display: flex;
+  flex-shrink: 0;
+  max-width: 60%;
+  min-width: 0;
+  min-height: 0;
+}
+.ssh-files-slot > .ssh-files { max-width: 100%; }

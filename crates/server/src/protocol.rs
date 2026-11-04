@@ -14,6 +14,11 @@ use ss_core::SerialConfig;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
+    SshFilesResult {
+        request_id: String,
+        result: Option<crate::ssh::files::FileResult>,
+        error: Option<String>,
+    },
     LibraryResult {
         request_id: String,
         items: Option<serde_json::Value>,
@@ -167,6 +172,11 @@ pub struct DeviceStateView {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMsg {
+    SshFiles {
+        request_id: String,
+        host_id: String,
+        operation: crate::ssh::files::FileOperation,
+    },
     LibraryGet {
         request_id: String,
         kind: crate::libraries::Kind,

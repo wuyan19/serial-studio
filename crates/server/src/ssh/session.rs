@@ -102,7 +102,7 @@ pub(crate) async fn run_session(
 // 或中间人,由用户核对决断)。check_server_key 只能返回 bool,分类经共享槽
 // `classified` 带回 connect_and_auth(russh 的 UnknownKey 错误本身不带指纹)。
 
-struct HostKeyChecker {
+pub(crate) struct HostKeyChecker {
     host: String,
     port: u16,
     /// 拒绝原因分类槽(首连/变更时由 check_server_key 写入)。
@@ -233,7 +233,9 @@ impl client::Handler for TrustAndRecordChecker {
 
 // ===== 连接与认证 =====
 
-async fn connect_and_auth(record: &SshHostRecord) -> Result<Handle<HostKeyChecker>, SshOpenError> {
+pub(crate) async fn connect_and_auth(
+    record: &SshHostRecord,
+) -> Result<Handle<HostKeyChecker>, SshOpenError> {
     let classified = Arc::new(std::sync::Mutex::new(None));
     let r = tokio::time::timeout(CONNECT_TIMEOUT, async {
         let config = Arc::new(client::Config {

@@ -15,6 +15,7 @@
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
 mod share;
+mod ssh_local_files;
 mod tray;
 
 use clap::Parser;
@@ -526,6 +527,23 @@ async fn ssh_test(
         Ok(()) => Ok((true, String::new(), None)),
         Err(e) => Ok((false, e.message(), Some(e))),
     }
+}
+
+/// File sessions belong to the invoking window, independently of terminal ownership.
+#[tauri::command]
+async fn ssh_files(
+    state: tauri::State<'_, AppState>,
+    window: tauri::Window,
+    host_id: String,
+    operation: ss_server::ssh::files::FileOperation,
+) -> Result<ss_server::ssh::files::FileResult, String> {
+    let owner = format!("window:{}", window.label());
+    let result = ss_server::ssh::files::execute(&state, &owner, &host_id, operation).await;
+    if window.app_handle().get_webview_window(window.label()).is_none() {
+        ss_server::ssh::files::release_owner(&state, &owner).await;
+        return Err("窗口已关闭".into());
+    }
+    result
 }
 
 /// 分配下一个空闲 SSH 实例名（shell / shell@N，最小空闲；以 manager 占有权快照为唯一依据）。
@@ -1116,6 +1134,16 @@ fn run_gui() {
                 if let Some(channels) = app.try_state::<PortChannels>() {
                     channels.remove_window(&label);
                 }
+                if let Some(files) = app.try_state::<ssh_local_files::LocalFiles>() {
+                    files.release_window(&label);
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    let state = state.inner().clone();
+                    let owner = format!("window:{label}");
+                    tauri::async_runtime::spawn(async move {
+                        ss_server::ssh::files::release_owner(&state, &owner).await;
+                    });
+                }
                 let mgr = app.try_state::<AppState>().map(|s| s.manager.clone());
                 let session = app
                     .try_state::<SessionRegistry>()
@@ -1209,9 +1237,16 @@ fn run_gui() {
             app.manage(state);
             app.manage(supervisor);
             app.manage(CaptureFiles::default()); // 终端记录会话(GUI 侧独立状态,非应用日志)
+            app.manage(ssh_local_files::LocalFiles::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ssh_local_files::ssh_local_pick_upload,
+            ssh_local_files::ssh_local_read,
+            ssh_local_files::ssh_local_pick_download,
+            ssh_local_files::ssh_local_write,
+            ssh_local_files::ssh_local_mkdir,
+            ssh_local_files::ssh_local_release,
             share::get_share_addresses,
             share::get_local_share_hosts,
             library_get,
@@ -1241,6 +1276,7 @@ fn run_gui() {
             ssh_list,
             ssh_save,
             ssh_test,
+            ssh_files,
             ssh_trust_host,
             ssh_next_instance,
             resize_port,
