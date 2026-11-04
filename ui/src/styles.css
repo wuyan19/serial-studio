@@ -28,6 +28,9 @@
   --ink: #f7f8f8;
   --ink-dim: #b7bdc9;
   --ink-faint: #62666d;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.34);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.68);
+  --scrollbar-thumb-active: rgba(255, 255, 255, 0.82);
 
   /* Signal pair — content-true (RX in, TX out) */
   --rx: #4fd6c2;
@@ -107,24 +110,38 @@ button {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
-/* scrollbars — slim, graphite */
+/* Native scrollbars share hover colors across panels, editors, and terminals. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--surface-3) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+  /* Non-auto standard properties override WebKit thumb hover styling in Chromium. */
+  * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--surface-3);
+  background-color: var(--scrollbar-thumb);
+  min-height: 24px;
   border-radius: var(--r-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: var(--hairline);
-  background-clip: padding-box;
+  background-color: var(--scrollbar-thumb-hover);
+}
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 :focus-visible {
@@ -3233,6 +3250,9 @@ button {
    都挂在这一组上——新增浅色主题不再需要改任何选择器。
    信号对/步骤色:白底加深(语义不随家族变)。 */
 :root[data-lum="light"] {
+  --scrollbar-thumb: rgba(0, 0, 0, 0.26);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.44);
+  --scrollbar-thumb-active: rgba(0, 0, 0, 0.58);
   --rx: #0c7f73;
   --tx: #b06a16;
   --link: #187a43;
@@ -3582,13 +3602,6 @@ button {
 /* banner 关闭钮 hover:暗色默认叠白,浅底上不可见 → 叠黑 */
 :root[data-lum="light"] .banner__close:hover {
   background: rgba(0, 0, 0, 0.06);
-}
-/* 滚动条 thumb:浅色 surface-3 在白底上近不可见,加深一档 */
-:root[data-lum="light"] * {
-  scrollbar-color: #d4d6da transparent;
-}
-:root[data-lum="light"] *::-webkit-scrollbar-thumb {
-  background: #d4d6da;
 }
 /* 活动栏激活:浅色底的微光用叠黑(暗色默认是叠白) */
 :root[data-lum="light"] .act-icon[data-active="true"] {
