@@ -176,3 +176,51 @@ describe("shared configuration transports", () => {
     expect(invoke).toHaveBeenCalledWith("update_port_groups", { operation: { type: "create", name: "Field" } });
   });
 });
+
+describe("SSH file transports", () => {
+  let transport: RemoteTransport | LocalTransport | undefined;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", Socket);
+    vi.stubGlobal("window", { crypto: globalThis.crypto });
+    Socket.instances = [];
+  });
+  afterEach(() => {
+    transport?.dispose();
+    transport = undefined;
+    clearMocks(); vi.useRealTimers(); vi.unstubAllGlobals();
+  });
+  it("correlates file replies and keeps cascaded host routes intact", async () => {
+    transport = new RemoteTransport("127.0.0.1", 18700, "web-owner");
+    const socket = Socket.instances[0]; socket.open();
+    const first = transport.sshFiles("relay::child::ssh", { op: "open" });
+    const second = transport.sshFiles("other", { op: "open" });
+    expect(socket.sent[0]).toMatchObject({ action: "ssh_files", host_id: "relay::child::ssh" });
+    socket.receive({ type: "ssh_files_result", request_id: socket.sent[1].request_id, result: { kind: "opened", session: "two", path: "/home" } });
+    socket.receive({ type: "ssh_files_result", request_id: socket.sent[0].request_id, result: { kind: "opened", session: "one", path: "/root" } });
+    await expect(first).resolves.toMatchObject({ session: "one" });
+    await expect(second).resolves.toMatchObject({ session: "two" });
+  });
+  it("fails offline requests, times out and rejects pending work on disconnect", async () => {
+    transport = new RemoteTransport("127.0.0.1", 18700, "owner");
+    await expect(transport.sshFiles("h", { op: "open" })).rejects.toThrow("服务尚未连接");
+    const socket = Socket.instances[0]; socket.open();
+    const first = transport.sshFiles("h", { op: "open" });
+    const timeout = expect(first).rejects.toThrow("超时");
+    await vi.advanceTimersByTimeAsync(45_000); await timeout;
+    const next = transport.sshFiles("h", { op: "open" });
+    const failure = expect(next).rejects.toThrow(); socket.close(); await failure;
+    socket.receive({ type: "ssh_files_result", request_id: socket.sent[0].request_id, result: { kind: "ok" } });
+  });
+  it("uses window-scoped desktop IPC for file operations", async () => {
+    const invoke = vi.fn(async () => ({ kind: "ok" }));
+    mockIPC(invoke, { shouldMockEvents: true });
+    transport = new LocalTransport();
+    const operation = { op: "close", session: "test" } as const;
+    await expect(transport.sshFiles("relay::ssh", operation)).resolves.toEqual({ kind: "ok" });
+    expect(invoke).toHaveBeenCalledWith("ssh_files", { hostId: "relay::ssh", operation });
+    await vi.advanceTimersByTimeAsync(0);
+    transport.dispose();
+    await expect(transport.sshFiles("h", operation)).rejects.toThrow("transport disposed");
+  });
+});

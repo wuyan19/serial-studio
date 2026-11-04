@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
   IconBolt, IconCheck, IconCode, IconGear, IconGlobe, IconInfo,
@@ -10,18 +10,9 @@ import { useDialogA11y, useEscClose } from "./primitives";
 
 export type WorkspacePanel = "ports" | "macros" | "scripts";
 
-function SidebarIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="16" rx="3" />
-      <path d="M9 4v16" />
-    </svg>
-  );
-}
-
 export function WorkspaceSidebar({
   panel, onPanel, showScripts, counts, running, failed, query,
-  onQuery, onNew, onRemote, onShare, connected, width, collapsed, onToggle, tools, children,
+  onQuery, onNew, onRemote, onShare, connected, width, collapsed, tools, children,
 }: {
   panel: WorkspacePanel;
   onPanel: (panel: WorkspacePanel) => void;
@@ -37,10 +28,10 @@ export function WorkspaceSidebar({
   connected: boolean;
   width: number;
   collapsed: boolean;
-  onToggle: () => void;
   tools: ReactNode;
   children: ReactNode;
 }) {
+  const panelId = useId();
   const label = panel === "ports" ? "连接" : panel === "macros" ? "宏" : "脚本";
   const entries = [
     { id: "ports" as const, label: "连接", icon: <IconPlug /> },
@@ -50,17 +41,17 @@ export function WorkspaceSidebar({
   return (
     <aside className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`} style={{ width: collapsed ? 64 : width + 64 }} aria-label="工作空间导航">
       <div className="sidebar__rail">
-        <div className="sidebar__toggle-row">
-          <button className="icon-btn" onClick={onToggle} title={collapsed ? "展开侧栏" : "收起侧栏"} aria-label="切换侧栏" aria-expanded={!collapsed}><SidebarIcon /></button>
-        </div>
         <nav className="workspace-nav" aria-label="功能导航">
           {entries.map((entry) => {
             const status = entry.id === "ports" ? "" : failed[entry.id] ? "，有未查看的失败结果" : running[entry.id] ? "，正在运行" : "";
+            const expanded = !collapsed && panel === entry.id;
             return (
             <button
               key={entry.id}
-              className={`workspace-nav__item${panel === entry.id ? " active" : ""}`}
-              aria-current={panel === entry.id ? "page" : undefined}
+              className={`workspace-nav__item${expanded ? " active" : ""}`}
+              aria-current={expanded ? "page" : undefined}
+              aria-expanded={expanded}
+              aria-controls={panelId}
               aria-label={`${entry.label}${status}`}
               title={`${entry.label} · ${counts[entry.id]}${status}`}
               onClick={() => onPanel(entry.id)}
@@ -83,7 +74,7 @@ export function WorkspaceSidebar({
           {tools}
         </div>
       </div>
-      <div className="sidebar__panel" hidden={collapsed}>
+      <div id={panelId} className="sidebar__panel" hidden={collapsed}>
         <button className="workspace-new" onClick={onNew}><IconPlus /><span>新建{label}</span></button>
         <label className="workspace-search">
           <span aria-hidden="true">⌕</span>

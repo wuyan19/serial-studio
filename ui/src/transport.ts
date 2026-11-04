@@ -3,6 +3,7 @@ import { Channel } from "@tauri-apps/api/core";
 import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
 import type { PortGroupsOperation, PortGroupsSnapshot } from "./port-groups";
 import type { LibraryChanges, LibraryKind, LibrarySnapshot } from "./library-protocol";
+import type { SshFileOperation, SshFileResult } from "./ssh-files";
 
 export interface SshTestResult {
   ok: boolean;
@@ -97,6 +98,7 @@ export interface Transport {
   sshSave(hosts: SshHost[]): Promise<void>;
   /** 测试连接（建连+认证+即拆）；结果也经 onSshTestResult 推送。 */
   sshTest(hostId: string): Promise<SshTestResult>;
+  sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult>;
   /** 分配下一个空闲实例名（shell / shell@N，最小空闲）。 */
   sshNextInstance(hostId: string, base: string): Promise<string>;
   /** 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。 */
@@ -270,6 +272,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private portGroupsRequestId = 0;
   private libraryRequests = new Map<string, Controller<LibrarySnapshot> & { timer: ReturnType<typeof setTimeout> }>();
   private libraryRequestId = 0;
+  private fileRequests = new Map<string, Controller<SshFileResult> & { timer: ReturnType<typeof setTimeout> }>();
+  private fileRequestId = 0;
   /** WS 就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。每次重连重建。 */
   private openPromise!: Promise<void>;
   private openResolve: () => void = () => {};
@@ -458,6 +462,15 @@ export class RemoteTransport extends TransportEventBase implements Transport {
           this.sshInstanceControllers.delete(msg.host_id);
           break;
         }
+        case "ssh_files_result": {
+          const pending = this.fileRequests.get(msg.request_id);
+          if (!pending) break;
+          clearTimeout(pending.timer);
+          this.fileRequests.delete(msg.request_id);
+          if (msg.error || !msg.result) pending.reject(new Error(msg.error || "文件服务返回了无效结果"));
+          else pending.resolve(msg.result as SshFileResult);
+          break;
+        }
       }
     };
   }
@@ -505,6 +518,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
 
   /** reject 所有在途请求（断连 / dispose），防 getVersion/getScriptSkill/open 的 Promise 永悬。 */
   private rejectPending(err: Error) {
+    this.fileRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.fileRequests.clear();
     this.libraryRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
     this.libraryRequests.clear();
     this.portGroupsRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
@@ -663,6 +678,23 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     });
     await this.send(JSON.stringify({ action: "ssh_test", host_id: hostId }));
     return result;
+  }
+  async sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `files-${++this.fileRequestId}`;
+    return new Promise<SshFileResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.fileRequests.delete(request_id);
+        reject(new Error("SSH 文件请求超时，请重新打开文件面板"));
+      }, 45_000);
+      this.fileRequests.set(request_id, { resolve, reject, timer });
+      try { this.ws.send(JSON.stringify({ action: "ssh_files", request_id, host_id: hostId, operation })); }
+      catch (error) {
+        clearTimeout(timer);
+        this.fileRequests.delete(request_id);
+        reject(error);
+      }
+    });
   }
   async sshNextInstance(hostId: string, base: string) {
     const result = new Promise<string>((resolve, reject) => {
@@ -911,6 +943,10 @@ export class LocalTransport extends TransportEventBase implements Transport {
   }
   async sshNextInstance(hostId: string, base: string) {
     return tauriInvoke<string>("ssh_next_instance", { hostId, base });
+  }
+  async sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult> {
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<SshFileResult>("ssh_files", { hostId, operation });
   }
   async sshTrustHost(hostId: string) {
     return tauriInvoke<string>("ssh_trust_host", { hostId });

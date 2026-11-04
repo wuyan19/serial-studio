@@ -98,6 +98,7 @@ import {
   validateMacro,
 } from "./components";
 import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
+import { SshFileWorkspace } from "./components/ssh-file-workspace";
 import { TitleBar } from "./components/titlebar";
 import { ContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { ConnectionLauncher, WorkspaceSettingsMenu, WorkspaceSidebar, type WorkspacePanel } from "./components/workspace";
@@ -1374,59 +1375,67 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const g = groups[node.groupId];
     if (!g) return null;
     const isFocused = node.groupId === focusedGroupId;
+    const fileTarget = sshTabTarget(portRowOf(g.activePort), Boolean(sshHostOfPid(g.activePort)));
     return (
-      <GroupView
-        key={g.id}
-        group={g}
-        focused={isFocused}
-        aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
-        aliasOf={aliasOf}
-        sourceLabelOf={(pid) => {
-          // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
-          // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
-          const d = portRowOf(pid)?.device;
-          if (d) {
-            if (d.via !== "local") return d.label;
-            if (isLocal || remotes.length === 0) return undefined;
-            const s = remotes[0];
-            return s.nickname?.trim() || `${s.host}:${s.port}`;
-          }
-          if (remotes.length === 0) return undefined;
-          const { devId } = parsePortId(pid);
-          if (devId === "local") return undefined;
-          const r = remotes.find((x) => x.id === devId);
-          return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
-        }}
-        disconnectedOf={(pid) => disconnectedPorts.has(pid)}
-        onReconnectTab={reconnectPort}
-        onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
-        onCloseTab={closePort}
-        onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
-        onTabContextMenu={(port, position) => setTabMenu({ port, groupId: g.id, ...position })}
-        onCommitAlias={commitAlias}
-        onCancelAlias={() => setAliasEdit(null)}
-        onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
-        onWrite={(p, data) => {
-          touch(p, "tx");
-          cmdTransport()?.write(p, data);
-        }}
-        onReady={(p, inst) => {
-          if (inst) terminalsRef.current.set(p, inst);
-          else terminalsRef.current.delete(p);
-        }}
-        searchOpen={searchOpen}
-        activeTerm={isFocused ? activeTerm : undefined}
-        onCloseSearch={() => {
-          setSearchOpen(false);
-          activeTerm?.term.focus();
-        }}
-        onDragOverHalf={onDragOverHalf}
-        onDragLeave={onPaneDragLeave}
-        onDropHalf={dropHalf}
-        dropHint={dropHint}
-        onDropOnTabs={movePort}
-        termContainerRef={(el) => setGroupContainer(node.groupId, el)}
-      />
+      <SshFileWorkspace key={g.id} transport={cmdTransport()} hostId={fileTarget?.hostId}
+        label={sshHostOfPid(g.activePort)?.nickname || fileTarget?.hostId || "SSH"}>
+        {(fileTools, filePanel) => (
+          <GroupView
+            key={g.id}
+            group={g}
+            focused={isFocused}
+            aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
+            aliasOf={aliasOf}
+            sourceLabelOf={(pid) => {
+              // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
+              // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
+              const d = portRowOf(pid)?.device;
+              if (d) {
+                if (d.via !== "local") return d.label;
+                if (isLocal || remotes.length === 0) return undefined;
+                const s = remotes[0];
+                return s.nickname?.trim() || `${s.host}:${s.port}`;
+              }
+              if (remotes.length === 0) return undefined;
+              const { devId } = parsePortId(pid);
+              if (devId === "local") return undefined;
+              const r = remotes.find((x) => x.id === devId);
+              return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
+            }}
+            disconnectedOf={(pid) => disconnectedPorts.has(pid)}
+            onReconnectTab={reconnectPort}
+            onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
+            onCloseTab={closePort}
+            onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
+            onTabContextMenu={(port, position) => setTabMenu({ port, groupId: g.id, ...position })}
+            onCommitAlias={commitAlias}
+            onCancelAlias={() => setAliasEdit(null)}
+            onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
+            onWrite={(p, data) => {
+              touch(p, "tx");
+              cmdTransport()?.write(p, data);
+            }}
+            onReady={(p, inst) => {
+              if (inst) terminalsRef.current.set(p, inst);
+              else terminalsRef.current.delete(p);
+            }}
+            searchOpen={searchOpen}
+            activeTerm={isFocused ? activeTerm : undefined}
+            onCloseSearch={() => {
+              setSearchOpen(false);
+              activeTerm?.term.focus();
+            }}
+            onDragOverHalf={onDragOverHalf}
+            onDragLeave={onPaneDragLeave}
+            onDropHalf={dropHalf}
+            dropHint={dropHint}
+            onDropOnTabs={movePort}
+            termContainerRef={(el) => setGroupContainer(node.groupId, el)}
+            fileTools={fileTools}
+            filePanel={filePanel}
+          />
+        )}
+      </SshFileWorkspace>
     );
   };
 
@@ -2039,8 +2048,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         <WorkspaceSidebar
           panel={sidebarPanel}
           collapsed={activity === null}
-          onToggle={() => setActivity(activity === null ? lastActivity.current : null)}
-          onPanel={(panel) => { setActivity(panel); if (panel !== sidebarPanel) setSidebarQuery(""); }}
+          onPanel={(panel) => { setActivity(current => current === panel ? null : panel); if (panel !== sidebarPanel) setSidebarQuery(""); }}
           showScripts={showScripts}
           counts={{ ports: portGroups.reduce((sum, group) => sum + (group.kind === "ssh" ? 1 : group.ports.length), 0), macros: Object.keys(macros).length, scripts: Object.keys(scripts).length }}
           running={{ macros: macroRunning, scripts: scriptRunning }}

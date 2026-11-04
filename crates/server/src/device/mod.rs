@@ -70,6 +70,14 @@ pub struct DeviceClientManager {
 }
 
 impl DeviceClientManager {
+    pub(crate) fn file_remote(&self, id: &str) -> Option<RemoteDevice> {
+        self.devices
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|c| c.device().clone())
+    }
+
     /// 空管理器(测试/无设备;不 spawn,注册设备需手动 update + start)。
     /// instance_id:本机实例身份(握手自报);测试注入固定值,不落盘。
     pub fn empty(meta_bus: broadcast::Sender<()>, instance_id: impl Into<String>) -> Self {

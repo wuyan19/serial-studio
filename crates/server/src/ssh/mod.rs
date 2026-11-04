@@ -14,6 +14,7 @@
 //! - 本文件      管理器门面:注册表同步、会话池、open_blocking(CompositeOpener 入口)、
 //!   实例键分配(纯函数)
 
+pub mod files;
 pub mod port_io;
 pub mod session;
 pub mod store;
@@ -108,6 +109,7 @@ impl SshOpenError {
 
 /// SSH 设备管理器。挂在 AppState(跨 ServiceSupervisor 热重启保留)。
 pub struct SshManager {
+    pub(crate) files: files::FileStore,
     /// 内存权威注册表(构造时读盘;save/remove 后同步)。
     registry: Mutex<Vec<SshHostRecord>>,
     /// hostId → 会话(懒建;dead 会话在下次 open 时替换)。
@@ -121,6 +123,7 @@ impl SshManager {
     /// 读 ssh_hosts.json 构造(生产组装点)。
     pub fn from_registry() -> Self {
         Self {
+            files: Default::default(),
             registry: Mutex::new(
                 store::load()
                     .into_iter()
@@ -135,6 +138,7 @@ impl SshManager {
     /// 空管理器(测试)。
     pub fn empty() -> Self {
         Self {
+            files: Default::default(),
             registry: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
             instance_aliases: Mutex::new(std::collections::HashMap::new()),
