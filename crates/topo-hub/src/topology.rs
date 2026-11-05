@@ -316,7 +316,8 @@ pub fn update(
         if links.is_none() {
             let ids: std::collections::HashSet<&str> =
                 topo.members.iter().map(|m| m.device.as_str()).collect();
-            topo.links.retain(|l| ids.contains(l.from.as_str()) && ids.contains(l.to.as_str()));
+            topo.links
+                .retain(|l| ids.contains(l.from.as_str()) && ids.contains(l.to.as_str()));
         }
     }
     if let Some(l) = links {
@@ -355,7 +356,7 @@ fn resolve_members(inputs: &[MemberInput]) -> Result<Vec<TopologyMember>, String
             }),
             Some(_) => {} // 重复成员：保留首个
             None => errors.push(format!(
-                "设备「{}」不存在（device_list 可查，先 device_create 注册）",
+                "设备「{}」不存在（device_get 可查，先 device_create 注册）",
                 input.device
             )),
         }
@@ -374,7 +375,8 @@ fn resolve_links(
     members: &[TopologyMember],
 ) -> Result<Vec<TopologyLink>, String> {
     let resolve_end = |raw: &str| -> Result<String, String> {
-        let d = crate::device::find(raw).ok_or_else(|| format!("连线端点「{raw}」不是已注册设备"))?;
+        let d =
+            crate::device::find(raw).ok_or_else(|| format!("连线端点「{raw}」不是已注册设备"))?;
         if !members.iter().any(|m| m.device == d.id) {
             return Err(format!(
                 "连线端点「{raw}」（{}）不是本拓扑成员，请先加入成员",
@@ -390,11 +392,18 @@ fn resolve_links(
         match (resolve_end(&input.from), resolve_end(&input.to)) {
             (Ok(f), Ok(t)) => {
                 if f == t {
-                    errors.push(format!("连线「{} ↔ {}」两端是同一设备", input.from, input.to));
+                    errors.push(format!(
+                        "连线「{} ↔ {}」两端是同一设备",
+                        input.from, input.to
+                    ));
                     continue;
                 }
                 // 无序对归一后去重（同向/反向重复都只保留首个）
-                let key = if f < t { (f.clone(), t.clone()) } else { (t.clone(), f.clone()) };
+                let key = if f < t {
+                    (f.clone(), t.clone())
+                } else {
+                    (t.clone(), f.clone())
+                };
                 if !seen.insert(key) {
                     continue;
                 }
@@ -453,7 +462,10 @@ mod tests {
                 name: a.clone(),
                 model: String::new(),
                 location: String::new(),
-                channels: vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }],
+                channels: vec![Channel::Serial {
+                    port: "COM4".into(),
+                    config: ss_core::SerialConfig::default(),
+                }],
             },
             state,
         )
@@ -492,36 +504,18 @@ mod tests {
         assert!(err.contains("ghost") && err.contains("ghost2"), "{err}");
 
         // 正常创建：成员可传名称；连线端点也可传名称（定型为设备 id）
-        let t = create(
-            &n,
-            "测试",
-            &[member(&a), member(&b)],
-            &[link(&a, &b)],
-        )
-        .unwrap();
+        let t = create(&n, "测试", &[member(&a), member(&b)], &[link(&a, &b)]).unwrap();
         assert_eq!(t.members.len(), 2);
         assert_eq!(t.links.len(), 1);
         let dev_b = device::find(&b).unwrap();
         assert_eq!(t.links[0].to, dev_b.id, "连线定型为设备 id");
 
         // 自环拒绝
-        let err = create(
-            &unique_name("拓扑"),
-            "",
-            &[member(&a)],
-            &[link(&a, &a)],
-        )
-        .unwrap_err();
+        let err = create(&unique_name("拓扑"), "", &[member(&a)], &[link(&a, &a)]).unwrap_err();
         assert!(err.contains("同一设备"), "{err}");
 
         // 连线端点不是成员
-        let err = create(
-            &unique_name("拓扑"),
-            "",
-            &[member(&a)],
-            &[link(&a, &b)],
-        )
-        .unwrap_err();
+        let err = create(&unique_name("拓扑"), "", &[member(&a)], &[link(&a, &b)]).unwrap_err();
         assert!(err.contains("不是本拓扑成员"), "{err}");
 
         // 设备删除被拓扑引用拦截
@@ -578,7 +572,13 @@ mod tests {
             to_port: Some("  ".into()), // 空白端口 → None
             label: Some("上联".into()),
         };
-        let t = create(&unique_name("端口拓扑"), "", &[m(&a, 120.5, -40.0), m(&b, 0.0, 0.0)], &[l]).unwrap();
+        let t = create(
+            &unique_name("端口拓扑"),
+            "",
+            &[m(&a, 120.5, -40.0), m(&b, 0.0, 0.0)],
+            &[l],
+        )
+        .unwrap();
 
         let [ma, mb] = [&t.members[0], &t.members[1]];
         assert_eq!((ma.x, ma.y), (120.5, -40.0));
@@ -671,7 +671,11 @@ mod tests {
         assert!(matches!(&d1.channels[0], Channel::Serial { port, .. } if port == "COM4"));
         let d2 = device::find(&list[0].members[1].device).unwrap();
         assert!(matches!(&d2.channels[0], Channel::Ssh(s) if s.id == "ssh-x1"));
-        assert!(d2.name.contains("车间网关"), "SSH 设备用凭据标签命名: {}", d2.name);
+        assert!(
+            d2.name.contains("车间网关"),
+            "SSH 设备用凭据标签命名: {}",
+            d2.name
+        );
         // 重读不再迁移（文件已是新形态）
         assert_eq!(load().len(), 1);
 

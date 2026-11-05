@@ -25,10 +25,13 @@ npm run dev --prefix ui-topo     # 5175 开发服，/api 代理到 127.0.0.1:188
 claude mcp add --scope user --transport http TopoHub http://<host>:18800/mcp
 ```
 
-在 serial_studio 14 个串口/脚本工具（含 `port_open`/`port_close`，无人值守流程可全程 MCP）之外新增 9 个平台工具：
+在 serial_studio 10 个串口/脚本工具（含 `port_open`/`port_close`，无人值守流程可全程 MCP）之外新增 12 个平台工具：
 
-- 拓扑：`topo_list` / `topo_get` / `topo_create` / `topo_update` / `topo_delete`——成员（设备/端点）+ 连线（`links`，图渲染用）
+- 拓扑：`topo_get`（不传参=列表）/ `topo_create` / `topo_update` / `topo_delete`——成员（设备/端点）+ 连线（`links`，图渲染用）
+- 设备：`device_get`（不传参=列表）/ `device_create` / `device_update` / `device_delete`
 - 租约：`lease_acquire`（支持 `wait_timeout_ms` 排队等待）/ `lease_renew` / `lease_release` / `lease_status`——排他写权，写类操作（含 port_open）须持租约；强释放时顺带收回该会话开的端口
+
+并入列表粒度的旧名（`topo_list`/`device_list` 等）保留为分发别名，tools/list 不出现。
 
 控制台含拓扑图视图（详情页"列表 ⇄ 图"切换，节点按设备分组、占用高亮）。
 

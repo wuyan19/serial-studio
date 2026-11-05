@@ -71,9 +71,9 @@
 | 工具 | 闸 |
 |---|---|
 | `serial_send` / `serial_read` / `serial_clear` | 需持覆盖该端口（经属主设备）的租约 |
-| `serial_debug_script` / `serial_run_script` | 启动时按 `port` 参数检查；脚本内跨端口写不二次拦截（局限，P2 下沉 core 再拦） |
+| `serial_script`（含旧名 `serial_debug_script` / `serial_run_script` 别名） | 启动时按 `port` 参数检查；脚本内跨端口写不二次拦截（局限，P2 下沉 core 再拦） |
 | `port_open` / `port_close`（ss-server 内置，serial-studio 同享） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；强释放顺带收回 |
-| `serial_list` / `serial_status` / `serial_grep` | 免闸（非破坏，观察开放） |
+| `serial_list`（含单口详情）/ `serial_grep` | 免闸（非破坏，观察开放） |
 
 被闸拒绝时错误信息引导先 `lease_acquire`（未注册端口引导 `device_create`），并附当前持有者与到期时间。
 
@@ -83,12 +83,11 @@
 
 **会话**：`initialize` 响应头加 `Mcp-Session-Id`（Streamable HTTP 标准约定），结果体同时带 `session_token` 字段兜底；租约类工具均接受可选 `token` 参数。优先级：参数 > 头 > 匿名（匿名只读）。token → Principal 注册表在内存，`label` 由 AI 在 acquire 时自报。
 
-**新工具**（前 5 个 P0，后 4 个 P1）：
+**新工具**（拓扑 4 + 设备 4 + 租约 4；`topo_list`/`device_list` 已并入 `topo_get`/`device_get` 的无参分支，旧名为分发别名）：
 
 | 工具 | 入参要点 | 出参要点 |
 |---|---|---|
-| `topo_list` | — | 拓扑数组：id、name、成员数、占用摘要 |
-| `topo_get` | `topo`（id 或 name） | 成员端点明细：在线状态、被谁占用 |
+| `topo_get` | `topo`（id 或 name；省略=列表） | 省略时拓扑数组：id、name、成员数、占用摘要；传入时成员端点明细：在线状态、被谁占用 |
 | `topo_create` | `name`、`description?`、`members: [{key, note?}]` | 定型后的成员与 id |
 | `topo_update` | `topo` + 可变字段 | 同上 |
 | `topo_delete` | `topo` | — |
@@ -101,9 +100,8 @@
 
 | 工具 | 入参要点 | 出参要点 |
 |---|---|---|
-| `device_list` | — | 设备行：名称、通道摘要（串口/SSH 各自目标）、占用状态 |
-| `device_get` | `device`（id 或 name） | 通道明细（解析凭据标签/端口在线态）、占用 |
-| `device_create` | `name`、`model?`、`location?`、`channels: [{type:serial,port} \| {type:ssh,ref}]` | 定型后的设备 |
+| `device_get` | `device`（id 或 name；省略=列表） | 省略时设备行：名称、通道摘要、占用状态；传入时通道明细（解析凭据标签/端口在线态）、占用 |
+| `device_create` | `name`、`model?`、`location?`、`channels: [{type:serial,port} \| {type:ssh,host,port?,username,nickname?,auth}]` | 定型后的设备 |
 | `device_update` | `device` + 可变字段（提供才更新） | 同上 |
 | `device_delete` | `device`（被拓扑引用时拒绝并列出） | — |
 

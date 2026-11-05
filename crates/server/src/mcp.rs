@@ -3,7 +3,10 @@
 //! 移植自 terminal-serial，适配 serial-studio 的异步 SerialManager + 多串口：
 //! - 工具加 `port` 参数（缺省时用唯一打开的串口）
 //! - handle_request 与各 tool 函数均为 async（调 manager 的 async 方法）
-//! - 暴露 12 工具：6 基础(list/send/read/status/grep/clear) + 2 脚本执行(debug_script/run_script) + 4 脚本库(save/get/list/delete)
+//! - 暴露 10 工具：list(含单口详情)/send/read/grep/clear + script(执行,code|name)
+//!   + save(含 delete)/get(含 list) 脚本库 + port_open/close。
+//!   并入的旧粒度(serial_status/debug_script/run_script/list_scripts/delete_script)
+//!   保留为分发别名——tools/list 不出现，老调用方不破。
 
 use crate::address::AliasMatch;
 use crate::AppState;
@@ -19,8 +22,9 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// MCP 操作的持有主体——同 token 的开/关/写共用一个会话，端口占用按会话计；
 /// topo-hub 强释放租约时经 [`mcp_session_of`] 找到会话，收回该 AI 开的端口。
 /// 进程级 static 而非 AppState 字段：会话是 MCP 层概念，与请求状态无关。
-static MCP_SESSIONS: std::sync::Mutex<Option<std::collections::HashMap<String, ss_core::SessionId>>> =
-    std::sync::Mutex::new(None);
+static MCP_SESSIONS: std::sync::Mutex<
+    Option<std::collections::HashMap<String, ss_core::SessionId>>,
+> = std::sync::Mutex::new(None);
 
 /// 取（或建）token 的 MCP 会话。
 fn session_for(token: &str) -> ss_core::SessionId {
@@ -59,11 +63,7 @@ pub async fn mcp_handler(
         .as_deref()
         == Some("initialize");
     let token = is_init
-        .then(|| {
-            resp["result"]["session_token"]
-                .as_str()
-                .map(str::to_string)
-        })
+        .then(|| resp["result"]["session_token"].as_str().map(str::to_string))
         .flatten();
     let mut out = Json(resp).into_response();
     if let Some(token) = token {
@@ -142,10 +142,12 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
     let mut tools: Vec<Value> = json!([
             {
                 "name": "serial_list",
-                "description": "列出所有端口(本机串口/远程设备/SSH 终端):完整键、别名、设备昵称与寻址提示、打开状态,中点分隔的扁平单行。",
+                "description": "列出所有端口(本机串口/远程设备/SSH 终端):完整键、别名、设备昵称与寻址提示、打开状态,中点分隔的扁平单行。传 port 时改为输出该端口的详细配置(串口=波特率/数据位/校验/流控/占用数;SSH 设备=连接身份与端点)——须已打开。",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5）；传了输出该端口详细配置而非清单" }
+                    }
                 }
             },
             {
@@ -176,16 +178,6 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                 }
             },
             {
-                "name": "serial_status",
-                "description": "获取已打开串口的配置：波特率、数据位、校验、停止位、流控、换行符、占用数与别名。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "port": { "type": "string", "description": "串口寻址:完整键/别名/昵称作用域(test::COM5),缺省=唯一打开的串口" }
-                    }
-                }
-            },
-            {
                 "name": "serial_grep",
                 "description": "在接收缓冲区中搜索匹配模式（非破坏、可反复；返回全部匹配）。text 模式为行正则，hex 模式按字节序列。",
                 "inputSchema": {
@@ -210,39 +202,27 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                 }
             },
             {
-                "name": "serial_debug_script",
-                "description": "在串口上临时执行一段 JS 脚本（QuickJS）做调试验证，调通后可经 serial_save_script 落库、serial_run_script 按名复用。脚本内可用 send/expect/clear/sleep（均可带 [port] 跨串口，缺省为脚本运行端口）、同步 log（日志随本工具响应返回；服务端开启日志自动落盘时同时写入磁盘并在响应末尾给出文件路径）及读写宿主机文件的 file_stat/file_md5/read_file/read_b64_chunk/write_file/append_file；签名与约束详见 serial_script_guide prompt，调用前先获取。受 enable_scripting 开关限制，默认关闭；运行上限 5 分钟，超时中止。",
+                "name": "serial_script",
+                "description": "在串口上执行 JS 脚本（QuickJS）：传 code 临时执行一段源码（调通后可经 serial_save_script 落库复用），或传 name 执行脚本库中已保存的脚本——二选一。脚本内可用 send/expect/clear/sleep（均可带 [port] 跨串口，缺省为脚本运行端口）、同步 log（日志随本工具响应返回；服务端开启日志自动落盘时同时写入磁盘并在响应末尾给出文件路径）及读写宿主机文件的 file_stat/file_md5/read_file/read_b64_chunk/write_file/append_file；签名与约束详见 serial_script_guide prompt，调用前先获取。受 enable_scripting 开关限制，默认关闭；运行上限 5 分钟，超时中止。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "code": { "type": "string", "description": "JS 源码（临时执行；顶层可直接 await，如 await send(\"AT\")）——与 name 二选一" },
+                        "name": { "type": "string", "description": "脚本库中的脚本名（serial_get_script 不传 name 可查）——与 code 二选一" },
                         "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
-                        "code": { "type": "string", "description": "JS 源码（顶层可直接 await，如 await send(\"AT\")）" },
-                        "args": { "type": "object", "description": "运行时参数（注入脚本 args.<name>），键值均 string", "additionalProperties": { "type": "string" } }
-                    },
-                    "required": ["code"]
-                }
-            },
-            {
-                "name": "serial_run_script",
-                "description": "按 name 执行脚本库（scripts.json）中已保存的脚本。执行路径与约束同 serial_debug_script（enable_scripting 闸门、5 分钟运行上限）；脚本内 log 的调试日志随本工具响应返回，服务端开启日志自动落盘时同时写入磁盘并在响应末尾给出文件路径。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "脚本库中的脚本名（serial_list_scripts 可查）" },
-                        "port": { "type": "string", "description": "串口寻址：完整键/别名/昵称作用域（如 test::COM5），缺省时用唯一打开的串口" },
-                        "args": { "type": "object", "description": "运行时参数（注入脚本 args.<name>），键值均 string，未传的键用脚本声明的 default 填充", "additionalProperties": { "type": "string" } }
-                    },
-                    "required": ["name"]
+                        "args": { "type": "object", "description": "运行时参数（注入脚本 args.<name>），键值均 string；按 name 执行时未传的键用脚本声明的 default 填充", "additionalProperties": { "type": "string" } }
+                    }
                 }
             },
             {
                 "name": "serial_save_script",
-                "description": "保存（或覆盖）一个 JS 脚本到脚本库（scripts.json），供日后经 serial_run_script 按名执行或在 UI 复用。name 是唯一存取键，已存在则覆盖。数据管理而非执行代码，不受 enable_scripting 限制。",
+                "description": "脚本库（scripts.json）写入：保存（或覆盖）一个 JS 脚本供日后经 serial_script 按名执行或在 UI 复用；delete=true 时删除该名脚本（幂等）。name 是唯一存取键，已存在则覆盖。数据管理而非执行代码，不受 enable_scripting 限制。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "脚本唯一名（存取键，如 \"init-modem\"）" },
-                        "code": { "type": "string", "description": "JS 源码（顶层可直接 await）" },
+                        "code": { "type": "string", "description": "JS 源码（顶层可直接 await）；省略且 delete=true 时为删除" },
+                        "delete": { "type": "boolean", "description": "true 时删除该名脚本（幂等），与 code 互斥", "default": false },
                         "description": { "type": "string", "description": "用途说明（可选）" },
                         "group": { "type": "string", "description": "分组名（可选，UI 按组折叠）" },
                         "params": {
@@ -261,26 +241,17 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                             }
                         }
                     },
-                    "required": ["name", "code"]
-                }
-            },
-            {
-                "name": "serial_get_script",
-                "description": "按 name 读取脚本库（scripts.json）中一个脚本的完整定义（description/group/params/code 全文）；覆盖改写前先经此取原文。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "脚本库中的脚本名（serial_list_scripts 可查）" }
-                    },
                     "required": ["name"]
                 }
             },
             {
-                "name": "serial_list_scripts",
-                "description": "列出脚本库（scripts.json）中所有脚本的元数据（name/description/group/params），不含 code 全文（要 code 用 serial_get_script）。",
+                "name": "serial_get_script",
+                "description": "查看脚本库（scripts.json）：不传 name 列出所有脚本的元数据（name/description/group/params，不含 code 全文）；传 name 返回该脚本的完整定义（含 code 全文）——覆盖改写前先经此取原文。",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "name": { "type": "string", "description": "脚本名；省略则列出全部脚本元数据" }
+                    }
                 }
             },
             {
@@ -305,17 +276,6 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                         "port": { "type": "string", "description": "端口键（本会话曾 port_open 的）" }
                     },
                     "required": ["port"]
-                }
-            },
-            {
-                "name": "serial_delete_script",
-                "description": "从脚本库删除一个脚本。无此名也不报错（幂等）。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "要删除的脚本名" }
-                    },
-                    "required": ["name"]
                 }
             }
     ])
@@ -349,37 +309,51 @@ async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppSta
         "serial_send"
             | "serial_read"
             | "serial_clear"
+            | "serial_script"
             | "serial_debug_script"
             | "serial_run_script"
             | "port_open"
             | "port_close"
     ) {
-        if let Some(denied) =
-            crate::mcp_ext::intercept(&state.mcp_extensions, name, arguments.clone(), principal, state)
-                .await
+        if let Some(denied) = crate::mcp_ext::intercept(
+            &state.mcp_extensions,
+            name,
+            arguments.clone(),
+            principal,
+            state,
+        )
+        .await
         {
             return denied;
         }
     }
     match name {
         "serial_list" => tool_serial_list(arguments, state).await,
+        // 旧粒度别名：并入后的同名语义经参数分支还原，老调用方不破
+        //（delete 例外——旧调用无 delete 标志，须走原处理器）
+        "serial_status" => tool_serial_status(arguments, state).await,
         "serial_send" => tool_serial_send(arguments, state).await,
         "serial_read" => tool_serial_read(arguments, state).await,
-        "serial_status" => tool_serial_status(arguments, state).await,
         "serial_grep" => tool_serial_grep(arguments, state).await,
         "serial_clear" => tool_serial_clear(arguments, state).await,
-        "serial_debug_script" => tool_serial_debug_script(arguments, principal, state).await,
-        "serial_run_script" => tool_serial_run_script(arguments, principal, state).await,
+        "serial_script" | "serial_debug_script" | "serial_run_script" => {
+            tool_serial_script(arguments, principal, state).await
+        }
         "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
-        "serial_get_script" => tool_serial_get_script(arguments).await,
-        "serial_list_scripts" => tool_serial_list_scripts(arguments).await,
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
+        "serial_get_script" | "serial_list_scripts" => tool_serial_get_script(arguments).await,
         "port_open" => tool_port_open(arguments, principal, state).await,
         "port_close" => tool_port_close(arguments, principal, state).await,
         other => {
             // 内置未命中 → 委托扩展（topo-hub 等）；扩展也不认得才是真未知。
-            match crate::mcp_ext::dispatch(&state.mcp_extensions, other, arguments, principal, state)
-                .await
+            match crate::mcp_ext::dispatch(
+                &state.mcp_extensions,
+                other,
+                arguments,
+                principal,
+                state,
+            )
+            .await
             {
                 Some(result) => result,
                 None => error_text(format!("Unknown tool: {}", other)),
@@ -424,7 +398,8 @@ async fn tool_port_open(args: Value, principal: Option<&str>, state: &AppState) 
     };
     let Some(token) = principal else {
         return error_text(
-            "打开端口须会话标识：initialize 取 token（标准客户端自动带头），或在工具参数传 token".into(),
+            "打开端口须会话标识：initialize 取 token（标准客户端自动带头），或在工具参数传 token"
+                .into(),
         );
     };
     let line_ending = match args.get("line_ending").and_then(|v| v.as_str()) {
@@ -433,12 +408,19 @@ async fn tool_port_open(args: Value, principal: Option<&str>, state: &AppState) 
         Some(other) => return error_text(format!("line_ending 仅支持 lf/crlf: {other}")),
     };
     let config = ss_core::SerialConfig {
-        baud_rate: args.get("baud_rate").and_then(|b| b.as_u64()).unwrap_or(115_200) as u32,
+        baud_rate: args
+            .get("baud_rate")
+            .and_then(|b| b.as_u64())
+            .unwrap_or(115_200) as u32,
         line_ending,
         ..ss_core::SerialConfig::default()
     };
     let session = session_for(token);
-    match state.manager.acquire(port.to_string(), config, session).await {
+    match state
+        .manager
+        .acquire(port.to_string(), config, session)
+        .await
+    {
         Ok(ss_core::AcquireResult::Opened {
             config,
             holders,
@@ -484,7 +466,11 @@ async fn tool_port_close(args: Value, principal: Option<&str>, state: &AppState)
     }
 }
 
-async fn tool_serial_list(_args: Value, state: &AppState) -> Value {
+async fn tool_serial_list(args: Value, state: &AppState) -> Value {
+    // 传 port → 该端口详细配置（原 serial_status 并入）；不传列全部端口
+    if args.get("port").and_then(|v| v.as_str()).is_some() {
+        return tool_serial_status(args, state).await;
+    }
     // 合并视图(本地 + 远端设备桶 + 别名 + 本地占有权覆盖)——与 UI/REST/WS 同一数据源,
     // 远程设备的端口对 MCP 可见且带远端别名(下沉后 MCP 免费获得远程能力的落点)
     let views = crate::list_ports_with_meta(state).await;
@@ -730,48 +716,53 @@ async fn tool_serial_clear(args: Value, state: &AppState) -> Value {
     }
 }
 
-/// 临时执行调用方提供的 JS 代码(serial_debug_script):调通后可 save 落库。
-async fn tool_serial_debug_script(args: Value, principal: Option<&str>, state: &AppState) -> Value {
-    let code = match args.get("code").and_then(|c| c.as_str()) {
-        Some(c) => c,
-        None => return error_text("Missing required parameter: code".into()),
-    };
-    // 运行时参数 args(注入脚本 args.<name>);缺省空。值非 string 的条目跳过。
-    let run_args = supplied_run_args(args.get("args"));
-    let script = ss_core::Script {
-        description: None,
-        group: None,
-        params: Vec::new(),
-        code: code.to_string(),
-    };
-    execute_script(state, &args, principal, script, run_args, None).await
-}
-
-/// 执行脚本库(scripts.json)中已保存的脚本(serial_run_script):按 name 取出后走与
-/// serial_debug_script 相同的执行路径(闸门/预检/并发上限/日志返回)。读到即快照——
-/// run 期间 save/delete 覆盖同名脚本不影响本次执行(scripts_store 的 LOCK 只保证读不与写交错)。
-async fn tool_serial_run_script(args: Value, principal: Option<&str>, state: &AppState) -> Value {
-    let name = match args.get("name").and_then(|v| v.as_str()) {
-        Some(n) if !n.is_empty() => n.to_string(),
-        _ => return error_text("Missing required parameter: name".into()),
-    };
-    let script = match crate::scripts_store::load().get(&name) {
-        Some(s) => s.clone(),
-        None => {
-            return error_text(format!(
-                "无脚本「{}」,用 serial_list_scripts 查看可用脚本",
-                name
-            ))
+/// 执行 JS 脚本(serial_script):code=临时执行调用方提供的源码(调通后可 save 落库),
+/// name=执行脚本库(scripts.json)中已保存的脚本——二选一。旧名 serial_debug_script /
+/// serial_run_script 为分发别名,同一分支语义。读到即快照——run 期间 save/delete
+/// 覆盖同名脚本不影响本次执行(scripts_store 的 LOCK 只保证读不与写交错)。
+async fn tool_serial_script(args: Value, principal: Option<&str>, state: &AppState) -> Value {
+    let code = args.get("code").and_then(|c| c.as_str());
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|n| !n.is_empty());
+    match (code, name) {
+        (Some(_), Some(_)) => {
+            error_text("code 与 name 二选一：code=临时执行源码，name=执行脚本库中的脚本".into())
         }
-    };
-    // name 查找先于 execute_script 内的闸门:属只读元数据访问(list 工具本可见),无害;
-    // 执行能力仍统一由闸门拦截。
-    let run_args = merge_run_args(&script.params, args.get("args"));
-    execute_script(state, &args, principal, script, run_args, Some(&name)).await
+        (Some(code), None) => {
+            // 运行时参数 args(注入脚本 args.<name>);缺省空。值非 string 的条目跳过。
+            let run_args = supplied_run_args(args.get("args"));
+            let script = ss_core::Script {
+                description: None,
+                group: None,
+                params: Vec::new(),
+                code: code.to_string(),
+            };
+            execute_script(state, &args, principal, script, run_args, None).await
+        }
+        (None, Some(name)) => {
+            // name 查找先于 execute_script 内的闸门:属只读元数据访问(list 工具本可见),无害;
+            // 执行能力仍统一由闸门拦截。
+            let script = match crate::scripts_store::load().get(name) {
+                Some(s) => s.clone(),
+                None => {
+                    return error_text(format!(
+                        "无脚本「{name}」,用 serial_get_script(不传 name)查看可用脚本"
+                    ))
+                }
+            };
+            let run_args = merge_run_args(&script.params, args.get("args"));
+            execute_script(state, &args, principal, script, run_args, Some(name)).await
+        }
+        (None, None) => {
+            error_text("缺少 code(临时执行源码)或 name(脚本库中的脚本名),二选一".into())
+        }
+    }
 }
 
 /// 脚本执行统一路径(enable_scripting 闸门 → 扩展写闸 → resolve_port → 端口预检 →
-/// 并发上限 → run_script → 日志随响应返回)。serial_debug_script 与 serial_run_script 共用,
+/// 并发上限 → run_script → 日志随响应返回)。serial_script 的 code/name 两分支共用,
 /// 执行 JS 的工具必经此路——闸门语义单一真相,新增执行类工具不会漏拦。
 /// `script_name` 用于落盘日志文件命名(debug 临时执行为 None)。
 /// `principal`：调用方身份（token），用于扩展的逐次写闸（脚本内 send/clear 逐次检查）。
@@ -813,7 +804,15 @@ async fn execute_script(
         result,
         logs,
         log_file,
-    } = ss_core::run_script(&port, &script, manager.clone(), run_args, log_file, write_gate).await;
+    } = ss_core::run_script(
+        &port,
+        &script,
+        manager.clone(),
+        run_args,
+        log_file,
+        write_gate,
+    )
+    .await;
     // 日志随结果返回(MCP 无实时推送出口):成功/失败/超时均拼上 log() 收集的输出,AI 才能调试脚本。
     // 空日志省略该段,避免噪音。
     let (mut text, ok) = match result {
@@ -836,7 +835,7 @@ async fn execute_script(
     }
 }
 
-/// 调用方显式提供的运行时参数(值非 string 的条目跳过,与 serial_debug_script 现状一致)。
+/// 调用方显式提供的运行时参数(值非 string 的条目跳过,与 serial_script 的 code 分支一致)。
 fn supplied_run_args(supplied: Option<&Value>) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Some(Value::Object(m)) = supplied {
@@ -884,19 +883,34 @@ fn with_logs(message: &str, logs: &[String]) -> String {
 
 // ===== 脚本库管理(纯数据,不碰串口、不受 enable_scripting 限制)=====
 //
-// save/get/list/delete 操作 scripts.json 配置文件,不执行任何 JS——故不经 enable_scripting 闸门
-// (该闸门语义是"是否允许远程执行 JS",防 RCE)。AI 调试好脚本后经此落盘供日后复用。
-// 持久化的原子性/并发由 scripts_store 的进程内锁保证。
+// save(含 delete)/get(含 list) 操作 scripts.json 配置文件,不执行任何 JS——故不经
+// enable_scripting 闸门(该闸门语义是"是否允许远程执行 JS",防 RCE)。AI 调试好脚本后
+// 经此落盘供日后复用。持久化的原子性/并发由 scripts_store 的进程内锁保证。
 
+/// 脚本库写入:code=保存(或覆盖),delete=true=删除(幂等)——互斥。
+/// 旧名 serial_delete_script 为分发别名,走原删除处理器。
 async fn tool_serial_save_script(args: Value, script_bus: &broadcast::Sender<()>) -> Value {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return error_text("Missing required parameter: name".into()),
     };
+    let delete = args
+        .get("delete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let code = match args.get("code").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
-        None => return error_text("Missing required parameter: code".into()),
+        None => {
+            return if delete {
+                tool_serial_delete_script(args, script_bus).await
+            } else {
+                error_text("缺少 code(要保存的 JS 源码);删除该名脚本请传 delete=true".into())
+            };
+        }
     };
+    if delete {
+        return error_text("code 与 delete 互斥:保存传 code,删除只传 delete=true".into());
+    }
     let description = args
         .get("description")
         .and_then(|v| v.as_str())
@@ -926,14 +940,31 @@ async fn tool_serial_save_script(args: Value, script_bus: &broadcast::Sender<()>
     }
 }
 
-/// 按名读取单个脚本的完整定义(含 code 全文)——list 只回元数据的膨胀防护,
-/// code 的取回出口在这里;AI 改写库脚本(save 覆盖)前经此取原文。
+/// 查看脚本库:不传 name 列出全部脚本元数据(原 serial_list_scripts 并入,膨胀防护
+/// 不含 code 全文);传 name 返回单个脚本完整定义(含 code)——AI 改写库脚本(save
+/// 覆盖)前经此取原文。旧名 serial_list_scripts 为分发别名。
 async fn tool_serial_get_script(args: Value) -> Value {
-    let name = match args.get("name").and_then(|v| v.as_str()) {
-        Some(n) if !n.is_empty() => n.to_string(),
-        _ => return error_text("Missing required parameter: name".into()),
+    let map = crate::scripts_store::load();
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|n| !n.is_empty());
+    let Some(name) = name else {
+        // 只回元数据,不含 code 全文(list 膨胀防护;code 在 save 时已由调用方掌握)。
+        let entries: Vec<Value> = map
+            .iter()
+            .map(|(name, s)| {
+                json!({
+                    "name": name,
+                    "description": s.description,
+                    "group": s.group,
+                    "params": s.params,
+                })
+            })
+            .collect();
+        return ok_text(serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into()));
     };
-    match crate::scripts_store::load().get(&name) {
+    match map.get(name) {
         Some(s) => ok_text(
             serde_json::to_string_pretty(&json!({
                 "name": name,
@@ -944,28 +975,8 @@ async fn tool_serial_get_script(args: Value) -> Value {
             }))
             .unwrap_or_else(|_| "{}".into()),
         ),
-        None => error_text(format!(
-            "无脚本「{}」,用 serial_list_scripts 查看可用脚本",
-            name
-        )),
+        None => error_text(format!("无脚本「{name}」,不传 name 可列出全部脚本")),
     }
-}
-
-async fn tool_serial_list_scripts(_args: Value) -> Value {
-    let map = crate::scripts_store::load();
-    // 只回元数据,不含 code 全文(list 膨胀防护;code 在 save 时已由调用方掌握)。
-    let entries: Vec<Value> = map
-        .iter()
-        .map(|(name, s)| {
-            json!({
-                "name": name,
-                "description": s.description,
-                "group": s.group,
-                "params": s.params,
-            })
-        })
-        .collect();
-    ok_text(serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into()))
 }
 
 async fn tool_serial_delete_script(args: Value, script_bus: &broadcast::Sender<()>) -> Value {
@@ -1016,7 +1027,7 @@ fn handle_prompts_list() -> Value {
             },
             {
                 "name": "serial_script_guide",
-                "description": "脚本编写指南：serial_debug_script / serial_run_script 的可用函数、约束（expect 返回空串、无 console、正则字符串等）与重试模式",
+                "description": "脚本编写指南：serial_script（code 临时执行 / name 调脚本库）的可用函数、约束（expect 返回空串、无 console、正则字符串等）与重试模式",
                 "arguments": []
             }
         ]
@@ -1053,7 +1064,7 @@ const SERIAL_USAGE_GUIDE: &str = r#"# 串口工具工作流指南
 
 ## port 参数
 
-除 `serial_list` 与脚本库管理工具外，各工具接受可选 `port` 参数。不传时，若只打开了一个串口则自动选用；打开多个时必须显式指定。
+除脚本库管理工具（`serial_save_script` / `serial_get_script`）外，各工具接受可选 `port` 参数。`serial_list` 传 port 时输出该端口的详细配置；其余工具不传时，若只打开了一个串口则自动选用；打开多个时必须显式指定。
 
 ## 寻址形式
 
@@ -1077,7 +1088,7 @@ serial_list 输出为扁平单行(键 · 别名 · 设备 · 寻址 · 状态),S
 - text 模式默认追加换行(按端口配置的 line_ending)，设 `auto_newline=false` 才发原始数据。
 - `serial_grep` 等待期间新数据正常进缓冲区，不阻塞数据流。"#;
 
-/// serial_debug_script / serial_run_script 的编写指南。与 skills/serial-studio-script/SKILL.md、
+/// serial_script 的编写指南。与 skills/serial-studio-script/SKILL.md、
 /// ss_server::SCRIPT_SKILL 三处同源(include_str! 同一文件)——改约束只改 SKILL.md。
 const SERIAL_SCRIPT_GUIDE: &str = include_str!("../../../skills/serial-studio-script/SKILL.md");
 
@@ -1152,17 +1163,23 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            14,
-            "8 个串口工具(含 debug_script/run_script) + 4 个脚本库工具(save/get/list/delete)"
+            10,
+            "list/send/read/grep/clear + script + save/get + port_open/close"
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"serial_debug_script"));
-        assert!(names.contains(&"serial_run_script"));
-        assert!(!names.contains(&"serial_run_saved_script"), "旧名应已移除");
+        assert!(names.contains(&"serial_script"));
         assert!(names.contains(&"serial_save_script"));
         assert!(names.contains(&"serial_get_script"));
-        assert!(names.contains(&"serial_list_scripts"));
-        assert!(names.contains(&"serial_delete_script"));
+        // 并入的旧粒度只剩分发别名,tools/list 不出现
+        for old in [
+            "serial_status",
+            "serial_debug_script",
+            "serial_run_script",
+            "serial_list_scripts",
+            "serial_delete_script",
+        ] {
+            assert!(!names.contains(&old), "旧名 {old} 不应出现在 tools/list");
+        }
     }
 
     /// MCP 扩展点：注入的工具进 tools/list，tools/call 内置未命中时委托扩展，
@@ -1207,9 +1224,10 @@ mod tests {
         let mut state = make_state();
         state.mcp_extensions = vec![std::sync::Arc::new(EchoExt)];
 
-        let resp = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
+        let resp =
+            handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 15, "14 内置 + 1 扩展(echo_test)");
+        assert_eq!(tools.len(), 11, "10 内置 + 1 扩展(echo_test)");
         assert!(tools.iter().any(|t| t["name"] == "echo_test"));
 
         let resp = handle_request(
@@ -1267,11 +1285,22 @@ mod tests {
     /// initialize 签发 session_token（每次新签，非空 uuid）。
     #[tokio::test]
     async fn initialize_mints_session_token() {
-        let a = handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#, &make_state()).await;
-        let b = handle_request(r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#, &make_state()).await;
+        let a = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &make_state(),
+        )
+        .await;
+        let b = handle_request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#,
+            &make_state(),
+        )
+        .await;
         let ta = a["result"]["session_token"].as_str().unwrap();
         let tb = b["result"]["session_token"].as_str().unwrap();
-        assert!(!ta.is_empty() && ta != tb, "每次 initialize 新签: {ta} / {tb}");
+        assert!(
+            !ta.is_empty() && ta != tb,
+            "每次 initialize 新签: {ta} / {tb}"
+        );
     }
 
     /// 会话注册表：同 token 复用会话，不同 token 各自建。
@@ -1290,7 +1319,10 @@ mod tests {
     #[tokio::test]
     async fn port_open_close_argument_guards() {
         fn text_of(v: &Value) -> String {
-            v["result"]["content"][0]["text"].as_str().unwrap_or_default().into()
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .into()
         }
         let state = make_state();
         // 匿名 → 须会话标识
@@ -1327,17 +1359,21 @@ mod tests {
         assert!(text_of(&resp).contains("关闭失败"), "{}", text_of(&resp));
     }
 
-    /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_debug_script 应被拒。
+    /// 远程 MCP 默认禁用脚本(enable_scripting=false),serial_script 应被拒;
+    /// 旧名 serial_debug_script 为分发别名,同样被拒。
     #[tokio::test]
-    async fn serial_debug_script_disabled_by_default() {
-        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_debug_script","arguments":{"code":"await sleep(1)"}}}"#;
+    async fn serial_script_disabled_by_default() {
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_script","arguments":{"code":"await sleep(1)"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
+        let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"serial_debug_script","arguments":{"code":"await sleep(1)"}}}"#;
+        let resp = handle_request(req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true, "旧名别名同样受闸门");
     }
 
-    /// serial_run_script 同受 enable_scripting 闸门:默认 false 拒执行。
+    /// serial_script 的 name 分支同受 enable_scripting 闸门:默认 false 拒执行。
     #[tokio::test]
-    async fn serial_run_script_disabled_by_default() {
+    async fn serial_script_run_disabled_by_default() {
         ensure_test_config_dir();
         let name = unique_name("gate");
         let req = format!(
@@ -1346,7 +1382,7 @@ mod tests {
         );
         handle_request(&req, &make_state()).await;
         let req = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_run_script","arguments":{{"name":"{}"}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_script","arguments":{{"name":"{}"}}}}}}"#,
             name
         );
         let resp = handle_request(&req, &make_state()).await;
@@ -1356,25 +1392,127 @@ mod tests {
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("未启用"), "应提示未启用: {}", text);
+        // 旧名 serial_run_script 别名同一分支,同样被拦
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"serial_run_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "旧名别名同样受 enable_scripting 闸门"
+        );
     }
 
-    /// serial_run_script:name 不存在报错并提示 list;name 缺失/空串报缺参。
+    /// serial_script:name 不存在报错并提示 get(不传 name);code+name 并用/皆缺报互斥缺参。
     #[tokio::test]
-    async fn serial_run_script_name_not_found_or_missing() {
+    async fn serial_script_name_not_found_or_arg_conflicts() {
         ensure_test_config_dir();
-        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"name":"no-such-script-xyz"}}}"#;
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_script","arguments":{"name":"no-such-script-xyz"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("无脚本") && text.contains("serial_list_scripts"),
-            "应报无脚本并提示 list: {}",
+            text.contains("无脚本") && text.contains("serial_get_script"),
+            "应报无脚本并提示 get: {}",
             text
         );
-        // name 空串 → 缺参(对齐 save/delete/get 的非空检查)
-        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_run_script","arguments":{"name":""}}}"#;
+        // code 与 name 并用 → 互斥报错
+        let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"serial_script","arguments":{"code":"await sleep(1)","name":"x"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("二选一"), "应报互斥: {}", text);
+        // 皆缺(含 name 空串) → 缺参
+        let req = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"serial_script","arguments":{"name":""}}}"#;
+        let resp = handle_request(req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    /// 脚本库合并粒度:save 的 delete=true 删除;无 code 无 delete 报缺参;code+delete 互斥;
+    /// get 不传 name 列元数据;旧名别名(list_scripts/delete_script)仍分发。
+    #[tokio::test]
+    async fn script_library_merged_tools_and_aliases() {
+        ensure_test_config_dir();
+        let name = unique_name("merge");
+
+        // save(code) → get(name) 有 code → save(delete=true) → get 报无脚本
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","code":"await sleep(1)"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        assert!(resp["result"]["isError"].is_null());
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"serial_get_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("await sleep(1)"),
+            "get 应回 code 全文: {text}"
+        );
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{}","delete":true}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        assert!(resp["result"]["isError"].is_null());
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("已删除"));
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"serial_get_script","arguments":{{"name":"{}"}}}}}}"#,
+            name
+        );
+        let resp = handle_request(&req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true, "删除后取应报无脚本");
+
+        // 无 code 无 delete → 缺参;code+delete → 互斥(含 code 空串边界:Some("") 走保存分支而非删除)
+        let req = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"whatever-xyz"}}}"#;
+        let resp = handle_request(req, &make_state()).await;
+        assert_eq!(resp["result"]["isError"], true);
+        for req in [
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"whatever-xyz","code":"await sleep(1)","delete":true}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"whatever-xyz","code":"","delete":true}}}"#,
+        ] {
+            let resp = handle_request(req, &make_state()).await;
+            assert_eq!(resp["result"]["isError"], true, "code 与 delete 应互斥");
+            assert!(resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("互斥"));
+        }
+
+        // get 不传 name → 列表(元数据数组);旧名 serial_list_scripts 别名同效。
+        // 并行测试共享 scripts.json 且增删不定——全文比对不稳,存唯一 marker
+        // 后断言两条路径的列表都含它(同库同格式)
+        let marker = unique_name("alias");
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"serial_save_script","arguments":{{"name":"{marker}","code":"await sleep(1)"}}}}}}"#
+        );
+        handle_request(&req, &make_state()).await;
+        async fn list_names(tool: &str) -> Vec<String> {
+            let req = format!(
+                r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+            );
+            let resp = handle_request(&req, &make_state()).await;
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            serde_json::from_str::<Vec<Value>>(text)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|e| e["name"].as_str().map(String::from))
+                .collect()
+        }
+        let get_list = list_names("serial_get_script").await;
+        assert!(get_list.contains(&marker), "get 列表应含 marker");
+        let alias_list = list_names("serial_list_scripts").await;
+        assert!(
+            alias_list.contains(&marker),
+            "旧名别名列表应含 marker: {alias_list:?}"
+        );
     }
 
     /// merge_run_args:default 只填缺失 key;显式空串不覆盖;非 string 值视为已提供跳过。
@@ -1572,7 +1710,7 @@ mod tests {
         }
         // 第二次应提示已覆盖(list 验证只剩一份)
         let resp = handle_request(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_list_scripts","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_get_script","arguments":{}}}"#,
             &make_state(),
         ).await;
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
@@ -1627,27 +1765,29 @@ mod tests {
             code
         );
 
-        // 无此名 → 提示 list
+        // 无此名 → 提示不传 name 可列出全部
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_get_script","arguments":{"name":"no-such-script-xyz"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("无脚本") && text.contains("serial_list_scripts"),
-            "应报无脚本并提示 list: {}",
+            text.contains("无脚本") && text.contains("不传 name"),
+            "应报无脚本并提示列表: {}",
             text
         );
 
-        // name 空串 → 缺参
+        // name 空串 → 视同缺省,列出元数据(并入后的列表分支)
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_get_script","arguments":{"name":""}}}"#;
         let resp = handle_request(req, &make_state()).await;
-        assert_eq!(resp["result"]["isError"], true);
+        assert_ne!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with('['), "空串 name 应列元数据: {text}");
     }
 
     /// save 缺必填参数(name/code)→ isError。
     #[tokio::test]
     async fn save_script_missing_params_errors() {
-        // 缺 code
+        // 缺 code 且无 delete → isError（并入后 code 可选但需 delete 标志才合法缺省）
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_save_script","arguments":{"name":"x"}}}"#;
         let resp = handle_request(req, &make_state()).await;
         assert_eq!(resp["result"]["isError"], true);

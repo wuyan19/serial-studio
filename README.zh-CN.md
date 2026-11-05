@@ -108,14 +108,16 @@ release 产物为 `serial-studio.exe`。
 
 ## 🤖 MCP
 
-`POST /mcp`,JSON-RPC 协议。共 14 个工具:8 个基础(`serial_list`、`serial_send`、
-`serial_read`、`serial_status`、`serial_grep`、`serial_clear`,以及 `port_open`、
-`port_close`——开/关端口,须会话标识,占用挂在 initialize 签发的 token 会话上,
-只能关自己开的口),2 个脚本执行
-(`serial_debug_script` 临时执行 JS 代码、`serial_run_script` 按名执行已保存脚本
-——均受 `enable_scripting` 开关控制),4 个脚本库管理(`serial_save_script`、
-`serial_get_script`、`serial_list_scripts`、`serial_delete_script`——纯数据管理,
-不受开关限制)。`port` 参数可用真实端口名 **或别名**。
+`POST /mcp`,JSON-RPC 协议。共 10 个工具:7 个基础(`serial_list`——不传参列全部
+端口,传 `port` 给单口配置;`serial_send`、`serial_read`、`serial_grep`、
+`serial_clear`;以及 `port_open`/`port_close`——开/关端口,须会话标识,占用挂在
+initialize 签发的 token 会话上,只能关自己开的口),1 个脚本执行(`serial_script`
+——传 `code` 临时执行 JS 或传 `name` 执行库中脚本,受 `enable_scripting` 开关
+控制),2 个脚本库管理(`serial_save_script`——保存,`delete=true` 时删除;
+`serial_get_script`——不传 `name` 列元数据、传 `name` 取全文;纯数据管理,不受
+开关限制)。`port` 参数可用真实端口名 **或别名**。并入的旧粒度
+(`serial_status`/`serial_debug_script`/`serial_run_script`/`serial_list_scripts`/
+`serial_delete_script`)保留为分发别名。
 `serial_script_guide` prompt 记录了脚本 API 与约束。
 
 ### 从 Claude Code 接入
@@ -154,13 +156,13 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 并读取其输出。超出可信局域网的范围时，请在 `settings.json` 改绑 `127.0.0.1`，或置于
 防火墙 / VPN 之后。
 
-远程 JS 脚本执行（WS `run_script` / MCP `serial_debug_script`、`serial_run_script`）受
+远程 JS 脚本执行（WS `run_script` / MCP `serial_script`）受
 `settings.json` 的 `enable_scripting` 开关控制，**默认关闭**。开启后任何可达客户端都能对
 串口执行 JS。沙箱只暴露串口原语（`send`/`expect`/`clear`/`sleep`）——无文件、网络、进程
 访问——但仍可任意驱动设备并读取输出。不可信网络请保持关闭。
 
-脚本库四工具（`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
-`serial_delete_script`）属数据管理，**不受 `enable_scripting` 限制、始终可访问**：任何
+脚本库两工具（`serial_save_script` 含删除 / `serial_get_script` 含列表）属数据
+管理，**不受 `enable_scripting` 限制、始终可访问**：任何
 可达客户端都能读取已保存脚本的 code 全文（可能含宿主机路径、内网地址、账号等注释）、
 覆盖或删除它。同样遵循可信局域网原则。
 

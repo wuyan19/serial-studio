@@ -5,7 +5,9 @@
 use serde_json::Value;
 use std::sync::Arc;
 use topo_hub::mcp_topo::TopoTools;
-use topo_hub::test_support::{ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK};
+use topo_hub::test_support::{
+    ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK,
+};
 use topo_hub::TopoState;
 
 fn state_with_tools() -> TopoState {
@@ -29,7 +31,10 @@ async fn call_as(state: &TopoState, token: &str, body: &str) -> Value {
 }
 
 fn text(resp: &Value) -> String {
-    resp["result"]["content"][0]["text"].as_str().unwrap().into()
+    resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .into()
 }
 
 #[tokio::test]
@@ -37,13 +42,34 @@ async fn tools_listed_alongside_builtin() {
     let state = state_with_tools();
     let resp = call(&state, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 28, "14 内置 + 5 拓扑 + 5 设备 + 4 租约");
+    assert_eq!(tools.len(), 22, "10 内置 + 4 拓扑 + 4 设备 + 4 租约");
     for name in [
-        "topo_list", "topo_get", "topo_create", "topo_update", "topo_delete",
-        "device_list", "device_get", "device_create", "device_update", "device_delete",
-        "lease_acquire", "lease_renew", "lease_release", "lease_status",
+        "topo_get",
+        "topo_create",
+        "topo_update",
+        "topo_delete",
+        "device_get",
+        "device_create",
+        "device_update",
+        "device_delete",
+        "lease_acquire",
+        "lease_renew",
+        "lease_release",
+        "lease_status",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name), "缺工具 {name}");
+    }
+    // 并入列表粒度的旧名只剩分发别名,tools/list 不出现
+    for old in [
+        "topo_list",
+        "device_list",
+        "serial_status",
+        "serial_debug_script",
+    ] {
+        assert!(
+            tools.iter().all(|t| t["name"] != old),
+            "旧名 {old} 不应出现"
+        );
     }
 }
 
@@ -64,9 +90,14 @@ async fn device_and_topology_roundtrip() {
     .await;
     assert!(resp["result"]["isError"].is_null(), "{}", text(&resp));
 
-    // device_list / device_get
-    let msg = text(&call(&state, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"device_list","arguments":{}}}"#).await);
-    assert!(msg.contains(&dev_name) && msg.contains("串口 COM4"), "{msg}");
+    // device_get 不传参=列表（原 device_list 并入）；旧名别名同效
+    let msg = text(&call(&state, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"device_get","arguments":{}}}"#).await);
+    assert!(
+        msg.contains(&dev_name) && msg.contains("串口 COM4"),
+        "{msg}"
+    );
+    let alias = text(&call(&state, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"device_list","arguments":{}}}"#).await);
+    assert_eq!(msg, alias, "旧名别名输出应一致");
     let resp = call(
         &state,
         &format!(
@@ -128,6 +159,17 @@ async fn device_and_topology_roundtrip() {
     assert!(msg.contains(&format!("设备 {dev_name}")), "{msg}");
     assert!(msg.contains("被测交换机"));
     assert!(msg.contains("连接") && msg.contains("级联"), "{msg}");
+    // 旧名 topo_list 别名与 topo_get 输出一致
+    let alias = text(
+        &call(
+            &state,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"topo_list","arguments":{{"topo":"{topo_name}"}}}}}}"#
+            ),
+        )
+        .await,
+    );
+    assert_eq!(msg, alias, "旧名别名输出应一致");
 
     // 设备删除被拓扑引用拦截
     let resp = call(
@@ -188,8 +230,15 @@ async fn lease_flow_and_write_gate() {
     assert!(msg.contains("device_create"), "未注册端口引导注册: {msg}");
 
     // initialize → token → 注册设备（COM4 串口 + 内联 SSH）
-    let init = call(&state, r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#).await;
-    let token = init["result"]["session_token"].as_str().unwrap().to_string();
+    let init = call(
+        &state,
+        r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#,
+    )
+    .await;
+    let token = init["result"]["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let resp = call_as(
         &state,
         &token,
@@ -221,7 +270,14 @@ async fn lease_flow_and_write_gate() {
     .await;
     let msg = text(&resp);
     assert!(resp["result"]["isError"].is_null(), "申请应成功: {msg}");
-    let lease_id = msg.split("已获租约 ").nth(1).unwrap().split('（').next().unwrap().to_string();
+    let lease_id = msg
+        .split("已获租约 ")
+        .nth(1)
+        .unwrap()
+        .split('（')
+        .next()
+        .unwrap()
+        .to_string();
 
     // A 写串口通道（过闸 → 工具本体的端口未开错）；写 SSH 通道同样过闸
     for port in ["COM4", &ssh_ep] {
@@ -247,7 +303,10 @@ async fn lease_flow_and_write_gate() {
     )
     .await;
     let msg = text(&resp);
-    assert!(msg.contains("租约") && msg.contains("集成-agent"), "应报当前持有者: {msg}");
+    assert!(
+        msg.contains("租约") && msg.contains("集成-agent"),
+        "应报当前持有者: {msg}"
+    );
 
     // B 申请同设备（endpoints 糖走 COM4）→ 冲突明细
     let resp = call_as(
@@ -259,7 +318,9 @@ async fn lease_flow_and_write_gate() {
     assert!(text(&resp).contains("集成-agent"), "冲突应报持有者");
 
     // B 释放 A 的租约 → token 不匹配拒；A 释放成功；B 可申请
-    let del = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"lease_release","arguments":{{"lease_id":"{lease_id}"}}}}}}"#);
+    let del = format!(
+        r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"lease_release","arguments":{{"lease_id":"{lease_id}"}}}}}}"#
+    );
     assert!(text(&call_as(&state, "token-b-别人", &del).await).contains("不属于"));
     assert!(text(&call_as(&state, &token, &del).await).contains("已释放"));
     let resp = call_as(

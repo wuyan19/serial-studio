@@ -1,5 +1,7 @@
-//! 拓扑域 MCP 工具集：topo_list / topo_get / topo_create / topo_update / topo_delete
+//! 拓扑域 MCP 工具集：topo_get（不传参=列表）/ topo_create / topo_update / topo_delete
+//! + device_get（不传参=列表）/ device_create / device_update / device_delete
 //! + 租约 lease_acquire / lease_renew / lease_release / lease_status。
+//! topo_list / device_list 为并入列表粒度的旧名分发别名（tools/list 不出现）。
 //!
 //! 经 ss-server 的 McpExtension 注入 `/mcp`（见 mcp_ext.rs）。输出沿用内置工具的
 //! 文本风格（content/text，中点分隔扁平单行）——AI 消费方与 serial_list 一致。
@@ -34,10 +36,13 @@ fn error_text(text: String) -> Value {
 }
 
 impl TopoTools {
+    /// 列表摘要（原 topo_list 并入 topo_get 的无参分支；旧名为分发别名）。
     async fn topo_list(&self) -> Value {
         let list = topology::load();
         if list.is_empty() {
-            return ok_text("暂无拓扑。用 topo_create 创建；成员引用被测设备（device_list 可查）。".into());
+            return ok_text(
+                "暂无拓扑。用 topo_create 创建；成员引用被测设备（device_get 可查）。".into(),
+            );
         }
         let lines: Vec<String> = list
             .iter()
@@ -53,9 +58,12 @@ impl TopoTools {
     }
 
     async fn topo_get(&self, args: Value, state: &AppState) -> Value {
-        let topo_ref = match args.get("topo").and_then(|t| t.as_str()) {
-            Some(t) => t,
-            None => return error_text("缺少参数 topo（拓扑 id 或名称）".into()),
+        let topo_ref = args
+            .get("topo")
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty());
+        let Some(topo_ref) = topo_ref else {
+            return self.topo_list().await;
         };
         let Some(topo) = topology::find(topo_ref) else {
             return error_text(format!("拓扑不存在: {topo_ref}"));
@@ -77,13 +85,7 @@ impl TopoTools {
                 let chans: Vec<String> = m
                     .channels
                     .iter()
-                    .map(|c| {
-                        format!(
-                            "{}{}",
-                            c.label,
-                            if c.present { "" } else { "（不在位）" }
-                        )
-                    })
+                    .map(|c| format!("{}{}", c.label, if c.present { "" } else { "（不在位）" }))
                     .collect();
                 line.push_str(&format!(" · 通道: {}", chans.join("、")));
             }
@@ -100,7 +102,11 @@ impl TopoTools {
             lines.push(line);
         }
         for l in &topo.links {
-            let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
+            let name_of = |id: &str| {
+                device::find(id)
+                    .map(|d| d.name)
+                    .unwrap_or_else(|| id.to_string())
+            };
             // 端口标签进设备名（"ESG6220:GE1/1/1"），与 Web 图视图同形
             let from = match &l.from_port {
                 Some(p) => format!("{}:{p}", name_of(&l.from)),
@@ -113,7 +119,11 @@ impl TopoTools {
             let label = l.label.as_deref().unwrap_or("");
             lines.push(format!(
                 "连接 {from} ↔ {to}{}",
-                if label.is_empty() { String::new() } else { format!(" · {label}") }
+                if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {label}")
+                }
             ));
         }
         ok_text(lines.join("\n"))
@@ -128,7 +138,7 @@ impl TopoTools {
             Ok(t) => {
                 let _ = self.bus.send(());
                 ok_text(format!(
-                    "已创建拓扑 {}（{}），成员 {} 项。成员引用被测设备（device_list 可查，未注册先 device_create）。",
+                    "已创建拓扑 {}（{}），成员 {} 项。成员引用被测设备（device_get 可查，未注册先 device_create）。",
                     t.name, t.id, t.members.len()
                 ))
             }
@@ -152,7 +162,9 @@ impl TopoTools {
                 let _ = self.bus.send(());
                 ok_text(format!(
                     "已更新拓扑 {}（{}），成员 {} 项。",
-                    t.name, t.id, t.members.len()
+                    t.name,
+                    t.id,
+                    t.members.len()
                 ))
             }
             Err(e) => error_text(e),
@@ -184,13 +196,16 @@ impl TopoTools {
         let lines: Vec<String> = list
             .iter()
             .map(|d| {
-                let chans: Vec<String> =
-                    d.channels.iter().map(|c| c.label()).collect();
+                let chans: Vec<String> = d.channels.iter().map(|c| c.label()).collect();
                 let mut s = format!(
                     "{} · id {} · 通道: {}",
                     d.name,
                     d.id,
-                    if chans.is_empty() { "（无）".into() } else { chans.join("、") }
+                    if chans.is_empty() {
+                        "（无）".into()
+                    } else {
+                        chans.join("、")
+                    }
                 );
                 if let Some(l) = self.leases.lease_of_device(&d.id) {
                     s.push_str(&format!(
@@ -209,18 +224,31 @@ impl TopoTools {
     }
 
     async fn device_get(&self, args: Value, _state: &AppState) -> Value {
-        let Some(dev_ref) = args.get("device").and_then(|t| t.as_str()) else {
-            return error_text("缺少参数 device（设备 id 或名称）".into());
+        let dev_ref = args
+            .get("device")
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty());
+        let Some(dev_ref) = dev_ref else {
+            // 列表（原 device_list 并入；旧名为分发别名）
+            return self.device_list(_state).await;
         };
         let Some(d) = device::find(dev_ref) else {
-            return error_text(format!("设备不存在: {dev_ref}（device_list 可查）"));
+            return error_text(format!("设备不存在: {dev_ref}（不传 device 可列出全部）"));
         };
         let mut lines = vec![format!(
             "{} · id {}{}{}",
             d.name,
             d.id,
-            if d.model.is_empty() { String::new() } else { format!(" · 型号 {}", d.model) },
-            if d.location.is_empty() { String::new() } else { format!(" · 位置 {}", d.location) },
+            if d.model.is_empty() {
+                String::new()
+            } else {
+                format!(" · 型号 {}", d.model)
+            },
+            if d.location.is_empty() {
+                String::new()
+            } else {
+                format!(" · 位置 {}", d.location)
+            },
         )];
         for ch in &d.channels {
             lines.push(match ch {
@@ -260,7 +288,9 @@ impl TopoTools {
                 let _ = self.bus.send(());
                 ok_text(format!(
                     "已注册设备 {}（{}），通道 {} 条。拓扑成员/租约按设备引用（名称或 id 均可）。",
-                    d.name, d.id, d.channels.len()
+                    d.name,
+                    d.id,
+                    d.channels.len()
                 ))
             }
             Err(e) => error_text(e),
@@ -372,7 +402,11 @@ impl TopoTools {
         } else {
             self.leases.acquire(&token, &label, &scope, a.ttl_minutes)
         };
-        let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
+        let name_of = |id: &str| {
+            device::find(id)
+                .map(|d| d.name)
+                .unwrap_or_else(|| id.to_string())
+        };
         match outcome {
             Ok(l) => ok_text(format!(
                 "已获租约 {}（{}，剩余 {} 分钟）：设备 {}{}",
@@ -450,7 +484,11 @@ impl TopoTools {
         if leases.is_empty() {
             return ok_text("本会话当前无活跃租约。".into());
         }
-        let name_of = |id: &str| device::find(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
+        let name_of = |id: &str| {
+            device::find(id)
+                .map(|d| d.name)
+                .unwrap_or_else(|| id.to_string())
+        };
         let lines: Vec<String> = leases
             .iter()
             .map(|l| {
@@ -515,24 +553,18 @@ impl McpExtension for TopoTools {
     fn tools(&self) -> Vec<Value> {
         vec![
             json!({
-                "name": "topo_list",
-                "description": "列出全部拓扑：名称、id、成员数、描述，中点分隔的扁平单行。调试前先看这里选拓扑。",
-                "inputSchema": { "type": "object", "properties": {} }
-            }),
-            json!({
                 "name": "topo_get",
-                "description": "查看拓扑详情：成员清单（被测设备、通道明细、在线状态、备注）与设备间连线（两端端口标签）。成员设备 id 或名称即 lease_acquire 可用的引用。",
+                "description": "查看拓扑：不传 topo 列出全部（名称、id、成员数、描述，调试前先看这里选拓扑）；传 topo 给详情——成员清单（被测设备、通道明细、在线状态、备注）与设备间连线（两端端口标签）。成员设备 id 或名称即 lease_acquire 可用的引用。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "topo": { "type": "string", "description": "拓扑 id 或名称" }
-                    },
-                    "required": ["topo"]
+                        "topo": { "type": "string", "description": "拓扑 id 或名称；省略列出全部拓扑" }
+                    }
                 }
             }),
             json!({
                 "name": "topo_create",
-                "description": "创建拓扑。成员=被测设备引用（device_list 可查，同一设备可加入多个拓扑），links 描述设备间连线（拓扑图渲染用），两端可标物理端口（from_port/to_port，如 GE1/1/1、eth0）。",
+                "description": "创建拓扑。成员=被测设备引用（device_get 可查，同一设备可加入多个拓扑），links 描述设备间连线（拓扑图渲染用），两端可标物理端口（from_port/to_port，如 GE1/1/1、eth0）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -543,7 +575,7 @@ impl McpExtension for TopoTools {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "device": { "type": "string", "description": "被测设备 id 或名称（device_list 可查）" },
+                                    "device": { "type": "string", "description": "被测设备 id 或名称（device_get 可查）" },
                                     "note": { "type": "string", "description": "备注，如「被测主板」（可选）" },
                                     "x": { "type": "number", "description": "画布横坐标（可选，Web 图编辑器位置）" },
                                     "y": { "type": "number", "description": "画布纵坐标（可选）" }
@@ -621,19 +653,13 @@ impl McpExtension for TopoTools {
                 }
             }),
             json!({
-                "name": "device_list",
-                "description": "列出被测设备：名称、通道摘要（串口/SSH 各自目标）、占用状态。设备=被调试的一台机器（如一台交换机），通道=接入方式（串口控制台 + 多条 SSH 登录）。",
-                "inputSchema": { "type": "object", "properties": {} }
-            }),
-            json!({
                 "name": "device_get",
-                "description": "查看设备详情：通道明细（SSH 凭据地址、写操作用的端口键）、当前占用。",
+                "description": "查看被测设备：不传 device 列出全部（名称、通道摘要、占用状态。设备=被调试的一台机器如一台交换机，通道=接入方式）；传 device 给详情——通道明细（SSH 凭据地址、写操作用的端口键）、当前占用。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "device": { "type": "string", "description": "设备 id 或名称" }
-                    },
-                    "required": ["device"]
+                        "device": { "type": "string", "description": "设备 id 或名称；省略列出全部设备" }
+                    }
                 }
             }),
             json!({
@@ -759,18 +785,15 @@ impl McpExtension for TopoTools {
         args: Value,
         principal: Option<&'a str>,
         state: &'a AppState,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>> {
         Box::pin(async move {
             match name {
-                "topo_list" => Some(self.topo_list().await),
-                "topo_get" => Some(self.topo_get(args, state).await),
+                // 旧粒度别名：topo_list/device_list 并入 *_get 的无参分支，老调用方不破
+                "topo_get" | "topo_list" => Some(self.topo_get(args, state).await),
                 "topo_create" => Some(self.topo_create(args).await),
                 "topo_update" => Some(self.topo_update(args).await),
                 "topo_delete" => Some(self.topo_delete(args).await),
-                "device_list" => Some(self.device_list(state).await),
-                "device_get" => Some(self.device_get(args, state).await),
+                "device_get" | "device_list" => Some(self.device_get(args, state).await),
                 "device_create" => Some(self.device_create(args, state).await),
                 "device_update" => Some(self.device_update(args, state).await),
                 "device_delete" => Some(self.device_delete(args, state).await),
@@ -791,9 +814,7 @@ impl McpExtension for TopoTools {
         args: Value,
         principal: Option<&'a str>,
         state: &'a AppState,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>> {
         Box::pin(async move {
             if !self.leases.gate_enabled() {
                 return None;

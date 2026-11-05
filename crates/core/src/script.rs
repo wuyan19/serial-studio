@@ -72,7 +72,7 @@ impl ScriptError {
     }
 }
 
-/// MCP 路径(`serial_debug_script`/`serial_run_script`)的执行超时兜底。WS/UI 路径传 None(无限制),不走这里。
+/// MCP 路径(`serial_script`)的执行超时兜底。WS/UI 路径传 None(无限制),不走这里。
 /// MCP 脚本当前无手动停止手段(无 stop 工具 + abort 不外露),此超时是其唯一退出兜底,
 /// 故不可去掉——否则死循环脚本永久占用并发槽。后续加 serial_stop_script 后可重评。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -964,7 +964,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -992,7 +992,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1049,7 +1049,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         match result {
@@ -1074,7 +1074,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1094,7 +1094,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1115,7 +1115,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(r3.is_ok(), "expect(pattern, ms, port) 三参应 Ok: {:?}", r3);
@@ -1131,7 +1131,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1159,7 +1159,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         match result {
@@ -1192,7 +1192,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         stopper.await.unwrap();
@@ -1230,7 +1230,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         stopper.await.unwrap();
@@ -1273,7 +1273,7 @@ mod tests {
                 paused_flag(),
                 None,
                 None,
-            None,
+                None,
             ),
             run_script_with_timeout(
                 "COM0",
@@ -1286,7 +1286,7 @@ mod tests {
                 paused_flag(),
                 None,
                 None,
-            None,
+                None,
             ),
         );
         stopper.await.unwrap();
@@ -1340,7 +1340,7 @@ mod tests {
                 paused,
                 None,
                 None,
-            None,
+                None,
             ),
         )
         .await
@@ -1383,7 +1383,7 @@ mod tests {
                 paused,
                 None,
                 None,
-            None,
+                None,
             ),
         )
         .await
@@ -1440,7 +1440,7 @@ mod tests {
                 paused,
                 None,
                 None,
-            None,
+                None,
             ),
         )
         .await
@@ -1488,7 +1488,7 @@ mod tests {
                     paused_flag(),
                     None,
                     None,
-                None,
+                    None,
                 ),
             )
             .await
@@ -1508,7 +1508,7 @@ mod tests {
                 paused_a,
                 None,
                 None,
-            None,
+                None,
             ),
         )
         .await
@@ -1541,7 +1541,7 @@ mod tests {
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(result.is_ok(), "log 不应中断脚本: {:?}", result);
@@ -1630,7 +1630,7 @@ mod tests {
             paused_flag(),
             Some(sink.clone()),
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1756,7 +1756,7 @@ throw new Error(JSON.stringify(out));"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1783,7 +1783,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1812,7 +1812,7 @@ if (!s.exists) {{ file_md5({p}); }}"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1853,7 +1853,7 @@ if (read_b64_chunk({p}, 99, 3) !== "") throw new Error("越界应空串");"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(r.is_ok(), "块拼接应还原整文件 b64: {:?}", r);
@@ -1885,7 +1885,7 @@ read_b64_chunk({p}, 0, 4);"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1910,7 +1910,7 @@ read_b64_chunk({p}, 0, 4);"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -1937,7 +1937,7 @@ read_b64_chunk({p}, 0, 4);"#,
                 paused_flag(),
                 None,
                 None,
-            None,
+                None,
             )
             .await
         };
@@ -2016,7 +2016,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(r.is_ok(), "写文件应成功: {:?}", r);
@@ -2043,7 +2043,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             None,
-        None,
+            None,
         )
         .await;
         assert!(
@@ -2069,7 +2069,7 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             paused_flag(),
             None,
             Some(lf.clone()),
-        None,
+            None,
         )
         .await;
         assert!(result.is_ok(), "脚本应正常完成: {:?}", result);
@@ -2094,7 +2094,15 @@ if (read_file({p}) !== "over") throw new Error("write_file 应截断覆盖");"#,
             params: vec![],
             code: "await sleep(1)".into(),
         };
-        let out = run_script("COM0", &no_log, m.clone(), HashMap::new(), Some(lf.clone()), None).await;
+        let out = run_script(
+            "COM0",
+            &no_log,
+            m.clone(),
+            HashMap::new(),
+            Some(lf.clone()),
+            None,
+        )
+        .await;
         assert!(out.result.is_ok());
         assert!(out.log_file.is_none(), "零 log() 不应给路径");
         assert!(!lf.exists(), "零 log() 不应创建文件");

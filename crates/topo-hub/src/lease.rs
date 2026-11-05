@@ -307,7 +307,12 @@ impl LeaseManager {
     }
 
     /// 续租：顺延 expires_at = now + ttl（同样夹取上限）。仅持有者 token 可续。
-    pub fn renew(&self, lease_id: &str, token: &str, ttl_minutes: Option<u64>) -> Result<Lease, String> {
+    pub fn renew(
+        &self,
+        lease_id: &str,
+        token: &str,
+        ttl_minutes: Option<u64>,
+    ) -> Result<Lease, String> {
         let mut leases = self.leases.lock().expect("lease lock poisoned");
         self.drop_expired_locked(&mut leases);
         let lease = leases
@@ -394,7 +399,14 @@ impl LeaseManager {
         if !closed.is_empty() {
             detail.push_str(&format!("；顺带收回其打开的端口: {}", closed.join("、")));
         }
-        audit::log(audit::EV_PREEMPT, None, &removed.label, Some(lease_id), &keys, &detail);
+        audit::log(
+            audit::EV_PREEMPT,
+            None,
+            &removed.label,
+            Some(lease_id),
+            &keys,
+            &detail,
+        );
         let _ = self.bus.send(());
         Ok(removed)
     }
@@ -524,7 +536,7 @@ fn expand_scope(scope: &Scope) -> Result<Vec<Grant>, String> {
 
     if let Some(tid) = &scope.topology {
         let topo = crate::topology::find(tid)
-            .ok_or_else(|| format!("拓扑不存在: {tid}（topo_list 可查）"))?;
+            .ok_or_else(|| format!("拓扑不存在: {tid}（topo_get 不传参可查）"))?;
         for m in &topo.members {
             if device::find(&m.device).is_some() {
                 grants.push(Grant {
@@ -535,19 +547,23 @@ fn expand_scope(scope: &Scope) -> Result<Vec<Grant>, String> {
     }
     for id in &scope.devices {
         let d = device::find(id)
-            .ok_or_else(|| format!("设备「{id}」不存在（device_list 可查，先 device_create）"))?;
+            .ok_or_else(|| format!("设备「{id}」不存在（device_get 可查，先 device_create）"))?;
         grants.push(Grant { device: d.id });
     }
     for key in &scope.endpoints {
         let d = device::device_of_port(key).ok_or_else(|| {
-            format!("端口「{key}」未归属任何设备，无法占用——先 device_create 注册（把此端口列为通道）")
+            format!(
+                "端口「{key}」未归属任何设备，无法占用——先 device_create 注册（把此端口列为通道）"
+            )
         })?;
         grants.push(Grant { device: d.id });
     }
 
     for (i, a) in grants.iter().enumerate() {
         if grants[i + 1..].iter().any(|b| grants_intersect(a, b)) {
-            let name = device::find(&a.device).map(|d| d.name).unwrap_or_else(|| a.device.clone());
+            let name = device::find(&a.device)
+                .map(|d| d.name)
+                .unwrap_or_else(|| a.device.clone());
             return Err(format!("申请范围内设备重复: {name}"));
         }
     }
@@ -611,11 +627,16 @@ mod tests {
             &state,
             &n,
             vec![
-                Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() },
+                Channel::Serial {
+                    port: "COM4".into(),
+                    config: ss_core::SerialConfig::default(),
+                },
                 Channel::Ssh(crate::device::SshChannelConfig::ssh_fixture("ssh-x1")),
             ],
         );
-        let g = Grant { device: d.id.clone() };
+        let g = Grant {
+            device: d.id.clone(),
+        };
         assert!(g.covers("COM4"), "串口通道端口覆盖");
         assert!(g.covers("ssh-x1::shell"), "SSH 通道端点覆盖");
         assert!(g.covers("ssh-x1::shell@3"), "SSH 实例行覆盖");
@@ -633,8 +654,21 @@ mod tests {
         let m = manager(LeaseConfig::default());
         let na = unique_name("设备A");
         let nb = unique_name("设备B");
-        let a = seed_device(&state, &na, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
-        let b = seed_device(&state, &nb, vec![Channel::Ssh(crate::device::SshChannelConfig::ssh_fixture("ssh-x1"))]);
+        let a = seed_device(
+            &state,
+            &na,
+            vec![Channel::Serial {
+                port: "COM4".into(),
+                config: ss_core::SerialConfig::default(),
+            }],
+        );
+        let b = seed_device(
+            &state,
+            &nb,
+            vec![Channel::Ssh(crate::device::SshChannelConfig::ssh_fixture(
+                "ssh-x1",
+            ))],
+        );
 
         // token-a 持 A
         let la = m
@@ -655,10 +689,9 @@ mod tests {
             other => panic!("应冲突: {other:?}"),
         }
         // B 不受影响
-        assert!(
-            m.acquire("token-b", "agent-b", &scope_devices(&nb), None)
-                .is_ok()
-        );
+        assert!(m
+            .acquire("token-b", "agent-b", &scope_devices(&nb), None)
+            .is_ok());
         // 同一设备重复出现在 scope → Invalid
         let dup = Scope {
             devices: vec![na.clone(), na.clone()],
@@ -696,12 +729,23 @@ mod tests {
         };
         let m = manager(cfg);
         let n = unique_name("设备");
-        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
+        let d = seed_device(
+            &state,
+            &n,
+            vec![Channel::Serial {
+                port: "COM4".into(),
+                config: ss_core::SerialConfig::default(),
+            }],
+        );
 
         let a = m
             .acquire("token-a", "a", &scope_devices(&n), Some(9999))
             .unwrap();
-        assert_eq!((a.expires_at - a.acquired_at).num_minutes(), 60, "超上限夹取");
+        assert_eq!(
+            (a.expires_at - a.acquired_at).num_minutes(),
+            60,
+            "超上限夹取"
+        );
 
         assert!(m.renew(&a.id, "token-b", None).is_err());
         assert!(m.release(&a.id, "token-b").is_err());
@@ -715,13 +759,8 @@ mod tests {
         assert!(m.gate(Some("token-a"), "COM4").is_ok());
         m.force_expire(&a.id);
         assert!(m.list().is_empty());
-        assert!(
-            matches!(m.gate(Some("token-a"), "COM4"), Err(e) if e.contains("未持"))
-        );
-        assert!(
-            m.acquire("token-b", "b", &scope_devices(&n), None)
-                .is_ok()
-        );
+        assert!(matches!(m.gate(Some("token-a"), "COM4"), Err(e) if e.contains("未持")));
+        assert!(m.acquire("token-b", "b", &scope_devices(&n), None).is_ok());
 
         // 人工强释放（无 MCP 会话时无口可收）
         let lb = m.list()[0].clone();
@@ -739,9 +778,7 @@ mod tests {
         // 匿名 → 引导 token
         assert!(matches!(m.gate(None, "COM4"), Err(e) if e.contains("token")));
         // 未注册端口（有 token）→ 引导 device_create
-        assert!(
-            matches!(m.gate(Some("t"), "COM99"), Err(e) if e.contains("device_create"))
-        );
+        assert!(matches!(m.gate(Some("t"), "COM99"), Err(e) if e.contains("device_create")));
     }
 
     /// 排队等待：持有者租约在等待期间过期 → 等待者自动获得。
@@ -753,10 +790,15 @@ mod tests {
         let state = make_state();
         let m = manager(LeaseConfig::default());
         let n = unique_name("设备");
-        let d = seed_device(&state, &n, vec![Channel::Serial { port: "COM4".into(), config: ss_core::SerialConfig::default() }]);
-        let a = m
-            .acquire("token-a", "a", &scope_devices(&n), None)
-            .unwrap();
+        let d = seed_device(
+            &state,
+            &n,
+            vec![Channel::Serial {
+                port: "COM4".into(),
+                config: ss_core::SerialConfig::default(),
+            }],
+        );
+        let a = m.acquire("token-a", "a", &scope_devices(&n), None).unwrap();
 
         let m2 = Arc::clone(&m);
         let id = a.id.clone();
