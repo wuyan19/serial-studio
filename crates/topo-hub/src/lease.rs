@@ -121,6 +121,13 @@ pub struct Lease {
     pub expires_at: chrono::DateTime<chrono::Local>,
 }
 
+impl Lease {
+    /// grant 设备 id 集（联动收回用）。
+    pub fn grants_ids(&self) -> Vec<String> {
+        self.grants.iter().map(|g| g.device.clone()).collect()
+    }
+}
+
 /// 申请被拒时的冲突明细（AI 据此决策重试或换设备）。
 #[derive(Debug, Clone, Serialize)]
 pub struct Conflict {
@@ -141,6 +148,9 @@ pub struct LeaseManager {
     leases: Mutex<Vec<Lease>>,
     pub cfg: LeaseConfig,
     bus: broadcast::Sender<()>,
+    /// I/O 会话联动（设备本体论工具面的连接收回）。构造后注入（SessionManager
+    /// 构造需要 LeaseManager，避免循环依赖）；None = 未注入（纯闸测试场景）。
+    sessions: Mutex<Option<Arc<crate::session::SessionManager>>>,
 }
 
 impl LeaseManager {
@@ -149,7 +159,32 @@ impl LeaseManager {
             leases: Mutex::new(Vec::new()),
             cfg,
             bus,
+            sessions: Mutex::new(None),
         })
+    }
+
+    /// 注入 I/O 会话管理器（TopoState::create 组装时调用一次）。
+    pub fn attach_sessions(&self, sm: Arc<crate::session::SessionManager>) {
+        *self.sessions.lock().expect("session mgr slot poisoned") = Some(sm);
+    }
+
+    /// 释放路径统一联动：收回该 token 在这些设备上建立的 I/O 会话连接。
+    /// pub：release（同步）的调用方在 async 上下文补做收回。
+    pub async fn reclaim_sessions(
+        &self,
+        token: &str,
+        device_ids: &[String],
+        state: &AppState,
+    ) -> Vec<String> {
+        let sm = self
+            .sessions
+            .lock()
+            .expect("session mgr slot poisoned")
+            .clone();
+        match sm {
+            Some(sm) => sm.reclaim_for_devices(token, device_ids, state).await,
+            None => Vec::new(),
+        }
     }
 
     pub fn gate_enabled(&self) -> bool {
@@ -198,7 +233,7 @@ impl LeaseManager {
 
     /// 排队申请：冲突时每 500ms 重试（惰性清扫让到期租约自然腾位），到
     /// wait_ms 仍冲突才拒绝并审计一次。Invalid（范围本身非法）立即返回不重试。
-    /// wait 上限 10 分钟（AI 长等待应自行轮询 lease_status）。
+    /// wait 上限 10 分钟（AI 长等待应自行轮询 list_my_leases）。
     pub async fn acquire_with_wait(
         &self,
         token: &str,
@@ -370,15 +405,27 @@ impl LeaseManager {
     /// 人工抢占（Web 占用中心）：不验 token。写闸即时对该会话生效；顺带收回
     /// 该会话在租约设备全部通道端口中经 MCP 开的口（人开的口不受影响）。
     pub async fn force_release(&self, lease_id: &str, state: &AppState) -> Result<Lease, String> {
+        // 过期即收（含影子缓冲清理；不再等 sweep tick）。锁外 await：
+        // leases 锁是 std Mutex，guard 跨 await 会毒化 future 的 Send。
+        let expired = {
+            let mut leases = self.leases.lock().expect("lease lock poisoned");
+            self.drop_expired_locked(&mut leases)
+        };
+        for l in &expired {
+            self.reclaim_sessions(&l.token, &l.grants_ids(), state)
+                .await;
+        }
         let removed = {
             let mut leases = self.leases.lock().expect("lease lock poisoned");
-            self.drop_expired_locked(&mut leases);
             let pos = leases
                 .iter()
                 .position(|l| l.id == lease_id)
                 .ok_or_else(|| format!("租约不存在: {lease_id}"))?;
             leases.remove(pos)
         };
+        // I/O 会话联动（设备本体论工具面的连接与影子缓冲）
+        self.reclaim_sessions(&removed.token, &removed.grants_ids(), state)
+            .await;
         let mut closed: Vec<String> = Vec::new();
         if let Some(sid) = ss_server::mcp::mcp_session_of(&removed.token) {
             let open = state.manager.list_open_ports().await;
@@ -446,7 +493,7 @@ impl LeaseManager {
                 "匿名调用（无 token）",
             );
             return Err(format!(
-                "写操作「{port_key}」需要租约：当前会话未标识（initialize 获取 token 或在工具参数传 token），先 lease_acquire"
+                "写操作「{port_key}」需要租约：当前会话未标识（initialize 获取 token 或在工具参数传 token），先 acquire_lease"
             ));
         };
         let Some(owner) = device::device_of_port(port_key) else {
@@ -459,7 +506,7 @@ impl LeaseManager {
                 "端口未归属任何设备",
             );
             return Err(format!(
-                "写操作「{port_key}」被租约闸拒绝：该端口未归属任何设备。先 device_create 注册设备（把此端口列为通道），再 lease_acquire"
+                "写操作「{port_key}」被租约闸拒绝：该端口未归属任何设备。先 device_create 注册设备（把此端口列为通道），再 acquire_lease"
             ));
         };
         let leases = self.list();
@@ -483,37 +530,48 @@ impl LeaseManager {
             &holder_info,
         );
         Err(format!(
-            "写操作「{port_key}」被租约闸拒绝：本会话未持设备「{}」的租约（{holder_info}）。先 lease_acquire",
+            "写操作「{port_key}」被租约闸拒绝：本会话未持设备「{}」的租约（{holder_info}）。先 acquire_lease",
             owner.name
         ))
     }
 
     /// 定时清扫（main 每分钟跑一次；读路径已惰性清扫，这里是兜底）。
-    pub fn sweep(&self) {
-        let mut leases = self.leases.lock().expect("lease lock poisoned");
-        self.drop_expired_locked(&mut leases);
+    /// 过期即联动收回 I/O 会话（无 AppState 的惰性路径不收——≤60s 窗口内
+    /// 旧 agent 已死不写、新 agent Attach 语义与多持有者一致）。
+    pub async fn sweep(&self, state: &AppState) {
+        let expired = {
+            let mut leases = self.leases.lock().expect("lease lock poisoned");
+            self.drop_expired_locked(&mut leases)
+        };
+        for l in &expired {
+            self.reclaim_sessions(&l.token, &l.grants_ids(), state)
+                .await;
+        }
     }
 
-    /// 锁内清扫过期租约（逐条审计 expire）。
-    fn drop_expired_locked(&self, leases: &mut Vec<Lease>) {
+    /// 锁内清扫过期租约（逐条审计 expire），返回本轮过期清单（联动收回用）。
+    fn drop_expired_locked(&self, leases: &mut Vec<Lease>) -> Vec<Lease> {
         let now = chrono::Local::now();
+        let mut expired = Vec::new();
         let mut i = 0;
         while i < leases.len() {
             if leases[i].expires_at <= now {
-                let expired = leases.remove(i);
-                let keys: Vec<String> = expired.grants.iter().map(|g| g.device.clone()).collect();
+                let l = leases.remove(i);
+                let keys: Vec<String> = l.grants.iter().map(|g| g.device.clone()).collect();
                 audit::log(
                     audit::EV_EXPIRE,
-                    Some(&expired.token),
-                    &expired.label,
-                    Some(&expired.id),
+                    Some(&l.token),
+                    &l.label,
+                    Some(&l.id),
                     &keys,
                     "TTL 到期",
                 );
+                expired.push(l);
             } else {
                 i += 1;
             }
         }
+        expired
     }
 
     /// 测试钩子：把租约到期时间拨到过去（验证惰性清扫/闸拒绝）。
@@ -536,7 +594,7 @@ fn expand_scope(scope: &Scope) -> Result<Vec<Grant>, String> {
 
     if let Some(tid) = &scope.topology {
         let topo = crate::topology::find(tid)
-            .ok_or_else(|| format!("拓扑不存在: {tid}（topo_get 不传参可查）"))?;
+            .ok_or_else(|| format!("拓扑不存在: {tid}（get_topology 不传参可查）"))?;
         for m in &topo.members {
             if device::find(&m.device).is_some() {
                 grants.push(Grant {
@@ -547,7 +605,7 @@ fn expand_scope(scope: &Scope) -> Result<Vec<Grant>, String> {
     }
     for id in &scope.devices {
         let d = device::find(id)
-            .ok_or_else(|| format!("设备「{id}」不存在（device_get 可查，先 device_create）"))?;
+            .ok_or_else(|| format!("设备「{id}」不存在（get_device 可查，先 device_create）"))?;
         grants.push(Grant { device: d.id });
     }
     for key in &scope.endpoints {

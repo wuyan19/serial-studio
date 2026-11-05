@@ -19,7 +19,8 @@ use ss_server::PortView;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// topo-hub 组装状态：ss-server 共享运行时 + 拓扑/租约两条变更广播 + 租约管理器。
+/// topo-hub 组装状态：ss-server 共享运行时 + 拓扑/租约两条变更广播 + 租约管理器
+/// + I/O 会话管理器（设备本体论工具面的连接/影子缓冲）。
 /// bus 是空通道语义（收发双方只关心"变了"，不传载荷）。
 #[derive(Clone)]
 pub struct TopoState {
@@ -27,19 +28,24 @@ pub struct TopoState {
     pub topo_bus: Arc<broadcast::Sender<()>>,
     pub lease_bus: Arc<broadcast::Sender<()>>,
     pub leases: Arc<lease::LeaseManager>,
+    pub sessions: Arc<crate::session::SessionManager>,
 }
 
 impl TopoState {
-    /// 生产组装点：总线 + 租约管理器（配置读 lease.json）。
+    /// 生产组装点：总线 + 租约管理器（配置读 lease.json）+ 会话管理器
+    /// （租约管理器注入会话联动回调——释放/过期收回 I/O 连接）。
     pub fn create(base: AppState) -> TopoState {
         let (ttx, _) = broadcast::channel(16);
         let (ltx, _) = broadcast::channel(16);
         let leases = lease::LeaseManager::new(lease::load_config(), ltx.clone());
+        let sessions = crate::session::SessionManager::new(std::sync::Arc::clone(&leases));
+        leases.attach_sessions(std::sync::Arc::clone(&sessions));
         TopoState {
             base,
             topo_bus: Arc::new(ttx),
             lease_bus: Arc::new(ltx),
             leases,
+            sessions,
         }
     }
 }

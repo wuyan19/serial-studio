@@ -27,7 +27,7 @@ static MCP_SESSIONS: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 
 /// 取（或建）token 的 MCP 会话。
-fn session_for(token: &str) -> ss_core::SessionId {
+pub fn session_for(token: &str) -> ss_core::SessionId {
     let mut g = MCP_SESSIONS.lock().expect("mcp sessions lock poisoned");
     let map = g.get_or_insert_with(std::collections::HashMap::new);
     *map.entry(token.to_string())
@@ -139,7 +139,13 @@ fn handle_initialize() -> Value {
 }
 
 fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtension>]) -> Value {
-    let mut tools: Vec<Value> = json!([
+    // 域扩展可声明替代内置工具面（分叉）——任一扩展声明隐藏即隐藏（分叉是全局
+    // 决策：宿主要么暴露 serial_* 要么用扩展面，不存在混搭）。无扩展=all(空)=true
+    // ——serial-studio 主产品行为不变。内置 serial_*/port_* 不进清单
+    // （tools/call 照常分发，仅影响发现）。
+    let builtin_visible = extensions.iter().all(|e| e.builtin_tools_visible());
+    let mut tools: Vec<Value> = if builtin_visible {
+        json!([
             {
                 "name": "serial_list",
                 "description": "列出所有端口(本机串口/远程设备/SSH 终端):完整键、别名、设备昵称与寻址提示、打开状态,中点分隔的扁平单行。传 port 时改为输出该端口的详细配置(串口=波特率/数据位/校验/流控/占用数;SSH 设备=连接身份与端点)——须已打开。",
@@ -279,11 +285,18 @@ fn handle_tools_list(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtensi
                 }
             }
     ])
-    .as_array()
-    .cloned()
-    .unwrap_or_default();
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     for ext in extensions {
-        tools.extend(ext.tools());
+        // 管理面工具隐藏（声明方决定；tools/call 照常分发）
+        tools.extend(ext.tools().into_iter().filter(|t| {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            !ext.is_admin_tool(name)
+        }));
     }
     json!({ "tools": tools })
 }
@@ -1247,6 +1260,62 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+    }
+
+    /// 分叉与管理面声明：builtin_tools_visible=false 隐藏内置工具面（tools/call
+    /// 照常分发）；is_admin_tool 声明的扩展工具不进 tools/list 但可调用。
+    /// 默认值（两方法均未实现）= serial-studio 主产品行为不变（上方测试）。
+    #[tokio::test]
+    async fn extension_can_hide_builtin_and_admin_tools() {
+        struct ForkExt;
+        impl crate::mcp_ext::McpExtension for ForkExt {
+            fn tools(&self) -> Vec<Value> {
+                vec![
+                    json!({ "name": "fork_tool", "description": "分叉面工具", "inputSchema": {"type":"object","properties":{}} }),
+                    json!({ "name": "fork_admin", "description": "管理面工具", "inputSchema": {"type":"object","properties":{}} }),
+                ]
+            }
+            fn is_admin_tool(&self, name: &str) -> bool {
+                name == "fork_admin"
+            }
+            fn builtin_tools_visible(&self) -> bool {
+                false
+            }
+            fn call<'a>(
+                &'a self,
+                name: &'a str,
+                _args: Value,
+                _principal: Option<&'a str>,
+                _state: &'a AppState,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>>
+            {
+                Box::pin(async move { Some(ok_text(name.to_string())) })
+            }
+        }
+
+        let mut state = make_state();
+        state.mcp_extensions = vec![std::sync::Arc::new(ForkExt)];
+
+        // tools/list：内置隐藏 + 管理面隐藏 = 只剩 fork_tool
+        let resp =
+            handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, &state).await;
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["fork_tool"], "内置与管理面均不应出现");
+        // 内置名不靠 tools/list 也能直接调用（隐藏≠禁用）
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"serial_list","arguments":{}}}"#,
+            &state,
+        )
+        .await;
+        assert!(resp["result"]["isError"].is_null(), "内置名照常分发");
+        // 管理面工具同理可调用
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fork_admin","arguments":{}}}"#,
+            &state,
+        )
+        .await;
+        assert_eq!(resp["result"]["content"][0]["text"], "fork_admin");
     }
 
     /// principal 解析契约：参数 token > Mcp-Session-Id 头 > 匿名。

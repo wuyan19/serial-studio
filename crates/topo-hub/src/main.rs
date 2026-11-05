@@ -39,11 +39,12 @@ async fn main() -> anyhow::Result<()> {
     // 租约最多多活到下一个整分钟 tick）。
     {
         let leases = std::sync::Arc::clone(&state.leases);
+        let base = std::sync::Arc::new(state.base.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                leases.sweep();
+                leases.sweep(&base).await;
             }
         });
     }

@@ -66,46 +66,46 @@
 
 **原子性/状态机/TTL/排队**：不变（见下文与 §6）。**抢占收口**：强释放时收回该会话在租约设备全部通道端口中经 MCP 开的口。
 
+**租约即写权**（2026-11-05 设备本体论工具面起）：新 I/O 工具（`exec_command`/`open_session`/`send_input`/`close_session`）在 session 层入口直接检查**设备租约**——不是端口键闸，是工具自身语义。旧写闸（intercept）保留：agent 猜用内置工具名（`serial_send` 等）时仍按端口键闸拦截。
+
 **写闸**（`enable_lease_gate`，默认开，**仅作用于 MCP 来源**；web 用户与本地 Tauri 免闸——闸的管理对象是 AI，人有人工抢占权兜底）：
 
 | 工具 | 闸 |
 |---|---|
-| `serial_send` / `serial_read` / `serial_clear` | 需持覆盖该端口（经属主设备）的租约 |
-| `serial_script`（含旧名 `serial_debug_script` / `serial_run_script` 别名） | 启动时按 `port` 参数检查；脚本内跨端口写不二次拦截（局限，P2 下沉 core 再拦） |
-| `port_open` / `port_close`（ss-server 内置，serial-studio 同享） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；强释放顺带收回 |
-| `serial_list`（含单口详情）/ `serial_grep` | 免闸（非破坏，观察开放） |
+| `exec_command` / `open_session` / `send_input` / `close_session`（分叉面） | session.io_gate：设备租约检查（无租约拒绝并引导 `acquire_lease`） |
+| `read_output`（分叉面） | 免闸（非破坏游标读影子缓冲；会话须已建立） |
+| `serial_send` / `serial_read` / `serial_clear`（内置，分叉后 tools/list 隐藏） | intercept：需持覆盖该端口（经属主设备）的租约 |
+| `serial_script`（内置，含旧名别名） | 启动时按 `port` 参数检查；脚本内跨端口写逐次拦截（script_gate） |
+| `port_open` / `port_close`（内置） | 同上需租约；占用挂 token 的 MCP 会话（mcp.rs 进程级注册表），只能关自己开的口；强释放顺带收回 |
+| `serial_list`（含单口详情）/ `serial_grep`（内置） | 免闸（非破坏，观察开放） |
 
-被闸拒绝时错误信息引导先 `lease_acquire`（未注册端口引导 `device_create`），并附当前持有者与到期时间。
+被闸拒绝时错误信息引导先 `acquire_lease`（未注册端口引导 `device_create`），并附当前持有者与到期时间。
 
-**失败返回与排队**：每个冲突设备返回 `{device, name, holder_label, expires_at}`。`lease_acquire` 带 `wait_timeout_ms`（上限 10 分钟）时服务端 500ms 轮询排队，持有者释放或过期即自动获得，超时仍冲突才拒绝。
+**失败返回与排队**：每个冲突设备返回 `{device, name, holder_label, expires_at}`。`acquire_lease` 带 `wait_timeout_ms`（上限 10 分钟）时服务端 500ms 轮询排队，持有者释放或过期即自动获得，超时仍冲突才拒绝。
 
 ## 5. MCP 会话与工具
 
 **会话**：`initialize` 响应头加 `Mcp-Session-Id`（Streamable HTTP 标准约定），结果体同时带 `session_token` 字段兜底；租约类工具均接受可选 `token` 参数。优先级：参数 > 头 > 匿名（匿名只读）。token → Principal 注册表在内存，`label` 由 AI 在 acquire 时自报。
 
-**新工具**（拓扑 4 + 设备 4 + 租约 4；`topo_list`/`device_list` 已并入 `topo_get`/`device_get` 的无参分支，旧名为分发别名）：
+**工具面**（2026-11-05 设备本体论重写，`docs/mcp-tools-design.md`；分叉声明：内置 `serial_*`/`port_*` 不进 tools/list——McpExtension `builtin_tools_visible()=false`；管理 6 个经 `is_admin_tool()` 隐藏）：
 
 | 工具 | 入参要点 | 出参要点 |
 |---|---|---|
-| `topo_get` | `topo`（id 或 name；省略=列表） | 省略时拓扑数组：id、name、成员数、占用摘要；传入时成员端点明细：在线状态、被谁占用 |
-| `topo_create` | `name`、`description?`、`members: [{key, note?}]` | 定型后的成员与 id |
-| `topo_update` | `topo` + 可变字段 | 同上 |
-| `topo_delete` | `topo` | — |
-| `lease_acquire` | `topo?` \| `devices?: [id]` \| `endpoints?: [key]` 三选一，`holder?`、`ttl_minutes?`、`token?` | `lease_id`、grants、`expires_at`；冲突则逐端点明细 |
-| `lease_renew` | `lease_id`、`ttl_minutes?`、`token?` | 新 `expires_at` |
-| `lease_release` | `lease_id`、`token?` | — |
-| `lease_status` | `token?` | 本 principal 全部租约与剩余时间 |
+| `get_topology` | `topology?`（省略=列表） | 列表：name/id/成员数；详情：成员通道/占用/备注 + 连线（两端端口标签） |
+| `get_device` | `device?`（省略=列表） | 列表：名称/通道摘要/占用；详情：通道带序号（I/O `channel` 参数用） |
+| `list_my_leases` | — | 本会话租约与剩余时间 |
+| `acquire_lease` | `topology?` \| `devices?: [id]` \| `endpoints?: [key]`（可并集），`holder?`、`ttl_minutes?`、`wait_timeout_ms?` | `lease_id`、`expires_at`；冲突逐设备明细 |
+| `renew_lease` / `release_lease` | `lease_id` | release 顺带关闭该会话在租约设备上的 I/O 连接 |
+| `exec_command` | `device`、`command`、`channel?`、`wait_ms?`、`idle_ms?` | 一次调用拿完整输出（首字节等 wait_ms，静默 idle_ms 收尾） |
+| `open_session` / `send_input` | `device(+channel)`、`data`、`wait_ms?`(0=只发) | 会话即设备通道：同 `device+channel` 寻址；连接/console 状态跨调用保持 |
+| `read_output` | `device`、`since?`（游标）、`timeout_ms?` | 非破坏游标读（会话影子缓冲）；截断补读/持续输出轮询/从头读 |
+| `close_session` | `device(+channel)` | 退出端口持有（末位才关物理连接） |
 
-设备工具族（P2.5 新增）：
+管理面（隐藏，tools/call 可用）：`device_create/update/delete`、`topo_create/update/delete`（形态同 P2.5，channels 内联配置）。
 
-| 工具 | 入参要点 | 出参要点 |
-|---|---|---|
-| `device_get` | `device`（id 或 name；省略=列表） | 省略时设备行：名称、通道摘要、占用状态；传入时通道明细（解析凭据标签/端口在线态）、占用 |
-| `device_create` | `name`、`model?`、`location?`、`channels: [{type:serial,port} \| {type:ssh,host,port?,username,nickname?,auth}]` | 定型后的设备 |
-| `device_update` | `device` + 可变字段（提供才更新） | 同上 |
-| `device_delete` | `device`（被拓扑引用时拒绝并列出） | — |
+`acquire_lease` 的 scope 主形态为 `devices: [id或名称]`；`endpoints: [端口键]` 保留为糖——经 `device_of_port` 解析到属主设备，未注册端口报错并引导 `device_create`。`topo` 展开为成员设备并集。
 
-`lease_acquire` 的 scope 主形态为 `devices: [id或名称]`；`endpoints: [端口键]` 保留为糖——经 `device_of_port` 解析到属主设备，未注册端口报错并引导 `device_create`。`topo` 展开为成员设备并集；成员设备已删除的跳过并标注。
+**会话管理**（`crates/topo-hub/src/session.rs`）：连接即 manager 端口持有（挂 token 的 MCP 会话，与强释放收口同机制）；(token, 端口键) → 影子缓冲（append-only 环形 256KB，读到的字节留存），`read_output` 游标读影子缓冲（非破坏），滚动丢弃用 dropped 标注。租约释放/过期联动收回连接（release_lease/sweep/force_release 三路径）。通道寻址：序号（get_device 的通道[n]）/标签子串（含 SSH username）/缺省（首个串口，无串口取首个 SSH）。
 
 ## 6. 通知通道：SSE（实现修正）
 

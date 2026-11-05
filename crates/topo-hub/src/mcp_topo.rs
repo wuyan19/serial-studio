@@ -1,19 +1,23 @@
-//! 拓扑域 MCP 工具集：topo_get（不传参=列表）/ topo_create / topo_update / topo_delete
-//! + device_get（不传参=列表）/ device_create / device_update / device_delete
-//! + 租约 lease_acquire / lease_renew / lease_release / lease_status。
-//! topo_list / device_list 为并入列表粒度的旧名分发别名（tools/list 不出现）。
+//! 设备本体论 MCP 工具面（分叉 serial-studio 内置 serial_*）。
 //!
-//! 经 ss-server 的 McpExtension 注入 `/mcp`（见 mcp_ext.rs）。输出沿用内置工具的
-//! 文本风格（content/text，中点分隔扁平单行）——AI 消费方与 serial_list 一致。
-//! 变更后向 topo_bus/lease_bus 广播（SSE 客户端重拉）。
+//! 工具分层：
+//! - 发现：get_topology（无参=列表）/ get_device（无参=列表）/ list_my_leases；
+//! - 租约：acquire_lease / renew_lease / release_lease——租约即写权，I/O 入口检查；
+//! - 通道 I/O：exec_command（无状态命令）/ open_session + send_input（持久会话）/
+//!   read_output（游标补读） / close_session——设备+通道寻址，agent 不见端口键；
+//! - 管理（隐藏，is_admin_tool 声明）：device_create/update/delete、
+//!   topo_create/update/delete——tools/list 不出现但 tools/call 可用。
 //!
-//! 写闸（intercept）：serial_send/read/clear/脚本 在内置分发前经本扩展准入——
-//! 目标端口须被本会话（principal = 参数 token > Mcp-Session-Id 头）的活跃租约
-//! 覆盖。闸只作用于 MCP 来源；web/本地不经此路径（设计 §4）。
+//! builtin_tools_visible()=false：内置 serial_*/port_* 不进 tools/list（分叉声明），
+//! tools/call 对内置名照常分发。intercept 写闸保留——agent 万一猜用内置名仍受闸。
+//!
+//! 输出沿用文本风格（content/text，中点分隔扁平单行）。变更后向
+//! topo_bus/lease_bus 广播（SSE 客户端重拉）。
 
 use crate::api::member_views;
 use crate::device;
 use crate::lease::{remaining_minutes, AcquireError, LeaseManager, Scope};
+use crate::session::{ResolvedChannel, SessionManager};
 use crate::topology::{self, LinkInput, MemberInput};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,6 +29,7 @@ use tokio::sync::broadcast;
 pub struct TopoTools {
     pub bus: broadcast::Sender<()>,
     pub leases: Arc<LeaseManager>,
+    pub sessions: Arc<SessionManager>,
 }
 
 fn ok_text(text: String) -> Value {
@@ -35,13 +40,29 @@ fn error_text(text: String) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
 }
 
+/// I/O 工具通用入参。
+fn arg_device(args: &Value) -> Option<String> {
+    args.get("device")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().to_string())
+}
+
+fn arg_channel(args: &Value) -> Option<String> {
+    args.get("channel")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().to_string())
+}
+
 impl TopoTools {
-    /// 列表摘要（原 topo_list 并入 topo_get 的无参分支；旧名为分发别名）。
+    // ===== 发现层 =====
+
     async fn topo_list(&self) -> Value {
         let list = topology::load();
         if list.is_empty() {
             return ok_text(
-                "暂无拓扑。用 topo_create 创建；成员引用被测设备（device_get 可查）。".into(),
+                "暂无拓扑（拓扑由管理端 topo_create 创建——tools/list 隐藏的管理工具，可直接调用）。".into(),
             );
         }
         let lines: Vec<String> = list
@@ -57,11 +78,11 @@ impl TopoTools {
         ok_text(lines.join("\n"))
     }
 
-    async fn topo_get(&self, args: Value, state: &AppState) -> Value {
+    async fn get_topology(&self, args: Value, state: &AppState) -> Value {
         let topo_ref = args
-            .get("topo")
+            .get("topology")
             .and_then(|t| t.as_str())
-            .filter(|t| !t.is_empty());
+            .filter(|t| !t.trim().is_empty());
         let Some(topo_ref) = topo_ref else {
             return self.topo_list().await;
         };
@@ -129,64 +150,7 @@ impl TopoTools {
         ok_text(lines.join("\n"))
     }
 
-    async fn topo_create(&self, args: Value) -> Value {
-        let parsed: Result<CreateArgs, _> = serde_json::from_value(args);
-        let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 name（必填）、description?、members: [{device, note?, x?, y?}]、links: [{from, to, from_port?, to_port?, label?}]".into());
-        };
-        match topology::create(&a.name, &a.description, &a.members, &a.links) {
-            Ok(t) => {
-                let _ = self.bus.send(());
-                ok_text(format!(
-                    "已创建拓扑 {}（{}），成员 {} 项。成员引用被测设备（device_get 可查，未注册先 device_create）。",
-                    t.name, t.id, t.members.len()
-                ))
-            }
-            Err(e) => error_text(e),
-        }
-    }
-
-    async fn topo_update(&self, args: Value) -> Value {
-        let parsed: Result<UpdateArgs, _> = serde_json::from_value(args);
-        let Ok(a) = parsed else {
-            return error_text("参数解析失败：需要 topo（id 或名称），name?/description?/members?/links? 提供才更新".into());
-        };
-        match topology::update(
-            &a.topo,
-            a.name.as_deref(),
-            a.description.as_deref(),
-            a.members.as_deref(),
-            a.links.as_deref(),
-        ) {
-            Ok(t) => {
-                let _ = self.bus.send(());
-                ok_text(format!(
-                    "已更新拓扑 {}（{}），成员 {} 项。",
-                    t.name,
-                    t.id,
-                    t.members.len()
-                ))
-            }
-            Err(e) => error_text(e),
-        }
-    }
-
-    async fn topo_delete(&self, args: Value) -> Value {
-        let Some(topo_ref) = args.get("topo").and_then(|t| t.as_str()) else {
-            return error_text("缺少参数 topo（拓扑 id 或名称）".into());
-        };
-        match topology::delete(topo_ref) {
-            Ok(t) => {
-                let _ = self.bus.send(());
-                ok_text(format!("已删除拓扑 {}（{}）。", t.name, t.id))
-            }
-            Err(e) => error_text(e),
-        }
-    }
-
-    // ===== 被测设备工具族 =====
-
-    async fn device_list(&self, _state: &AppState) -> Value {
+    async fn device_list(&self) -> Value {
         let list = device::load();
         if list.is_empty() {
             return ok_text(
@@ -223,16 +187,12 @@ impl TopoTools {
         ok_text(lines.join("\n"))
     }
 
-    async fn device_get(&self, args: Value, _state: &AppState) -> Value {
-        let dev_ref = args
-            .get("device")
-            .and_then(|t| t.as_str())
-            .filter(|t| !t.is_empty());
+    async fn get_device(&self, args: Value, _state: &AppState) -> Value {
+        let dev_ref = arg_device(&args);
         let Some(dev_ref) = dev_ref else {
-            // 列表（原 device_list 并入；旧名为分发别名）
-            return self.device_list(_state).await;
+            return self.device_list().await;
         };
-        let Some(d) = device::find(dev_ref) else {
+        let Some(d) = device::find(&dev_ref) else {
             return error_text(format!("设备不存在: {dev_ref}（不传 device 可列出全部）"));
         };
         let mut lines = vec![format!(
@@ -250,18 +210,17 @@ impl TopoTools {
                 format!(" · 位置 {}", d.location)
             },
         )];
-        for ch in &d.channels {
+        // 通道带序号：I/O 工具的 channel 参数可用序号（"0"）或标签子串
+        for (i, ch) in d.channels.iter().enumerate() {
             lines.push(match ch {
-                device::Channel::Serial { port, config } => format!(
-                    "通道 串口 {port}（{}bps，写寻址用此端口键）",
-                    config.baud_rate
-                ),
+                device::Channel::Serial { port, .. } => {
+                    format!("通道[{i}] 串口 {port} · {}", ch.label())
+                }
                 device::Channel::Ssh(s) => format!(
-                    "通道 SSH {}（{}:{}，端点键 {}::shell，认证 {}）",
+                    "通道[{i}] SSH {} · {}:{} · 认证 {}",
                     s.label(),
                     s.host,
                     s.port,
-                    s.id,
                     ss_server::ssh::auth_label_of(&s.auth)
                 ),
             });
@@ -276,7 +235,433 @@ impl TopoTools {
         } else {
             lines.push("空闲".into());
         }
+        lines.push(
+            "I/O：acquire_lease 后用 exec_command / open_session（channel 可省略=默认通道）。"
+                .into(),
+        );
         ok_text(lines.join("\n"))
+    }
+
+    // ===== 通道 I/O 层（session.rs 承载连接与影子缓冲）=====
+
+    /// I/O 入口：io_gate（会话+租约+通道解析）→ open（连接取或建）。
+    async fn io_prepare(
+        &self,
+        args: &Value,
+        principal: Option<&str>,
+        state: &AppState,
+    ) -> Result<(String, ResolvedChannel), Value> {
+        let Some(dev) = arg_device(args) else {
+            return Err(error_text(
+                "缺少参数 device（设备 id 或名称，get_device 不传参可列出全部）".into(),
+            ));
+        };
+        let ch = arg_channel(args);
+        let rc = match self.sessions.io_gate(principal, &dev, ch.as_deref()) {
+            Ok(rc) => rc,
+            Err(e) => return Err(error_text(e)),
+        };
+        let Some(token) = principal else {
+            return Err(error_text("须会话标识（initialize 取 token）".into()));
+        };
+        if let Err(e) = self
+            .sessions
+            .open(token, &rc.port_key, rc.config.clone(), state)
+            .await
+        {
+            return Err(error_text(e));
+        }
+        Ok((token.to_string(), rc))
+    }
+
+    async fn exec_command(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let Some(command) = args
+            .get("command")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.trim().is_empty())
+        else {
+            return error_text("缺少参数 command（要执行的命令）".into());
+        };
+        let (token, rc) = match self.io_prepare(&args, principal, state).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let wait_ms = args.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(3000);
+        let idle_ms = args.get("idle_ms").and_then(|v| v.as_u64()).unwrap_or(250);
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(64 * 1024) as usize;
+        let (out, cursor, truncated, timed_out) = match self
+            .sessions
+            .send_and_collect(
+                &token,
+                &rc.port_key,
+                command,
+                true,
+                wait_ms,
+                idle_ms,
+                max_bytes,
+                state,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return error_text(e),
+        };
+        let mut s = out;
+        if timed_out {
+            s.push_str("\n（等待超时无输出：设备可能不回显或命令仍在执行，read_output(device) 可轮询新数据）");
+        }
+        if truncated {
+            s.push_str(&format!(
+                "\n…（截断：用 read_output(device, channel, since={cursor}) 补读剩余）"
+            ));
+        }
+        ok_text(s)
+    }
+
+    async fn open_session(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let (_, rc) = match self.io_prepare(&args, principal, state).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        // 会话即通道：后续 send_input/read_output 用同样的 device+channel 寻址
+        ok_text(format!(
+            "已开会话：{}。后续 send_input/read_output/close_session 传相同的 device+channel 即定位本会话；用完 close_session。",
+            rc.label
+        ))
+    }
+
+    async fn send_input(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let Some(data) = args.get("data").and_then(|d| d.as_str()) else {
+            return error_text("缺少参数 data（要发送的数据）".into());
+        };
+        let (token, rc) = match self.io_prepare(&args, principal, state).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let append_newline = args
+            .get("append_newline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let wait_ms = args.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(2000);
+        let idle_ms = args.get("idle_ms").and_then(|v| v.as_u64()).unwrap_or(250);
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(64 * 1024) as usize;
+        let (out, cursor, truncated, timed_out) = match self
+            .sessions
+            .send_and_collect(
+                &token,
+                &rc.port_key,
+                data,
+                append_newline,
+                wait_ms,
+                idle_ms,
+                max_bytes,
+                state,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return error_text(e),
+        };
+        let mut s = if wait_ms == 0 {
+            "已发送（未等待响应；read_output(device) 可后续轮询输出）".to_string()
+        } else {
+            out
+        };
+        if truncated {
+            s.push_str(&format!(
+                "\n…（截断：用 read_output(device, channel, since={cursor}) 补读剩余）"
+            ));
+        }
+        if wait_ms > 0 && timed_out {
+            s.push_str("\n（等待超时无输出：设备可能不回显或命令仍在执行）");
+        }
+        ok_text(s)
+    }
+
+    async fn read_output(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let Some(token) = principal.map(str::to_string) else {
+            return error_text("须会话标识（initialize 取 token）".into());
+        };
+        let Some(dev) = arg_device(&args) else {
+            return error_text("缺少参数 device（会话的设备寻址）".into());
+        };
+        let ch = arg_channel(&args);
+        // 读不破坏：仅解析通道寻址（会话须已由 open_session/exec_command 建立）
+        let rc = match SessionManager::resolve(&dev, ch.as_deref()) {
+            Ok(rc) => rc,
+            Err(e) => return error_text(e),
+        };
+        // since：字符串或数字 JSON 形态皆可（cursor 本是数）
+        let since = match args.get("since") {
+            None => None,
+            Some(v) => match v
+                .as_str()
+                .and_then(|c| c.parse::<usize>().ok())
+                .or_else(|| v.as_u64().map(|n| n as usize))
+            {
+                Some(n) => Some(n),
+                None => {
+                    return error_text(
+                        "since 须为数字游标（上次返回的 cursor 值）、\"0\"（从头读）或省略（只读新数据）".into(),
+                    )
+                }
+            },
+        };
+        let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(64 * 1024) as usize;
+        let (data, cursor, dropped, truncated) = match self
+            .sessions
+            .read_since(&token, &rc.port_key, since, timeout_ms, max_bytes, state)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return error_text(e),
+        };
+        let mut s = data;
+        if dropped > 0 {
+            s.push_str(&format!(
+                "\n（⚠ 缓冲滚动丢弃 {dropped} 字节——读晚了，窗口外数据已失）"
+            ));
+        }
+        if truncated {
+            s.push_str(&format!(
+                "\n…（截断：read_output(device, channel, since={cursor}) 继续读）"
+            ));
+        }
+        ok_text(s)
+    }
+
+    async fn close_session(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let Some(token) = principal.map(str::to_string) else {
+            return error_text("须会话标识（initialize 取 token）".into());
+        };
+        let Some(dev) = arg_device(&args) else {
+            return error_text("缺少参数 device（会话的设备寻址）".into());
+        };
+        let ch = arg_channel(&args);
+        let rc = match SessionManager::resolve(&dev, ch.as_deref()) {
+            Ok(rc) => rc,
+            Err(e) => return error_text(e),
+        };
+        match self.sessions.close(&token, &rc.port_key, state).await {
+            Ok(true) => ok_text(format!("已关闭会话（通道 {}）", rc.label)),
+            Ok(false) => ok_text(format!("会话已不在（通道 {}）", rc.label)),
+            Err(e) => error_text(e),
+        }
+    }
+
+    // ===== 租约层 =====
+
+    async fn acquire_lease(&self, args: Value, principal: Option<&str>) -> Value {
+        let Some(token) = principal.map(str::to_string) else {
+            return error_text(
+                "申请租约须先标识会话：initialize 取 token（标准客户端自动带头），或在工具参数传 token".into(),
+            );
+        };
+        let Ok(a) = serde_json::from_value::<AcquireArgs>(args) else {
+            return error_text(
+                "参数解析失败：topology? / devices? / endpoints?（可并用取并集）、holder?、ttl_minutes?、wait_timeout_ms?".into(),
+            );
+        };
+        let scope = Scope {
+            topology: a.topology,
+            devices: a.devices,
+            endpoints: a.endpoints,
+        };
+        if scope.is_empty() {
+            return error_text("申请范围为空：给 topology、devices 或 endpoints 至少一项".into());
+        }
+        let label = a
+            .holder
+            .filter(|h| !h.trim().is_empty())
+            .unwrap_or_else(|| format!("session-{}", &token[..8.min(token.len())]));
+        let wait_ms = a.wait_timeout_ms.unwrap_or(0);
+        let outcome = if wait_ms > 0 {
+            self.leases
+                .acquire_with_wait(&token, &label, &scope, a.ttl_minutes, wait_ms)
+                .await
+        } else {
+            self.leases.acquire(&token, &label, &scope, a.ttl_minutes)
+        };
+        let name_of = |id: &str| {
+            device::find(id)
+                .map(|d| d.name)
+                .unwrap_or_else(|| id.to_string())
+        };
+        match outcome {
+            Ok(l) => ok_text(format!(
+                "已获租约 {}（{}，剩余 {} 分钟）：设备 {}{}",
+                l.id,
+                fmt_time(l.expires_at),
+                remaining_minutes(&l),
+                l.grants
+                    .iter()
+                    .map(|g| name_of(&g.device))
+                    .collect::<Vec<_>>()
+                    .join("、"),
+                "\n租约=写权：exec_command / open_session 直接可用。用完 release_lease；长任务 renew_lease 顺延。"
+            )),
+            Err(AcquireError::Conflict(cs)) => {
+                let lines: Vec<String> = cs
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "冲突 {} · 持有 {}（{}，剩余 {} 分钟）",
+                            c.device_name,
+                            c.holder,
+                            c.lease_id,
+                            (c.expires_at - chrono::Local::now()).num_minutes().max(0)
+                        )
+                    })
+                    .collect();
+                error_text(format!(
+                    "申请被拒（{} 处冲突，未建立任何租约）：\n{}\n可等其释放/过期后重试，或带 wait_timeout_ms 排队等待。",
+                    lines.len(),
+                    lines.join("\n")
+                ))
+            }
+            Err(AcquireError::Invalid(e)) => error_text(e),
+        }
+    }
+
+    async fn renew_lease(&self, args: Value, principal: Option<&str>) -> Value {
+        let Some(id) = args.get("lease_id").and_then(|v| v.as_str()) else {
+            return error_text("缺少参数 lease_id".into());
+        };
+        let Some(token) = principal else {
+            return error_text("续租须会话标识（token 参数或 Mcp-Session-Id 头）".into());
+        };
+        let ttl = args.get("ttl_minutes").and_then(|v| v.as_u64());
+        match self.leases.renew(id, token, ttl) {
+            Ok(l) => ok_text(format!(
+                "已续租 {} 至 {}（剩余 {} 分钟）",
+                l.id,
+                fmt_time(l.expires_at),
+                remaining_minutes(&l)
+            )),
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn release_lease(&self, args: Value, principal: Option<&str>, state: &AppState) -> Value {
+        let Some(id) = args.get("lease_id").and_then(|v| v.as_str()) else {
+            return error_text("缺少参数 lease_id".into());
+        };
+        let Some(token) = principal else {
+            return error_text("释放须会话标识（token 参数或 Mcp-Session-Id 头）".into());
+        };
+        match self.leases.release(id, token) {
+            Ok(l) => {
+                // 联动收回该会话在租约设备上的 I/O 会话连接与影子缓冲
+                let closed = self
+                    .leases
+                    .reclaim_sessions(token, &l.grants_ids(), state)
+                    .await;
+                let mut s = format!("已释放租约 {}（{}）。", l.id, l.label);
+                if !closed.is_empty() {
+                    s.push_str(&format!("顺带关闭其 I/O 通道连接: {}", closed.join("、")));
+                }
+                ok_text(s)
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn list_my_leases(&self, principal: Option<&str>) -> Value {
+        let Some(token) = principal else {
+            return error_text("匿名会话无租约记录；initialize 取 token 或工具参数传 token".into());
+        };
+        let leases = self.leases.of_token(token);
+        if leases.is_empty() {
+            return ok_text("本会话当前无活跃租约。".into());
+        }
+        let name_of = |id: &str| {
+            device::find(id)
+                .map(|d| d.name)
+                .unwrap_or_else(|| id.to_string())
+        };
+        let lines: Vec<String> = leases
+            .iter()
+            .map(|l| {
+                format!(
+                    "{} · 剩余 {} 分钟 · 设备 {}",
+                    l.id,
+                    remaining_minutes(l),
+                    l.grants
+                        .iter()
+                        .map(|g| name_of(&g.device))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            })
+            .collect();
+        ok_text(lines.join("\n"))
+    }
+
+    // ===== 管理层（is_admin_tool 隐藏，tools/call 可用）=====
+
+    async fn topo_create(&self, args: Value) -> Value {
+        let parsed: Result<CreateArgs, _> = serde_json::from_value(args);
+        let Ok(a) = parsed else {
+            return error_text("参数解析失败：需要 name（必填）、description?、members: [{device, note?, x?, y?}]、links: [{from, to, from_port?, to_port?, label?}]".into());
+        };
+        match topology::create(&a.name, &a.description, &a.members, &a.links) {
+            Ok(t) => {
+                let _ = self.bus.send(());
+                ok_text(format!(
+                    "已创建拓扑 {}（{}），成员 {} 项。成员引用被测设备（get_device 可查，未注册先 device_create）。",
+                    t.name, t.id, t.members.len()
+                ))
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn topo_update(&self, args: Value) -> Value {
+        let parsed: Result<UpdateArgs, _> = serde_json::from_value(args);
+        let Ok(a) = parsed else {
+            return error_text("参数解析失败：需要 topology（id 或名称），name?/description?/members?/links? 提供才更新".into());
+        };
+        match topology::update(
+            &a.topo,
+            a.name.as_deref(),
+            a.description.as_deref(),
+            a.members.as_deref(),
+            a.links.as_deref(),
+        ) {
+            Ok(t) => {
+                let _ = self.bus.send(());
+                ok_text(format!(
+                    "已更新拓扑 {}（{}），成员 {} 项。",
+                    t.name,
+                    t.id,
+                    t.members.len()
+                ))
+            }
+            Err(e) => error_text(e),
+        }
+    }
+
+    async fn topo_delete(&self, args: Value) -> Value {
+        let Some(topo_ref) = args.get("topology").and_then(|t| t.as_str()) else {
+            return error_text("缺少参数 topology（拓扑 id 或名称）".into());
+        };
+        match topology::delete(topo_ref) {
+            Ok(t) => {
+                let _ = self.bus.send(());
+                ok_text(format!("已删除拓扑 {}（{}）。", t.name, t.id))
+            }
+            Err(e) => error_text(e),
+        }
     }
 
     async fn device_create(&self, args: Value, state: &AppState) -> Value {
@@ -335,6 +720,19 @@ impl TopoTools {
             Err(e) => error_text(e),
         }
     }
+
+    /// 写闸拦截目标端口的解析：port 参数 canon；缺省且恰好一个已开端口时用它；
+    /// 解析不出（无参且零/多端口）→ None → 放行（工具自身会报错，闸不越位）。
+    async fn gate_target_port(args: &Value, state: &AppState) -> Option<String> {
+        if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
+            return Some(state.manager.canon_key(p));
+        }
+        let open = state.manager.list_open_ports().await;
+        match open.len() {
+            1 => Some(open[0].clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -355,157 +753,6 @@ struct UpdateArgs {
     description: Option<String>,
     members: Option<Vec<MemberInput>>,
     links: Option<Vec<LinkInput>>,
-}
-
-impl TopoTools {
-    /// 写闸拦截目标端口的解析：port 参数 canon；缺省且恰好一个已开端口时用它；
-    /// 解析不出（无参且零/多端口）→ None → 放行（工具自身会报错，闸不越位）。
-    async fn gate_target_port(args: &Value, state: &AppState) -> Option<String> {
-        if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
-            return Some(state.manager.canon_key(p));
-        }
-        let open = state.manager.list_open_ports().await;
-        match open.len() {
-            1 => Some(open[0].clone()),
-            _ => None,
-        }
-    }
-
-    async fn lease_acquire(&self, args: Value, principal: Option<&str>) -> Value {
-        let Some(token) = principal.map(str::to_string) else {
-            return error_text(
-                "申请租约须先标识会话：initialize 取 token（标准客户端自动带头），或在工具参数传 token".into(),
-            );
-        };
-        let Ok(a) = serde_json::from_value::<AcquireArgs>(args) else {
-            return error_text(
-                "参数解析失败：topology? / devices? / endpoints?（可并用取并集）、holder?、ttl_minutes?、wait_timeout_ms?".into(),
-            );
-        };
-        let scope = Scope {
-            topology: a.topology,
-            devices: a.devices,
-            endpoints: a.endpoints,
-        };
-        if scope.is_empty() {
-            return error_text("申请范围为空：给 topology、devices 或 endpoints 至少一项".into());
-        }
-        let label = a
-            .holder
-            .filter(|h| !h.trim().is_empty())
-            .unwrap_or_else(|| format!("session-{}", &token[..8.min(token.len())]));
-        let wait_ms = a.wait_timeout_ms.unwrap_or(0);
-        let outcome = if wait_ms > 0 {
-            self.leases
-                .acquire_with_wait(&token, &label, &scope, a.ttl_minutes, wait_ms)
-                .await
-        } else {
-            self.leases.acquire(&token, &label, &scope, a.ttl_minutes)
-        };
-        let name_of = |id: &str| {
-            device::find(id)
-                .map(|d| d.name)
-                .unwrap_or_else(|| id.to_string())
-        };
-        match outcome {
-            Ok(l) => ok_text(format!(
-                "已获租约 {}（{}，剩余 {} 分钟）：设备 {}{}",
-                l.id,
-                fmt_time(l.expires_at),
-                remaining_minutes(&l),
-                l.grants
-                    .iter()
-                    .map(|g| name_of(&g.device))
-                    .collect::<Vec<_>>()
-                    .join("、"),
-                // 提醒续租手段，长任务靠自己保活
-                "\n占用=设备级（全部通道独占）。用完 lease_release 释放；长任务用 lease_renew 顺延。"
-            )),
-            Err(AcquireError::Conflict(cs)) => {
-                let lines: Vec<String> = cs
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "冲突 {} · 持有 {}（{}，剩余 {} 分钟）",
-                            c.device_name,
-                            c.holder,
-                            c.lease_id,
-                            (c.expires_at - chrono::Local::now()).num_minutes().max(0)
-                        )
-                    })
-                    .collect();
-                error_text(format!(
-                    "申请被拒（{} 处冲突，未建立任何租约）：\n{}\n可等其释放/过期后重试，或带 wait_timeout_ms 排队等待。",
-                    lines.len(),
-                    lines.join("\n")
-                ))
-            }
-            Err(AcquireError::Invalid(e)) => error_text(e),
-        }
-    }
-
-    async fn lease_renew(&self, args: Value, principal: Option<&str>) -> Value {
-        let Some(id) = args.get("lease_id").and_then(|v| v.as_str()) else {
-            return error_text("缺少参数 lease_id".into());
-        };
-        let Some(token) = principal else {
-            return error_text("续租须会话标识（token 参数或 Mcp-Session-Id 头）".into());
-        };
-        let ttl = args.get("ttl_minutes").and_then(|v| v.as_u64());
-        match self.leases.renew(id, token, ttl) {
-            Ok(l) => ok_text(format!(
-                "已续租 {} 至 {}（剩余 {} 分钟）",
-                l.id,
-                fmt_time(l.expires_at),
-                remaining_minutes(&l)
-            )),
-            Err(e) => error_text(e),
-        }
-    }
-
-    async fn lease_release(&self, args: Value, principal: Option<&str>) -> Value {
-        let Some(id) = args.get("lease_id").and_then(|v| v.as_str()) else {
-            return error_text("缺少参数 lease_id".into());
-        };
-        let Some(token) = principal else {
-            return error_text("释放须会话标识（token 参数或 Mcp-Session-Id 头）".into());
-        };
-        match self.leases.release(id, token) {
-            Ok(l) => ok_text(format!("已释放租约 {}（{}）。", l.id, l.label)),
-            Err(e) => error_text(e),
-        }
-    }
-
-    async fn lease_status(&self, principal: Option<&str>) -> Value {
-        let Some(token) = principal else {
-            return error_text("匿名会话无租约记录；initialize 取 token 或工具参数传 token".into());
-        };
-        let leases = self.leases.of_token(token);
-        if leases.is_empty() {
-            return ok_text("本会话当前无活跃租约。".into());
-        }
-        let name_of = |id: &str| {
-            device::find(id)
-                .map(|d| d.name)
-                .unwrap_or_else(|| id.to_string())
-        };
-        let lines: Vec<String> = leases
-            .iter()
-            .map(|l| {
-                format!(
-                    "{} · 剩余 {} 分钟 · 设备 {}",
-                    l.id,
-                    remaining_minutes(l),
-                    l.grants
-                        .iter()
-                        .map(|g| name_of(&g.device))
-                        .collect::<Vec<_>>()
-                        .join("、")
-                )
-            })
-            .collect();
-        ok_text(lines.join("\n"))
-    }
 }
 
 #[derive(Deserialize)]
@@ -549,112 +796,52 @@ fn fmt_time(t: chrono::DateTime<chrono::Local>) -> String {
     t.format("%m-%d %H:%M").to_string()
 }
 
+/// 通道选择参数的 schema（I/O 工具共用）。
+fn channel_schema() -> Value {
+    json!({
+        "channel": {
+            "type": "string",
+            "description": "通道选择：序号（get_device 输出的通道[n]，如 \"0\"）或标签子串（如 \"console\"、SSH 用户名）；省略=默认通道（首个串口，无串口取首个 SSH）"
+        }
+    })
+}
+
 impl McpExtension for TopoTools {
+    /// 分叉声明：内置 serial_*/port_* 不进 tools/list（tools/call 照常分发）。
+    fn builtin_tools_visible(&self) -> bool {
+        false
+    }
+
+    /// 管理面（设备/拓扑 CRUD）：tools/list 隐藏；tools/call 可用（已建立的自动化不受影响）。
+    fn is_admin_tool(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "device_create"
+                | "device_update"
+                | "device_delete"
+                | "topo_create"
+                | "topo_update"
+                | "topo_delete"
+        )
+    }
+
     fn tools(&self) -> Vec<Value> {
         vec![
             json!({
-                "name": "topo_get",
-                "description": "查看拓扑：不传 topo 列出全部（名称、id、成员数、描述，调试前先看这里选拓扑）；传 topo 给详情——成员清单（被测设备、通道明细、在线状态、备注）与设备间连线（两端端口标签）。成员设备 id 或名称即 lease_acquire 可用的引用。",
+                "name": "get_topology",
+                "description": "查看拓扑：不传 topology 列出全部（名称、id、成员数、描述，调试前先看这里选拓扑）；传 topology 给详情——成员设备清单（通道明细、在线状态、占用）与设备间连线（两端端口标签）。成员设备 id 或名称可直接用于 acquire_lease / exec_command。",
+                "annotations": { "readOnlyHint": true },
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "topo": { "type": "string", "description": "拓扑 id 或名称；省略列出全部拓扑" }
+                        "topology": { "type": "string", "description": "拓扑 id 或名称；省略列出全部拓扑" }
                     }
                 }
             }),
             json!({
-                "name": "topo_create",
-                "description": "创建拓扑。成员=被测设备引用（device_get 可查，同一设备可加入多个拓扑），links 描述设备间连线（拓扑图渲染用），两端可标物理端口（from_port/to_port，如 GE1/1/1、eth0）。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "拓扑名称（同表唯一）" },
-                        "description": { "type": "string", "description": "用途说明（可选）" },
-                        "members": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "device": { "type": "string", "description": "被测设备 id 或名称（device_get 可查）" },
-                                    "note": { "type": "string", "description": "备注，如「被测主板」（可选）" },
-                                    "x": { "type": "number", "description": "画布横坐标（可选，Web 图编辑器位置）" },
-                                    "y": { "type": "number", "description": "画布纵坐标（可选）" }
-                                },
-                                "required": ["device"]
-                            }
-                        },
-                        "links": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "from": { "type": "string", "description": "成员设备 id 或名称" },
-                                    "to": { "type": "string", "description": "成员设备 id 或名称" },
-                                    "from_port": { "type": "string", "description": "from 端设备上的物理端口标签，如 GE1/1/1（可选）" },
-                                    "to_port": { "type": "string", "description": "to 端设备上的物理端口标签，如 eth0（可选）" },
-                                    "label": { "type": "string", "description": "连线说明（可选）" }
-                                },
-                                "required": ["from", "to"]
-                            }
-                        }
-                    },
-                    "required": ["name"]
-                }
-            }),
-            json!({
-                "name": "topo_update",
-                "description": "更新拓扑：name/description/members/links 提供才更新，members/links 提供时整体替换（须全部合法；members 替换后指向已移除成员的存量连线会随之剪除）。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "topo": { "type": "string", "description": "拓扑 id 或名称" },
-                        "name": { "type": "string" },
-                        "description": { "type": "string" },
-                        "members": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "device": { "type": "string" },
-                                    "note": { "type": "string" },
-                                    "x": { "type": "number" },
-                                    "y": { "type": "number" }
-                                },
-                                "required": ["device"]
-                            }
-                        },
-                        "links": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "from": { "type": "string" },
-                                    "to": { "type": "string" },
-                                    "from_port": { "type": "string" },
-                                    "to_port": { "type": "string" },
-                                    "label": { "type": "string" }
-                                },
-                                "required": ["from", "to"]
-                            }
-                        }
-                    },
-                    "required": ["topo"]
-                }
-            }),
-            json!({
-                "name": "topo_delete",
-                "description": "删除拓扑（仅删定义，不动设备与端口）。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "topo": { "type": "string", "description": "拓扑 id 或名称" }
-                    },
-                    "required": ["topo"]
-                }
-            }),
-            json!({
-                "name": "device_get",
-                "description": "查看被测设备：不传 device 列出全部（名称、通道摘要、占用状态。设备=被调试的一台机器如一台交换机，通道=接入方式）；传 device 给详情——通道明细（SSH 凭据地址、写操作用的端口键）、当前占用。",
+                "name": "get_device",
+                "description": "查看被测设备：不传 device 列出全部（名称、通道摘要、占用状态）；传 device 给详情——通道清单（带序号，I/O 工具的 channel 参数用）、当前租约占用。设备=被调试的一台机器（如一台交换机），通道=接入方式（串口控制台 + SSH 登录）。",
+                "annotations": { "readOnlyHint": true },
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -663,8 +850,126 @@ impl McpExtension for TopoTools {
                 }
             }),
             json!({
+                "name": "list_my_leases",
+                "description": "本会话的活跃租约清单（id、剩余时间、覆盖设备）。用于会话恢复或确认归还状态。",
+                "annotations": { "readOnlyHint": true },
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "acquire_lease",
+                "description": "申请设备租约（设备级排他写权，all-or-nothing）：topology / devices / endpoints（可并用取并集）至少一项。冲突整体拒绝并返回各设备当前持有者与到期时间；给 wait_timeout_ms 则服务端排队等待。默认 30 分钟，到期自动释放，长任务用 renew_lease 顺延。租约即写权：拿到后 exec_command / open_session 直接可用，无需打开端口。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topology": { "type": "string", "description": "拓扑 id 或名称（成员设备并集）" },
+                        "devices": { "type": "array", "items": { "type": "string" }, "description": "设备 id 或名称列表" },
+                        "endpoints": { "type": "array", "items": { "type": "string" }, "description": "端口键列表（糖：解析到属主设备；未注册端口报错引导 device_create）" },
+                        "holder": { "type": "string", "description": "持有者自报名（展示与审计用，如 claude/agent-1）" },
+                        "ttl_minutes": { "type": "integer", "description": "有效分钟数（默认 30，上限可配）" },
+                        "wait_timeout_ms": { "type": "integer", "description": "冲突时服务端排队等待的毫秒数（上限 600000；期间 500ms 轮询重试，持有者释放或过期即获得）" }
+                    }
+                }
+            }),
+            json!({
+                "name": "renew_lease",
+                "description": "续租：顺延到期时间（默认再 30 分钟）。仅持有会话可续。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "lease_id": { "type": "string" },
+                        "ttl_minutes": { "type": "integer" }
+                    },
+                    "required": ["lease_id"]
+                }
+            }),
+            json!({
+                "name": "release_lease",
+                "description": "释放租约（用完即还）。仅持有会话可释放。释放时顺带关闭本会话在租约设备上建立的 I/O 通道连接。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "lease_id": { "type": "string" } },
+                    "required": ["lease_id"]
+                }
+            }),
+            json!({
+                "name": "exec_command",
+                "description": "在设备通道上执行一条命令并一次调用拿完整输出（show/display/ping 等独立命令）。发送后等待响应：首字节最多等 wait_ms，其后 idle_ms 内无新数据即收尾。连接由平台复用（同通道后续调用不重连）。需要跨命令保持 CLI 状态（配置模式、交互式程序）用 open_session + send_input。须先 acquire_lease。",
+                "annotations": { "readOnlyHint": false, "destructiveHint": true },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "设备 id 或名称" },
+                        "command": { "type": "string", "description": "要执行的命令（单条，自动追加换行）" },
+                        "wait_ms": { "type": "integer", "default": 3000, "description": "等待首字节的超时毫秒数" },
+                        "idle_ms": { "type": "integer", "default": 250, "description": "收到首字节后无新数据多少毫秒视为输出结束" },
+                        "max_bytes": { "type": "integer", "default": 65536, "description": "单次返回上限（按字符数计），超出截断并提示 read_output 补读" },
+                        "channel": channel_schema()["channel"].clone()
+                    },
+                    "required": ["device", "command"]
+                }
+            }),
+            json!({
+                "name": "open_session",
+                "description": "在设备通道上打开持久终端会话（须先 acquire_lease）：适用于需要保持 CLI 状态的场景——进入配置模式逐行下发、运行交互式程序、观察 debug 持续输出。会话即设备通道：后续 send_input/read_output/close_session 传相同的 device+channel 即定位本会话。连接与命令状态保持到 close_session 或租约结束。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "设备 id 或名称" },
+                        "channel": channel_schema()["channel"].clone()
+                    },
+                    "required": ["device"]
+                }
+            }),
+            json!({
+                "name": "send_input",
+                "description": "向会话发送数据并一次调用返回本条响应：wait_ms>0 时首字节最多等 wait_ms、其后 idle_ms 无新数据即收尾；wait_ms=0 只发不等（发密码、Ctrl+C、y 确认等，配 append_newline=false）。device+channel 须与 open_session 一致。截断时按提示 read_output 补读。",
+                "annotations": { "readOnlyHint": false, "destructiveHint": true },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "设备 id 或名称（须与 open_session 的通道一致）" },
+                        "data": { "type": "string", "description": "要发送的数据" },
+                        "wait_ms": { "type": "integer", "default": 2000, "description": "等待首字节的超时；0 表示只发不等" },
+                        "idle_ms": { "type": "integer", "default": 250, "description": "收到首字节后无新数据多少毫秒视为结束" },
+                        "append_newline": { "type": "boolean", "default": true, "description": "是否自动追加换行（发密码等场景设 false）" },
+                        "max_bytes": { "type": "integer", "default": 65536, "description": "单次返回上限" },
+                        "channel": channel_schema()["channel"].clone()
+                    },
+                    "required": ["device", "data"]
+                }
+            }),
+            json!({
+                "name": "read_output",
+                "description": "游标读会话输出（辅助工具，通常不需要）：(1) send_input/exec_command 返回截断提示时传 since=<cursor> 补读剩余；(2) 观察 debug/monitor 持续输出时轮询（timeout_ms 等新数据）；(3) since=0 从头读。非破坏性：读后可再读，cursor 记录已读位置。",
+                "annotations": { "readOnlyHint": true },
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "会话的设备寻址" },
+                        "since": { "type": "string", "description": "游标（上次返回的 cursor 数字值）；省略=只读新数据；\"0\"=从头读" },
+                        "timeout_ms": { "type": "integer", "default": 0, "description": "无新数据时等待毫秒数；0 立即返回" },
+                        "max_bytes": { "type": "integer", "default": 65536, "description": "单次返回上限" },
+                        "channel": channel_schema()["channel"].clone()
+                    },
+                    "required": ["device"]
+                }
+            }),
+            json!({
+                "name": "close_session",
+                "description": "关闭持久终端会话（退出端口持有；末位持有者才真正关物理连接）。不释放租约；租约用 release_lease。device+channel 须与 open_session 一致。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "device": { "type": "string", "description": "会话的设备寻址" },
+                        "channel": channel_schema()["channel"].clone()
+                    },
+                    "required": ["device"]
+                }
+            }),
+            // ===== 管理面（is_admin_tool 声明 → tools/list 隐藏，tools/call 可用）=====
+            json!({
                 "name": "device_create",
-                "description": "注册被测设备。channels 为接入通道：{type:serial,port=端口键}（本机 COM4 或级联键 devB::COM4）与 {type:ssh,...内联连接配置}（host/port/username/auth；同一端口/主机凭据只能属于一台设备）。",
+                "description": "【管理】注册被测设备。channels 为接入通道：{type:serial,port=端口键,config?}（本机 COM4 或级联键 devB::COM4）与 {type:ssh,host,port?,username,nickname?,auth}（内联连接配置；同一端口/主机凭据只能属于一台设备）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -695,7 +1000,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "device_update",
-                "description": "更新被测设备（name/model/location/channels 提供才更新，channels 提供时整体替换）。",
+                "description": "【管理】更新被测设备（name/model/location/channels 提供才更新，channels 提供时整体替换）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -724,57 +1029,100 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "device_delete",
-                "description": "删除被测设备（被拓扑引用时拒绝并列出拓扑）。不影响底层端口与 SSH 凭据。",
+                "description": "【管理】删除被测设备（被拓扑引用时拒绝并列出拓扑）。不影响底层端口与 SSH 凭据。",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "device": { "type": "string", "description": "设备 id 或名称" }
-                    },
+                    "properties": { "device": { "type": "string", "description": "设备 id 或名称" } },
                     "required": ["device"]
                 }
             }),
             json!({
-                "name": "lease_acquire",
-                "description": "申请租约（排他写权，设备级独占=all-or-nothing）：拓扑整体 / 被测设备列表可并用取并集；endpoints 为糖（端口键解析到属主设备，未注册端口须先 device_create）。须会话标识（initialize 的 token，标准客户端自动带头）。冲突整体拒绝并返回各设备当前持有者与到期时间；给 wait_timeout_ms 则冲突时在服务端排队等待，到期仍冲突才拒绝。默认 30 分钟，到期自动释放，长任务用 lease_renew 顺延。持有租约后 serial_send/read/clear、port_open 与脚本工具才可用（写闸）。",
+                "name": "topo_create",
+                "description": "【管理】创建拓扑。成员=被测设备引用（get_device 可查，同一设备可加入多个拓扑），links 描述设备间连线（拓扑图渲染用），两端可标物理端口（from_port/to_port，如 GE1/1/1、eth0）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "topology": { "type": "string", "description": "拓扑 id 或名称（成员设备并集）" },
-                        "devices": { "type": "array", "items": { "type": "string" }, "description": "被测设备 id 或名称列表" },
-                        "endpoints": { "type": "array", "items": { "type": "string" }, "description": "端口键列表（糖：解析到属主设备；未注册端口报错引导 device_create）" },
-                        "holder": { "type": "string", "description": "持有者自报名（展示与审计用，如 claude/agent-1）" },
-                        "ttl_minutes": { "type": "integer", "description": "有效分钟数（默认 30，上限可配）" },
-                        "wait_timeout_ms": { "type": "integer", "description": "冲突时服务端排队等待的毫秒数（上限 600000；期间 500ms 轮询重试，持有者释放或过期即获得）" }
-                    }
-                }
-            }),
-            json!({
-                "name": "lease_renew",
-                "description": "续租：顺延到期时间（默认再 30 分钟）。仅持有会话可续。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "lease_id": { "type": "string" },
-                        "ttl_minutes": { "type": "integer" }
+                        "name": { "type": "string", "description": "拓扑名称（同表唯一）" },
+                        "description": { "type": "string", "description": "用途说明（可选）" },
+                        "members": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "device": { "type": "string", "description": "被测设备 id 或名称（get_device 可查）" },
+                                    "note": { "type": "string", "description": "备注，如「被测主板」（可选）" },
+                                    "x": { "type": "number", "description": "画布横坐标（可选，Web 图编辑器位置）" },
+                                    "y": { "type": "number", "description": "画布纵坐标（可选）" }
+                                },
+                                "required": ["device"]
+                            }
+                        },
+                        "links": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string", "description": "成员设备 id 或名称" },
+                                    "to": { "type": "string", "description": "成员设备 id 或名称" },
+                                    "from_port": { "type": "string", "description": "from 端设备上的物理端口标签，如 GE1/1/1（可选）" },
+                                    "to_port": { "type": "string", "description": "to 端设备上的物理端口标签，如 eth0（可选）" },
+                                    "label": { "type": "string", "description": "连线说明（可选）" }
+                                },
+                                "required": ["from", "to"]
+                            }
+                        }
                     },
-                    "required": ["lease_id"]
+                    "required": ["name"]
                 }
             }),
             json!({
-                "name": "lease_release",
-                "description": "释放租约（用完即还）。仅持有会话可释放。",
+                "name": "topo_update",
+                "description": "【管理】更新拓扑：name/description/members/links 提供才更新，members/links 提供时整体替换（须全部合法；members 替换后指向已移除成员的存量连线会随之剪除）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "lease_id": { "type": "string" }
+                        "topology": { "type": "string", "description": "拓扑 id 或名称" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "members": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "device": { "type": "string" },
+                                    "note": { "type": "string" },
+                                    "x": { "type": "number" },
+                                    "y": { "type": "number" }
+                                },
+                                "required": ["device"]
+                            }
+                        },
+                        "links": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": { "type": "string" },
+                                    "to": { "type": "string" },
+                                    "from_port": { "type": "string" },
+                                    "to_port": { "type": "string" },
+                                    "label": { "type": "string" }
+                                },
+                                "required": ["from", "to"]
+                            }
+                        }
                     },
-                    "required": ["lease_id"]
+                    "required": ["topology"]
                 }
             }),
             json!({
-                "name": "lease_status",
-                "description": "本会话的活跃租约清单（id、剩余时间、覆盖范围）。",
-                "inputSchema": { "type": "object", "properties": {} }
+                "name": "topo_delete",
+                "description": "【管理】删除拓扑（仅删定义，不动设备与端口）。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "topology": { "type": "string", "description": "拓扑 id 或名称" } },
+                    "required": ["topology"]
+                }
             }),
         ]
     }
@@ -788,26 +1136,33 @@ impl McpExtension for TopoTools {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + 'a>> {
         Box::pin(async move {
             match name {
-                // 旧粒度别名：topo_list/device_list 并入 *_get 的无参分支，老调用方不破
-                "topo_get" | "topo_list" => Some(self.topo_get(args, state).await),
+                // 发现
+                "get_topology" => Some(self.get_topology(args, state).await),
+                "get_device" => Some(self.get_device(args, state).await),
+                "list_my_leases" => Some(self.list_my_leases(principal).await),
+                // 租约
+                "acquire_lease" => Some(self.acquire_lease(args, principal).await),
+                "renew_lease" => Some(self.renew_lease(args, principal).await),
+                "release_lease" => Some(self.release_lease(args, principal, state).await),
+                // 通道 I/O
+                "exec_command" => Some(self.exec_command(args, principal, state).await),
+                "open_session" => Some(self.open_session(args, principal, state).await),
+                "send_input" => Some(self.send_input(args, principal, state).await),
+                "read_output" => Some(self.read_output(args, principal, state).await),
+                "close_session" => Some(self.close_session(args, principal, state).await),
+                // 管理（隐藏面，tools/call 可用）
                 "topo_create" => Some(self.topo_create(args).await),
                 "topo_update" => Some(self.topo_update(args).await),
                 "topo_delete" => Some(self.topo_delete(args).await),
-                "device_get" | "device_list" => Some(self.device_get(args, state).await),
                 "device_create" => Some(self.device_create(args, state).await),
                 "device_update" => Some(self.device_update(args, state).await),
                 "device_delete" => Some(self.device_delete(args, state).await),
-                "lease_acquire" => Some(self.lease_acquire(args, principal).await),
-                "lease_renew" => Some(self.lease_renew(args, principal).await),
-                "lease_release" => Some(self.lease_release(args, principal).await),
-                "lease_status" => Some(self.lease_status(principal).await),
                 _ => None,
             }
         })
     }
 
-    /// 写闸：仅当 enable_gate 开启且能解析目标端口时判定；拒绝文案附当前
-    /// 持有者与到期时间。gate 内部已审计 write_denied。
+    /// 写闸：保留（agent 猜用内置工具名时仍受闸；分叉面 I/O 在 session 层自查租约）。
     fn intercept<'a>(
         &'a self,
         _name: &'a str,
@@ -829,8 +1184,7 @@ impl McpExtension for TopoTools {
         })
     }
 
-    /// 脚本写闸：返回一个逐次检查的闭包（脚本内每次 send/call 调用）。
-    /// 与 intercept 共用同一租约闸——脚本持有的端口/设备必须被本会话租约覆盖。
+    /// 脚本写闸：逐次检查闭包（与 intercept 共用租约闸）。
     fn script_gate(
         &self,
         principal: Option<&str>,

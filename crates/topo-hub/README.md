@@ -25,13 +25,14 @@ npm run dev --prefix ui-topo     # 5175 开发服，/api 代理到 127.0.0.1:188
 claude mcp add --scope user --transport http TopoHub http://<host>:18800/mcp
 ```
 
-在 serial_studio 10 个串口/脚本工具（含 `port_open`/`port_close`，无人值守流程可全程 MCP）之外新增 12 个平台工具：
+**设备本体论工具面**（分叉：内置 `serial_*`/`port_*` 不出现在 tools/list；serial-studio 主产品的 MCP 不受影响）：
 
-- 拓扑：`topo_get`（不传参=列表）/ `topo_create` / `topo_update` / `topo_delete`——成员（设备/端点）+ 连线（`links`，图渲染用）
-- 设备：`device_get`（不传参=列表）/ `device_create` / `device_update` / `device_delete`
-- 租约：`lease_acquire`（支持 `wait_timeout_ms` 排队等待）/ `lease_renew` / `lease_release` / `lease_status`——排他写权，写类操作（含 port_open）须持租约；强释放时顺带收回该会话开的端口
+- 发现：`get_topology`（不传参=列表）/ `get_device`（不传参=列表；详情含通道序号）/ `list_my_leases`
+- 租约：`acquire_lease`（支持 `wait_timeout_ms` 排队等待）/ `renew_lease` / `release_lease`——**租约即写权**，I/O 工具入口检查设备租约，无需打开端口
+- 通道 I/O（设备+通道寻址，agent 不见端口键）：`exec_command`（无状态命令）/ `open_session` + `send_input`（持久会话）/ `read_output`（游标补读，非破坏）/ `close_session`——发送即等响应（wait/idle 语义），输出经会话影子缓冲支持游标读
+- 管理（tools/list 隐藏，tools/call 可用）：`device_create/update/delete`、`topo_create/update/delete`
 
-并入列表粒度的旧名（`topo_list`/`device_list` 等）保留为分发别名，tools/list 不出现。
+典型流：`get_topology` 选拓扑 → `acquire_lease` → `exec_command` 跑命令（或 `open_session` 进配置模式）→ `release_lease`（顺带关闭该会话的通道连接）。
 
 控制台含拓扑图视图（详情页"列表 ⇄ 图"切换，节点按设备分组、占用高亮）。
 

@@ -16,6 +16,22 @@ pub trait McpExtension: Send + Sync + 'static {
     /// tools/list 追加的工具描述符（形状同内置工具：name/description/inputSchema）。
     fn tools(&self) -> Vec<Value>;
 
+    /// 本扩展的哪些工具属管理面（设备/拓扑 CRUD 等）。tools/list 隐藏管理工具
+    /// （tools/call 照常分发——隐藏≠禁用，已建立的自动化/高级用法不受影响），
+    /// 按"谁定义工具谁声明管理属性"授权；ss-server 不认识具体工具名。
+    /// 默认 false（无管理面）。
+    fn is_admin_tool(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// 是否隐藏内置 serial_*/port_* 工具面（独立产品分叉自身工具面用——
+    /// 如 topo-hub 以设备本体论工具面替代端口本体论的内置面）。
+    /// 隐藏仅影响 tools/list；tools/call 对内置名照常分发。
+    /// 默认 false（不隐藏——serial-studio 主产品行为不变）。
+    fn builtin_tools_visible(&self) -> bool {
+        true
+    }
+
     /// 处理 tools/call。返回 None 表示"非本扩展的工具名"，交回调度链；
     /// 返回 Some 则是完整 MCP 工具结果（content 数组），与内置工具同构。
     ///

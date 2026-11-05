@@ -356,7 +356,7 @@ fn resolve_members(inputs: &[MemberInput]) -> Result<Vec<TopologyMember>, String
             }),
             Some(_) => {} // 重复成员：保留首个
             None => errors.push(format!(
-                "设备「{}」不存在（device_get 可查，先 device_create 注册）",
+                "设备「{}」不存在（get_device 可查，先 device_create 注册）",
                 input.device
             )),
         }

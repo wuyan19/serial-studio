@@ -10,6 +10,7 @@ pub mod device;
 pub mod events;
 pub mod lease;
 pub mod mcp_topo;
+pub mod session;
 pub mod test_support;
 pub mod topology;
 
@@ -58,6 +59,7 @@ pub fn create_router(state: TopoState) -> Router {
     base.mcp_extensions = vec![std::sync::Arc::new(mcp_topo::TopoTools {
         bus: (*state.topo_bus).clone(),
         leases: std::sync::Arc::clone(&state.leases),
+        sessions: std::sync::Arc::clone(&state.sessions),
     })];
     ss_server::base_router(base)
         .merge(api::routes().with_state(state))
