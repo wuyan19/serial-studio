@@ -6,6 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
 import { copyText, displayPortName, readClipboardText } from "../lib";
+import { installSelectionCopy } from "../term-selection";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
@@ -155,13 +156,7 @@ export function TermView({
     fitRef.current = fit;
     termRef.current = term;
     onReady({ term, fit, search });
-    // 选中即复制（VS Code copyOnSelection 同款）：拖选/双击/右键选词一完成就写系统剪贴板。
-    // hasSelection 守卫：取消选择（点空白）触发同一事件，此时不动剪贴板（否则被清空）。
-    const selDisposable = term.onSelectionChange(() => {
-      if (!term.hasSelection()) return;
-      const text = term.getSelection();
-      if (text) void copyText(text);
-    });
+    const stopSelectionCopy = installSelectionCopy(term, container);
     const disposable = term.onData((data) => {
       // 任何输入(字符/回车/退格/控制序列)都回到底部：onData 只在真正产生待发送数据时触发，
       // 单独修饰键不会到这里，故在此滚底不会重现 scrollOnUserInput=true 的"按 Ctrl 误跳"。
@@ -196,7 +191,7 @@ export function TermView({
       document.fonts?.removeEventListener("loadingdone", refit);
       clearTimeout(timer);
       disposable.dispose();
-      selDisposable.dispose();
+      stopSelectionCopy();
       term.dispose();
       fitRef.current = null;
       termRef.current = null;
