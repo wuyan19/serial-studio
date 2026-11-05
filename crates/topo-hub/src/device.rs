@@ -236,11 +236,7 @@ fn save(list: &[Device]) -> Result<(), String> {
 /// 校验（create/update 共用闸门）：名称非空且同表唯一（update 排除自身）；
 /// 串口端口跨设备不共用；SSH id 与 host:port 跨设备不重复；SSH 字段完整。
 /// 收集全部错误一次报告。
-fn validate(
-    input: &DeviceInput,
-    self_id: Option<&str>,
-    existing: &[Device],
-) -> Result<(), String> {
+fn validate(input: &DeviceInput, self_id: Option<&str>, existing: &[Device]) -> Result<(), String> {
     let mut errors = Vec::new();
     let name = input.name.trim();
     if name.is_empty() {
@@ -318,7 +314,9 @@ fn validate(
                     ));
                 }
                 match &s.auth {
-                    ss_server::ssh::SshAuthRecord::Key { key_path } if key_path.trim().is_empty() => {
+                    ss_server::ssh::SshAuthRecord::Key { key_path }
+                        if key_path.trim().is_empty() =>
+                    {
                         errors.push(format!("SSH 通道「{}」的密钥路径不能为空", s.label()));
                     }
                     ss_server::ssh::SshAuthRecord::Password { password } if password.is_empty() => {
@@ -346,10 +344,12 @@ fn validate(
 fn sync_ssh_registry(devices: &[Device], removed_ids: &[String], state: &AppState) {
     let mut entries: Vec<ss_server::ssh::SshHostRecord> = devices
         .iter()
-        .flat_map(|d| d.channels.iter().filter_map(|c| match c {
-            Channel::Ssh(s) => Some(s.to_host_record()),
-            _ => None,
-        }))
+        .flat_map(|d| {
+            d.channels.iter().filter_map(|c| match c {
+                Channel::Ssh(s) => Some(s.to_host_record()),
+                _ => None,
+            })
+        })
         .collect();
     // 保留未归属任何设备的既有凭据（历史孤儿），除非本次显式删除
     for old in ss_server::ssh::store::load() {
@@ -469,7 +469,9 @@ pub fn open_ports_of_device(dev: &Device, open_ports: &[String]) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK};
+    use crate::test_support::{
+        ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK,
+    };
     use ss_server::ssh::SshAuthRecord;
 
     fn serial(port: &str, baud: u32) -> Channel {
@@ -507,7 +509,11 @@ mod tests {
         let s = serial("COM4", 115200);
         assert!(s.covers("COM4"));
         assert!(!s.covers("COM5"));
-        assert!(s.label().contains("115200"), "串口标签带波特率: {}", s.label());
+        assert!(
+            s.label().contains("115200"),
+            "串口标签带波特率: {}",
+            s.label()
+        );
         let sid = match &ssh("192.0.2.1", "root") {
             Channel::Ssh(s2) => s2.id.clone(),
             _ => unreachable!(),
@@ -541,7 +547,9 @@ mod tests {
         .unwrap();
         assert_eq!(a.channels.len(), 2);
         // 串口参数落盘
-        assert!(matches!(&a.channels[0], Channel::Serial { config, .. } if config.baud_rate == 9600));
+        assert!(
+            matches!(&a.channels[0], Channel::Serial { config, .. } if config.baud_rate == 9600)
+        );
         // 投影：凭据库 + SshManager 注册表出现该 SSH 通道
         let ssh_id = match &a.channels[1] {
             Channel::Ssh(s) => s.id.clone(),
@@ -551,9 +559,17 @@ mod tests {
         assert!(state.ssh.registry_snapshot().iter().any(|h| h.id == ssh_id));
 
         // 同地址二注册拒绝；串口冲突拒绝；缺密码拒绝
-        let err = create(&input(&unique_name("设备"), vec![ssh("192.0.2.70", "root")]), &state).unwrap_err();
+        let err = create(
+            &input(&unique_name("设备"), vec![ssh("192.0.2.70", "root")]),
+            &state,
+        )
+        .unwrap_err();
         assert!(err.contains("同地址"), "{err}");
-        let err = create(&input(&unique_name("设备"), vec![serial("COM4", 9600)]), &state).unwrap_err();
+        let err = create(
+            &input(&unique_name("设备"), vec![serial("COM4", 9600)]),
+            &state,
+        )
+        .unwrap_err();
         assert!(err.contains("已是其它设备"), "{err}");
         let bad = input(
             &unique_name("设备"),
@@ -563,7 +579,9 @@ mod tests {
                 port: 22,
                 username: "root".into(),
                 nickname: None,
-                auth: SshAuthRecord::Password { password: String::new() },
+                auth: SshAuthRecord::Password {
+                    password: String::new(),
+                },
             })],
         );
         let err = create(&bad, &state).unwrap_err();
@@ -576,7 +594,10 @@ mod tests {
         }
         let _ = update(&a.id, &updated_input, &state).unwrap();
         let reg = ss_server::ssh::store::load();
-        assert_eq!(reg.iter().find(|h| h.id == ssh_id).unwrap().host, "192.0.2.71");
+        assert_eq!(
+            reg.iter().find(|h| h.id == ssh_id).unwrap().host,
+            "192.0.2.71"
+        );
 
         // 端口 → 属主（覆盖判定走内联 id）
         let owner = device_of_port(&format!("{ssh_id}::shell")).unwrap();
@@ -620,8 +641,12 @@ mod tests {
         let list = load();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].channels.len(), 2, "悬空 ref 通道被弃");
-        assert!(matches!(&list[0].channels[0], Channel::Serial { config, .. } if config.baud_rate == 115200));
-        assert!(matches!(&list[0].channels[1], Channel::Ssh(s) if s.id == "ssh-x1" && s.host == "192.0.2.70"));
+        assert!(
+            matches!(&list[0].channels[0], Channel::Serial { config, .. } if config.baud_rate == 115200)
+        );
+        assert!(
+            matches!(&list[0].channels[1], Channel::Ssh(s) if s.id == "ssh-x1" && s.host == "192.0.2.70")
+        );
         // 重读不再迁移
         assert_eq!(load().len(), 1);
         delete(&list[0].id, &state).unwrap();

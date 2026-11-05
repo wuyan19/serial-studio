@@ -80,7 +80,10 @@ pub fn make_state() -> AppState {
     let event_bus = Arc::new(EventBus::new(16));
     let (meta_tx, _) = broadcast::channel(16);
     let (script_tx, _) = broadcast::channel(16);
-    let devices = Arc::new(DeviceClientManager::empty(script_tx.clone(), "inst-topo-test"));
+    let devices = Arc::new(DeviceClientManager::empty(
+        script_tx.clone(),
+        "inst-topo-test",
+    ));
     let ssh = ssh_with_entries();
     let addresses = Arc::new(AddressResolver::new(
         Arc::clone(&devices),

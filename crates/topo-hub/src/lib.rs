@@ -10,8 +10,8 @@ pub mod device;
 pub mod events;
 pub mod lease;
 pub mod mcp_topo;
-pub mod topology;
 pub mod test_support;
+pub mod topology;
 
 pub use api::TopoState;
 

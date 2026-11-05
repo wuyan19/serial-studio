@@ -7,7 +7,6 @@
 use crate::device::{self, Channel, Device, DeviceInput};
 use crate::lease;
 use crate::topology::{self, LinkInput, MemberInput, Topology};
-use ss_server::PortView;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -16,6 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
 use ss_server::AppState;
+use ss_server::PortView;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -111,9 +111,15 @@ pub struct TopologyDetail {
 pub fn routes() -> Router<TopoState> {
     Router::new()
         .route("/api/topologies", get(list).post(create))
-        .route("/api/topologies/:id", get(detail).put(update).delete(remove))
+        .route(
+            "/api/topologies/:id",
+            get(detail).put(update).delete(remove),
+        )
         .route("/api/devices", get(devices_list).post(devices_create))
-        .route("/api/devices/:id", axum::routing::put(devices_update).delete(devices_delete))
+        .route(
+            "/api/devices/:id",
+            axum::routing::put(devices_update).delete(devices_delete),
+        )
         .route("/api/leases", get(leases_list))
         .route("/api/leases/:id", axum::routing::delete(lease_force_delete))
         .route("/api/remotes", get(remotes_list).put(remotes_save))
@@ -124,11 +130,17 @@ pub fn routes() -> Router<TopoState> {
 type ApiError = (StatusCode, Json<Value>);
 
 fn bad(message: impl Into<String>) -> ApiError {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": message.into() })))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": message.into() })),
+    )
 }
 
 fn not_found(id: &str) -> ApiError {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": format!("不存在: {id}") })))
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": format!("不存在: {id}") })),
+    )
 }
 
 async fn list(State(_state): State<TopoState>) -> Json<Vec<Topology>> {
@@ -157,10 +169,7 @@ async fn detail(
 ) -> Result<Json<TopologyDetail>, ApiError> {
     let topo = topology::find(&id).ok_or_else(|| not_found(&id))?;
     let member_views = member_views(&topo, &state.base).await;
-    Ok(Json(TopologyDetail {
-        topo,
-        member_views,
-    }))
+    Ok(Json(TopologyDetail { topo, member_views }))
 }
 
 async fn update(
@@ -180,7 +189,10 @@ async fn update(
     Ok(Json(topo))
 }
 
-async fn remove(State(state): State<TopoState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn remove(
+    State(state): State<TopoState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     topology::delete(&id).map_err(|e| {
         if e.contains("不存在") {
             not_found(&id)
@@ -215,13 +227,17 @@ async fn lease_force_delete(
     State(state): State<TopoState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state.leases.force_release(&id, &state.base).await.map_err(|e| {
-        if e.contains("不存在") {
-            not_found(&id)
-        } else {
-            bad(e)
-        }
-    })?;
+    state
+        .leases
+        .force_release(&id, &state.base)
+        .await
+        .map_err(|e| {
+            if e.contains("不存在") {
+                not_found(&id)
+            } else {
+                bad(e)
+            }
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -408,7 +424,10 @@ async fn devices_update(
     Ok(Json(d))
 }
 
-async fn devices_delete(State(state): State<TopoState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn devices_delete(
+    State(state): State<TopoState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     device::delete(&id, &state.base).map_err(|e| {
         if e.contains("不存在") {
             (StatusCode::NOT_FOUND, Json(json!({ "error": e })))
