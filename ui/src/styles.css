@@ -2106,15 +2106,45 @@ button {
   height: min(680px, 76vh);
   max-height: min(680px, 76vh);
 }
+/* 标题条：交互色铺底（对照 VS Code 设置窗口的主题色标题栏），
+   标题居左、最大化/还原+关闭居右；按钮配色随条（on-accent），hover 白色浮层 */
+.dlg-settings__titlebar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  padding: 0 8px 0 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.dlg-settings__titlebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+.dlg-settings__titlebar-title svg {
+  width: 15px;
+  height: 15px;
+}
+.dlg-settings__titlebar .dlg-settings__btn {
+  color: color-mix(in srgb, var(--on-accent) 80%, transparent);
+}
+.dlg-settings__titlebar .dlg-settings__btn:hover {
+  color: var(--on-accent);
+  background: color-mix(in srgb, var(--on-accent) 16%, transparent);
+}
 .dlg-settings__toolbar {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--hairline-soft);
 }
-/* 工具栏右端操作区：最大化/还原 + 关闭（标题栏同款图标，搜索 flex:1 顶左） */
+/* 标题条右端操作区：最大化/还原 + 关闭（标题栏同款图标） */
 .dlg-settings__actions {
   flex-shrink: 0;
   display: flex;

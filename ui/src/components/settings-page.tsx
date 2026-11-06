@@ -17,7 +17,7 @@ import {
   openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus,
 } from "../updater";
 import { overlayClose, useDialogA11y } from "./primitives";
-import { IconClose, IconInfo, IconPlug, IconWinMax, IconWinRestore } from "../icons";
+import { IconClose, IconGear, IconInfo, IconPlug, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories, filterSettings,
   type FilteredCategory, type SettingItemDef, type SettingsCategoryId,
@@ -184,19 +184,9 @@ export function SettingsPage({
     /* 遮罩按下关闭（所有改动即改即存/显式应用，无未保存丢失顾虑；更新下载中禁止关） */
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose, () => downloading)}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className={"dialog dialog--max dlg-settings" + (max ? "" : " dlg-settings--compact")} onClick={(e) => e.stopPropagation()}>
-        <div className="dlg-settings__toolbar">
-          <input
-            ref={searchRef}
-            className="field dlg-settings__search"
-            placeholder="搜索设置…"
-            aria-label="搜索设置"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            autoCapitalize="off"
-            spellCheck={false}
-          />
-          {recording && <span className="dlg-settings__recording">按下新组合…（Backspace 清除 · Esc 取消）</span>}
-          {/* 两端对齐：搜索左、操作右（标题栏同款最大化/还原 + 关闭） */}
+        {/* 标题条：标题居左、最大化/还原+关闭居右（对照 VS Code 设置窗口的紫条） */}
+        <div className="dlg-settings__titlebar">
+          <span className="dlg-settings__titlebar-title"><IconGear /> 设置</span>
           <div className="dlg-settings__actions">
             <button
               className="dlg-settings__btn"
@@ -210,6 +200,19 @@ export function SettingsPage({
               <IconClose />
             </button>
           </div>
+        </div>
+        <div className="dlg-settings__toolbar">
+          <input
+            ref={searchRef}
+            className="field dlg-settings__search"
+            placeholder="搜索设置…"
+            aria-label="搜索设置"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoCapitalize="off"
+            spellCheck={false}
+          />
+          {recording && <span className="dlg-settings__recording">按下新组合…（Backspace 清除 · Esc 取消）</span>}
         </div>
         <div className="dlg-settings__body">
           <nav className="dlg-settings__toc" aria-label="设置分类">
