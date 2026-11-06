@@ -526,7 +526,7 @@ export function GroupView({
   }, [group.id]);
   return (
     <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
-      <div className="group__tab-row">
+      <div className="group__tab-row" data-empty={group.ports.length === 0 ? "true" : undefined}>
         <div
           ref={tabsRef}
           className="group__tabs tab-bar"
@@ -553,7 +553,6 @@ export function GroupView({
             }
           }}
         >
-          {group.ports.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
           {group.ports.map((port) => {
             const isActive = port === group.activePort;
             const editingThis = aliasEditTab?.port === port;

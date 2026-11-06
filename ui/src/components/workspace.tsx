@@ -10,7 +10,7 @@ export type WorkspacePanel = "ports" | "macros" | "scripts";
 
 export function WorkspaceSidebar({
   panel, onPanel, showScripts, counts, running, failed, query,
-  onQuery, onNew, onRemote, onShare, connected, width, collapsed, tools, children,
+  onQuery, onNew, onRemote, onShare, width, collapsed, tools, children,
 }: {
   panel: WorkspacePanel;
   onPanel: (panel: WorkspacePanel) => void;
@@ -23,7 +23,6 @@ export function WorkspaceSidebar({
   onNew: () => void;
   onRemote?: () => void;
   onShare: () => void;
-  connected: boolean;
   width: number;
   collapsed: boolean;
   tools: ReactNode;
@@ -82,11 +81,6 @@ export function WorkspaceSidebar({
           />
         </label>
         <div className="sidebar__content">{children}</div>
-        <div className="sidebar__footer">
-          <div className="workspace-footer-row">
-              <span className="workspace-service" title={connected ? "已连接" : "未连接"} aria-label={connected ? "已连接" : "未连接"}><span className={`dot${connected ? " on" : ""}`} />{connected ? "已连接" : "未连接"}</span>
-          </div>
-        </div>
       </div>
     </aside>
   );

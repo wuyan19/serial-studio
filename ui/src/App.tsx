@@ -336,7 +336,17 @@ export default function App() {
     const saved = Number(localStorage.getItem("sidebar-width"));
     return saved >= 180 && saved <= 480 ? saved : 280;
   });
-  const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
+  /** 分隔条(Splitter)行为参数(VS Code 手势模型,手感不对调这里):
+   *  MIN_W/MAX_W 是「面板」宽度上下限(侧栏总宽 = 面板 + 图标栏 RAIL_W);
+   *  COLLAPSE_X:展开态鼠标(相对卡片左缘)左推越过此线收起;
+   *  EXPAND_DX:收起后自「武装点」(收起瞬间/按下时的鼠标位)右拖该距离才展开。
+   *  展开阈值=武装点+80 ∈ (136,200) 恒大于 COLLAPSE_X → 两阈值无重叠区间,
+   *  慢速拖动不会折叠↔展开来回震荡。 */
+  const SPLITTER_RAIL_W = 56;
+  const SPLITTER_MIN_W = 200;
+  const SPLITTER_MAX_W = 480;
+  const SPLITTER_COLLAPSE_X = 120;
+  const SPLITTER_EXPAND_DX = 80;
   /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
   const [portCollapsed, setPortCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("port-groups-collapsed") ?? "[]") as string[]));
   const togglePortGroup = (devId: string) =>
@@ -406,8 +416,11 @@ export default function App() {
   }, []);
   // 事件回调里读当前活动面板(避免闭包过期;activityRef 已被 LED 活动时间戳占用,故名 activityViewRef)
   const activityViewRef = useRef<ActivityView>(null);
+  // 最后展开的面板:分隔条拖窄自动折叠后,右拖再展开时还原到它(初始/兜底「连接」)
+  const lastExpandedRef = useRef<NonNullable<ActivityView>>("ports");
   useEffect(() => {
     activityViewRef.current = activity;
+    if (activity) lastExpandedRef.current = activity;
   }, [activity]);
   // 库内确认(删除/解散)onConfirm 完成后自动关弹窗——对齐重构前各 handler 末尾的 setConfirmState(null)
   const libConfirm = useCallback((s: {
@@ -2029,7 +2042,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onNew={() => sidebarPanel === "ports" ? setConnectionLauncherOpen(true) : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
           onRemote={isTauri() ? () => setRemoteOpen(true) : undefined}
           onShare={() => setShareOpen(true)}
-          connected={connected}
           width={sidebarWidth}
           tools={<WorkspaceSettingsMenu onOpen={setSettingsCategory} />}
         >
@@ -2206,20 +2218,54 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </NamedLibraryPanel>
           )}
         </WorkspaceSidebar>
-        {activity && <div
+        {/* 分隔条(Splitter):两卡之间 4px 缝隙即分隔条本体,折叠态也保留。
+            线位=clamp(鼠标−卡片左缘−图标栏宽, MIN_W, MAX_W)——线贴着鼠标走,不会越过;
+            展开态左拖:线到最小宽停住,鼠标再左推越过 COLLAPSE_X 才收起;
+            收起后右拖:自武装点 80px 才展开,展开瞬间线停在最小宽(鼠标右侧),
+            鼠标追上线后继续跟手。宽度更新 rAF 合帧:高刷鼠标事件每帧最多渲染一次。 */}
+        <div
           className="sidebar-resizer"
           onMouseDown={(e) => {
             e.preventDefault();
-            sidebarDrag.current = { x: e.clientX, w: sidebarWidth };
+            const sidebarLeft = document.querySelector(".sidebar")!.getBoundingClientRect().left;
+            // 折叠态在闭包内本地跟踪:setActivity 后读不到新值
+            let collapsedNow = activity === null;
+            // 展开「武装点」:收起瞬间(或折叠态按下时)的鼠标位,右拖 80px 才展开
+            let expandArmedAt = e.clientX - sidebarLeft;
             document.body.style.cursor = "col-resize";
             document.body.style.userSelect = "none";
+            const clampPanel = (x: number) =>
+              Math.max(SPLITTER_MIN_W, Math.min(SPLITTER_MAX_W, x - SPLITTER_RAIL_W));
+            let raf = 0;
+            let pendingX: number | null = null;
+            const flush = () => {
+              raf = 0;
+              if (pendingX === null) return;
+              setSidebarWidth(clampPanel(pendingX));
+              pendingX = null;
+            };
             const onMove = (ev: MouseEvent) => {
-              const ds = sidebarDrag.current;
-              if (!ds) return;
-              setSidebarWidth(Math.max(180, Math.min(480, ds.w + (ev.clientX - ds.x))));
+              const x = ev.clientX - sidebarLeft;
+              if (collapsedNow) {
+                if (x > expandArmedAt + SPLITTER_EXPAND_DX) {
+                  collapsedNow = false;
+                  setActivity(lastExpandedRef.current);
+                  setSidebarWidth(clampPanel(x));
+                }
+                return;
+              }
+              if (x < SPLITTER_COLLAPSE_X) {
+                collapsedNow = true;
+                expandArmedAt = x; // 从收起位置重新武装(展开阈值随之抬到收起点+80,无重叠)
+                setActivity(null);
+                return;
+              }
+              pendingX = x;
+              if (!raf) raf = requestAnimationFrame(flush);
             };
             const onUp = () => {
-              sidebarDrag.current = null;
+              if (raf) cancelAnimationFrame(raf);
+              flush(); // 补上合帧中最后一帧
               document.body.style.cursor = "";
               document.body.style.userSelect = "";
               window.removeEventListener("mousemove", onMove);
@@ -2229,40 +2275,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             window.addEventListener("mouseup", onUp);
           }}
           onDoubleClick={() => setSidebarWidth(280)}
-          title="拖动调整宽度（双击重置）"
-        />}
+          title="拖动调整宽度（双击重置；拖到最窄自动折叠，右拖展开）"
+        />
 
-      <main className="main">
-        {errorMsg && (
-          <div className="banner banner--err" role="alert">
-            <IconAlert /> {errorMsg}
-            <button
-              className="banner__close"
-              aria-label="关闭错误提示"
-              onClick={() => {
-                if (errorTimer.current !== null) clearTimeout(errorTimer.current);
-                setErrorMsg("");
-              }}
-            >
-              <IconClose />
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div className="banner banner--notice" role="status">
-            <IconInfo /> {notice}
-            <button
-              className="banner__close"
-              aria-label="关闭提示"
-              onClick={() => {
-                if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-                setNotice("");
-              }}
-            >
-              <IconClose />
-            </button>
-          </div>
-        )}
+      {/* main--solo:单分栏时 group 聚焦边框与卡片边框零间隙相邻会叠成 2px 双线,
+          CSS 据此抑制 group 边框(分栏 ≥2 时仍需它作聚焦窗格指示) */}
+      <main className={"main" + (leafGroupIds(layout).length === 1 ? " main--solo" : "")}>
         {serviceError && (
           <div className="banner banner--err" role="alert">
             <IconAlert /> {serviceError}
@@ -2778,6 +2796,27 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         />
       )}
       </div>
+      {/* 底部状态栏:服务状态 + 瞬时消息(错误/提示,原主区顶部 banner 迁此,自动消失) */}
+      <footer className="statusbar">
+        <span
+          className={`statusbar__msg statusbar__conn${connected ? "" : " statusbar__conn--off"}`}
+          title={connected ? "已连接" : "未连接"}
+          aria-label={connected ? "已连接" : "未连接"}
+        >
+          <span className={`dot${connected ? " on" : ""}`} />
+          {connected ? "已连接" : "未连接"}
+        </span>
+        {errorMsg && (
+          <span className="statusbar__msg statusbar__msg--err" role="alert" title={errorMsg}>
+            <IconAlert /> {errorMsg}
+          </span>
+        )}
+        {notice && (
+          <span className="statusbar__msg" role="status" title={notice}>
+            <IconInfo /> {notice}
+          </span>
+        )}
+      </footer>
     </div>
   );
 }
