@@ -285,57 +285,6 @@ button {
 .manage {
   position: relative;
 }
-.manage-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 199;
-}
-.manage-menu {
-  position: absolute;
-  bottom: -4px;
-  left: 50px;
-  min-width: 160px; /* 最长主题名「Superhuman · 亮」+ 勾选图标需 ~150px */
-  max-height: calc(100vh - 90px); /* 主题增多后矮屏不顶出上沿,内部滚动 */
-  overflow-y: auto;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
-  padding: 4px;
-  z-index: 200;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-}
-.manage-menu__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  white-space: nowrap; /* 长主题名单行,菜单宽度由 min-width 兜底 */
-  padding: 7px 10px;
-  background: transparent;
-  color: var(--ink-dim);
-  border: none;
-  border-radius: var(--r-sm);
-  cursor: pointer;
-  font-size: var(--fs-base);
-}
-.manage-menu__item:hover {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-/* 主题菜单:当前项(交互色 + 勾) */
-.manage-menu__item[data-current="true"] {
-  color: var(--accent);
-}
-.manage-menu__item[data-current="true"] svg {
-  color: var(--accent);
-}
-.manage-menu__item svg {
-  width: 15px;
-  height: 15px;
-  color: var(--ink-faint);
-}
-
 /* ---------- sidebar ---------- */
 .sidebar {
   width: 344px;
@@ -438,8 +387,6 @@ button {
 .workspace-nav__item:hover,
 .sidebar__rail-footer .workspace-footer-action:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .workspace-nav__item.active { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
-.workspace-settings > .workspace-footer-action[aria-expanded="true"] { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
-.workspace-settings { width: 40px; flex-shrink: 0; }
 .workspace-nav__label,
 .workspace-nav__count,
 .sidebar__rail-footer .workspace-footer-action > span { display: none; }
@@ -494,16 +441,7 @@ button {
 .workspace-service .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ink-dim); }
 .workspace-service .dot.on { background: var(--link); }
 .sidebar__panel .workspace-service { margin-left: 0; }
-.workspace-popover { position: fixed; top: auto; }
-.workspace-popover .mini-btn {
-  width: auto;
-  min-height: 30px;
-  padding: 6px 10px;
-  white-space: nowrap;
-  font-family: var(--font-ui);
-}
-.workspace-menu { min-width: 240px; }
-/* 皮肤子菜单已并入设置页「外观」分类（settings-page.tsx），旧的返回项/字号/主题列表样式随之移除 */
+/* 侧栏底部弹层（设置二级菜单/FooterPopover）已撤：齿轮直开设置页 */
 .workspace-connection-options { display: grid; gap: 10px; margin: 20px 0; }
 .workspace-connection-options > button { display: flex; align-items: center; gap: 15px; padding: 16px; border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; }
 .workspace-connection-options > button:hover { background: var(--surface-2); }
@@ -2161,6 +2099,13 @@ button {
   padding: 0;
   overflow: hidden;
 }
+/* 还原态：居中卡片尺寸（显式覆盖同挂的 .dialog--max 四项，源码顺序在其后必胜） */
+.dlg-settings--compact {
+  width: min(880px, 76vw);
+  max-width: 76vw;
+  height: min(680px, 76vh);
+  max-height: min(680px, 76vh);
+}
 .dlg-settings__toolbar {
   flex-shrink: 0;
   display: flex;
@@ -2168,6 +2113,34 @@ button {
   gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--hairline-soft);
+}
+/* 工具栏右端操作区：最大化/还原 + 关闭（标题栏同款图标，搜索 flex:1 顶左） */
+.dlg-settings__actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.dlg-settings__btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dlg-settings__btn:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.dlg-settings__btn svg {
+  width: 14px;
+  height: 14px;
 }
 .dlg-settings__search {
   flex: 1;

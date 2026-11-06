@@ -17,7 +17,7 @@ import {
   openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus,
 } from "../updater";
 import { overlayClose, useDialogA11y } from "./primitives";
-import { IconClose, IconInfo, IconPlug } from "../icons";
+import { IconClose, IconInfo, IconPlug, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories, filterSettings,
   type FilteredCategory, type SettingItemDef, type SettingsCategoryId,
@@ -51,6 +51,8 @@ export function SettingsPage({
 }) {
   const [active, setActive] = useState<SettingsCategoryId>(initialCategory);
   const [query, setQuery] = useState("");
+  /** 最大化 ⇄ 紧凑：最大化=94vw×90vh（默认），紧凑=居中卡片（还原态）。 */
+  const [max, setMax] = useState(true);
   // 外观（原皮肤子菜单）：订阅即得最新值，下拉/输入框受控
   const [theme, setThemeState] = useState<Theme>(getTheme);
   useEffect(() => subscribe(setThemeState), []);
@@ -181,7 +183,7 @@ export function SettingsPage({
   return (
     /* 遮罩按下关闭（所有改动即改即存/显式应用，无未保存丢失顾虑；更新下载中禁止关） */
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose, () => downloading)}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--max dlg-settings" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className={"dialog dialog--max dlg-settings" + (max ? "" : " dlg-settings--compact")} onClick={(e) => e.stopPropagation()}>
         <div className="dlg-settings__toolbar">
           <input
             ref={searchRef}
@@ -194,6 +196,20 @@ export function SettingsPage({
             spellCheck={false}
           />
           {recording && <span className="dlg-settings__recording">按下新组合…（Backspace 清除 · Esc 取消）</span>}
+          {/* 两端对齐：搜索左、操作右（标题栏同款最大化/还原 + 关闭） */}
+          <div className="dlg-settings__actions">
+            <button
+              className="dlg-settings__btn"
+              title={max ? "还原" : "最大化"}
+              aria-label={max ? "还原" : "最大化"}
+              onClick={() => setMax((v) => !v)}
+            >
+              {max ? <IconWinRestore /> : <IconWinMax />}
+            </button>
+            <button className="dlg-settings__btn" title="关闭" aria-label="关闭" onClick={onClose}>
+              <IconClose />
+            </button>
+          </div>
         </div>
         <div className="dlg-settings__body">
           <nav className="dlg-settings__toc" aria-label="设置分类">

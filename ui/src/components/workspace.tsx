@@ -1,8 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { useId, useRef, type ReactNode } from "react";
 import {
-  IconBolt, IconCode, IconGear, IconGlobe, IconInfo,
-  IconKeyboard, IconPlug, IconPlus, IconShare, IconSsh,
+  IconBolt, IconCode, IconGear, IconGlobe,
+  IconPlug, IconPlus, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
 import { useDialogA11y, useEscClose } from "./primitives";
@@ -93,71 +92,14 @@ export function WorkspaceSidebar({
   );
 }
 
-function FooterPopover({ anchor, onClose, label, children }: {
-  anchor: RefObject<HTMLButtonElement>;
-  onClose: () => void;
-  label: string;
-  children: ReactNode;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const button = anchor.current;
-    const menu = ref.current;
-    if (!button || !menu) return;
-    const rect = button.getBoundingClientRect();
-    menu.style.maxHeight = `${Math.max(80, rect.top - 16)}px`;
-    menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
-    menu.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-    menu.style.visibility = "visible";
-    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
-  }, [anchor, label]);
-  useEffect(() => {
-    window.addEventListener("resize", onClose);
-    return () => window.removeEventListener("resize", onClose);
-  }, [onClose]);
-  return createPortal(<>
-    <div className="manage-backdrop" onClick={onClose} />
-    <div ref={ref} className="manage-menu workspace-menu workspace-popover" role="menu" aria-label={label} style={{ visibility: "hidden" }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          onClose();
-          anchor.current?.focus();
-          return;
-        }
-        if (event.key === "Tab") { onClose(); return; }
-        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-        const buttons = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-        if (!buttons.length) return;
-        event.preventDefault();
-        const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
-          : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-        buttons[next].focus();
-      }}
-    >{children}</div>
-  </>, document.body);
-}
-
-export function WorkspaceSettingsMenu({
-  manageMenu, onManageMenu, onOpen,
-}: {
-  manageMenu: boolean;
-  onManageMenu: (open: boolean) => void;
-  /** 打开设置页并落到对应分类（皮肤/字号已并入设置页外观分类，不再有子菜单）。 */
-  onOpen: (category: SettingsCategoryId) => void;
-}) {
-  const settingsButton = useRef<HTMLButtonElement>(null);
-  const close = () => onManageMenu(false);
-  return <div className="workspace-settings">
-    <button ref={settingsButton} className="workspace-footer-action" title="设置" aria-label="设置" aria-haspopup="menu" aria-expanded={manageMenu}
-      onClick={() => onManageMenu(!manageMenu)}><IconGear /></button>
-    {manageMenu && <FooterPopover anchor={settingsButton} onClose={close} label="设置菜单">
-      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("appearance"); }}><IconGear />设置</button>
-      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("shortcuts"); }}><IconKeyboard />快捷键</button>
-      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("about"); }}><IconInfo />关于</button>
-    </FooterPopover>}
-  </div>;
+/** 齿轮按钮：直接打开设置页（外观分类）。原「设置/快捷键/关于」二级菜单已撤——
+ *  快捷键与关于在设置页内自有分类，入口合一后无需菜单中转。 */
+export function WorkspaceSettingsMenu({ onOpen }: { onOpen: (category: SettingsCategoryId) => void }) {
+  return (
+    <button className="workspace-footer-action" title="设置" aria-label="设置" onClick={() => onOpen("appearance")}>
+      <IconGear />
+    </button>
+  );
 }
 
 export function ConnectionLauncher({ onSerial, onSsh, onClose }: { onSerial: () => void; onSsh: () => void; onClose: () => void }) {

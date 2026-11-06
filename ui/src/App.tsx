@@ -346,12 +346,6 @@ export default function App() {
       localStorage.setItem("port-groups-collapsed", JSON.stringify([...next]));
       return next;
     });
-  const [manageMenu, setManageMenu] = useState(false);
-  useEffect(() => {
-    if (activity === null) {
-      setManageMenu(false);
-    }
-  }, [activity]);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
   const [skillText, setSkillText] = useState<string | null>(null);
@@ -1942,30 +1936,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     sshEditDirect ||
     sshIssue
   );
-  /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
+  /** 标签页右键菜单——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
-  const menuOpen = manageMenu || tabMenu !== null;
+  const menuOpen = tabMenu !== null;
 
   useShareClipboard({ enabled: isLocal, ready: remotesReady, blocked: modalOpen || menuOpen, remotes, onShare: setSharedDevice });
-
-  // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
-  useEffect(() => {
-    if (!manageMenu) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setManageMenu(false);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [manageMenu]);
 
   // 任一对话框模态打开 → 收起菜单(避免菜单浮层压在模态之上)
   useEffect(() => {
     if (modalOpen) {
       setTabMenu(null);
-      setManageMenu(false);
     }
   }, [modalOpen]);
 
@@ -2051,10 +2031,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onShare={() => setShareOpen(true)}
           connected={connected}
           width={sidebarWidth}
-          tools={<WorkspaceSettingsMenu
-            manageMenu={manageMenu} onManageMenu={setManageMenu}
-            onOpen={setSettingsCategory}
-          />}
+          tools={<WorkspaceSettingsMenu onOpen={setSettingsCategory} />}
         >
           {(!isTauri() || isRemote) && (
             <div className="sidebar__conn">
