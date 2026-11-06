@@ -39,7 +39,7 @@ export function WorkspaceSidebar({
     ...(showScripts ? [{ id: "scripts" as const, label: "脚本", icon: <IconCode /> }] : []),
   ];
   return (
-    <aside className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`} style={{ width: collapsed ? 64 : width + 64 }} aria-label="工作空间导航">
+    <aside className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`} style={{ width: collapsed ? 56 : width + 56 }} aria-label="工作空间导航">
       <div className="sidebar__rail">
         <nav className="workspace-nav" aria-label="功能导航">
           {entries.map((entry) => {
