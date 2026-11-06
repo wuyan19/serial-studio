@@ -5,8 +5,9 @@
  */
 const KEY = "serial-studio-fontsize";
 export const FONT_DEFAULT = 15;
-const MIN = 6;
-const MAX = 48;
+/** 字号允许范围（设置页输入框 min/max 同源）。 */
+export const FONT_MIN = 6;
+export const FONT_MAX = 48;
 
 type Listener = (n: number) => void;
 const listeners = new Set<Listener>();
@@ -16,7 +17,7 @@ function load(): number {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const n = parseInt(raw, 10);
-      if (!Number.isNaN(n)) return Math.min(MAX, Math.max(MIN, n));
+      if (!Number.isNaN(n)) return Math.min(FONT_MAX, Math.max(FONT_MIN, n));
     }
   } catch {
     /* ignore */
@@ -34,7 +35,7 @@ function syncUiFont(n: number) {
 syncUiFont(current);
 
 function clamp(n: number): number {
-  return Math.min(MAX, Math.max(MIN, Math.round(n)));
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(n)));
 }
 
 export function getFontSize(): number {

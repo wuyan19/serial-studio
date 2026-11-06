@@ -1,11 +1,10 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
-  IconBolt, IconCheck, IconCode, IconGear, IconGlobe, IconInfo,
-  IconKeyboard, IconPlug, IconPlus, IconShare, IconShirt, IconSsh,
+  IconBolt, IconCode, IconGear, IconGlobe, IconInfo,
+  IconKeyboard, IconPlug, IconPlus, IconShare, IconSsh,
 } from "../icons";
-import { getFontSize, setFontSize, subscribeFont } from "../term-font";
-import { THEMES, type Theme } from "../theme";
+import type { SettingsCategoryId } from "./settings-registry";
 import { useDialogA11y, useEscClose } from "./primitives";
 
 export type WorkspacePanel = "ports" | "macros" | "scripts";
@@ -141,52 +140,22 @@ function FooterPopover({ anchor, onClose, label, children }: {
 }
 
 export function WorkspaceSettingsMenu({
-  theme, themeMenu, onThemeMenu, onTheme, manageMenu, onManageMenu, onSettings, onShortcuts, onAbout,
+  manageMenu, onManageMenu, onOpen,
 }: {
-  theme: Theme;
-  themeMenu: boolean;
-  onThemeMenu: (open: boolean) => void;
-  onTheme: (theme: Theme) => void;
   manageMenu: boolean;
   onManageMenu: (open: boolean) => void;
-  onSettings: () => void;
-  onShortcuts: () => void;
-  onAbout: () => void;
+  /** 打开设置页并落到对应分类（皮肤/字号已并入设置页外观分类，不再有子菜单）。 */
+  onOpen: (category: SettingsCategoryId) => void;
 }) {
-  const [fontSize, setCurrentFontSize] = useState(getFontSize);
   const settingsButton = useRef<HTMLButtonElement>(null);
-  const close = () => { onThemeMenu(false); onManageMenu(false); };
-  const back = () => onThemeMenu(false);
-  useEffect(() => subscribeFont(setCurrentFontSize), []);
+  const close = () => onManageMenu(false);
   return <div className="workspace-settings">
     <button ref={settingsButton} className="workspace-footer-action" title="设置" aria-label="设置" aria-haspopup="menu" aria-expanded={manageMenu}
-      onClick={() => { back(); onManageMenu(!manageMenu); }}><IconGear /></button>
-    {manageMenu && <FooterPopover anchor={settingsButton} onClose={close} label={themeMenu ? "皮肤" : "设置菜单"}>
-      {themeMenu ? <>
-            <button className="manage-menu__item workspace-menu-back" role="menuitem" onClick={back}>‹ 返回</button>
-            <div className="workspace-font-size">
-              <span>界面与终端字号</span>
-              <div>{[14, 15, 16].map((size) => (
-                <button key={size} className="mini-btn" aria-pressed={fontSize === size} onClick={() => setFontSize(size)}>{size}</button>
-              ))}</div>
-            </div>
-            {THEMES.map((definition) => (
-              <button
-                key={definition.id} className="manage-menu__item"
-                role="menuitemradio" aria-checked={definition.id === theme}
-                data-current={definition.id === theme || undefined}
-                onClick={() => { onTheme(definition.id); close(); settingsButton.current?.focus(); }}
-              >
-                <span style={{ visibility: definition.id === theme ? "visible" : "hidden" }}><IconCheck /></span>
-                {definition.label}
-              </button>
-            ))}
-      </> : <>
-        <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onSettings(); }}><IconGear />设置</button>
-        <button className="manage-menu__item" role="menuitem" aria-haspopup="menu" onClick={() => onThemeMenu(true)}><IconShirt />皮肤<span className="workspace-menu-chevron" aria-hidden="true">›</span></button>
-        <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onShortcuts(); }}><IconKeyboard />快捷键</button>
-        <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onAbout(); }}><IconInfo />关于</button>
-      </>}
+      onClick={() => onManageMenu(!manageMenu)}><IconGear /></button>
+    {manageMenu && <FooterPopover anchor={settingsButton} onClose={close} label="设置菜单">
+      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("appearance"); }}><IconGear />设置</button>
+      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("shortcuts"); }}><IconKeyboard />快捷键</button>
+      <button className="manage-menu__item" role="menuitem" onClick={() => { close(); onOpen("about"); }}><IconInfo />关于</button>
     </FooterPopover>}
   </div>;
 }

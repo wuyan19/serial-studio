@@ -503,17 +503,7 @@ button {
   font-family: var(--font-ui);
 }
 .workspace-menu { min-width: 240px; }
-.manage-menu__item.workspace-menu-back {
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--hairline);
-  border-radius: 0;
-  color: var(--ink);
-}
-.workspace-menu-chevron { margin-left: auto; color: var(--ink-faint); font-size: 18px; line-height: 1; }
-.workspace-font-size { padding: 10px; border-bottom: 1px solid var(--hairline); color: var(--ink); font-size: var(--fs-sm); }
-.workspace-font-size > div { display: flex; gap: 6px; margin-top: 10px; }
-.workspace-font-size .mini-btn { flex: 1; }
-.workspace-font-size .mini-btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+/* 皮肤子菜单已并入设置页「外观」分类（settings-page.tsx），旧的返回项/字号/主题列表样式随之移除 */
 .workspace-connection-options { display: grid; gap: 10px; margin: 20px 0; }
 .workspace-connection-options > button { display: flex; align-items: center; gap: 15px; padding: 16px; border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; }
 .workspace-connection-options > button:hover { background: var(--surface-2); }
@@ -2160,6 +2150,202 @@ button {
   max-width: 94vw;
   height: 90vh;
   max-height: 90vh;
+}
+
+/* ===== 设置页（VS Code 式：顶部搜索工具栏 + 左分类导航 + 右滚动设置列表） =====
+   基于 .dialog--max（近全屏模态）。.dialog 自带的 padding/overflow 在此重置为
+   三段布局：工具栏 / 主体两栏（TOC + 列表各自滚动），段标题/行样式全部走现有 token。 */
+.dlg-settings {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.dlg-settings__toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.dlg-settings__search {
+  flex: 1;
+}
+/* 录制中的全局提示（工具栏右端，替代旧对话框的逐行键帽提示） */
+.dlg-settings__recording {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+}
+.dlg-settings__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.dlg-settings__toc {
+  flex: 0 0 176px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 8px;
+  border-right: 1px solid var(--hairline-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dlg-settings__toc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.dlg-settings__toc-item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.dlg-settings__toc-item[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--ink);
+}
+/* 搜索命中数徽标（清空搜索后消失） */
+.dlg-settings__toc-count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+}
+.dlg-settings__list {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 26px 36px;
+}
+/* 分类大标题 + 副描述（VS Code 的 "Commonly Used" 同位） */
+.dlg-settings__cat-title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  margin: 0;
+}
+.dlg-settings__cat-desc {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  margin: 4px 0 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.dlg-settings__cat + .dlg-settings__cat {
+  margin-top: 34px; /* 搜索态多分类纵排的分隔 */
+}
+/* 分类头右侧小工具位（快捷键「说明」按钮） */
+.dlg-settings__cat-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -26px 0 8px; /* 拉回到副描述行右端，不占独立行高 */
+}
+/* 设置行：粗体名 + 说明 + 控件（VS Code 同构），hover 浅 wash */
+.settings-row {
+  padding: 12px 8px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast) var(--ease);
+}
+.settings-row:hover {
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.settings-row__name {
+  font-weight: 600;
+  font-size: var(--fs-base);
+}
+.settings-row__desc {
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+  margin-top: 2px;
+}
+.settings-row__control {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 控件宽度约束：下拉/文本 280，数字 160（VS Code 同款窄数字框） */
+.settings-row__control .field-select {
+  width: 280px;
+}
+.settings-row__control .dlg-settings__text {
+  width: 280px;
+}
+.settings-row__control .dlg-settings__num {
+  width: 160px;
+}
+.dlg-settings__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.dlg-settings__warn {
+  cursor: help;
+}
+/* 常驻行尾小按钮（打开日志目录），不挤占勾选标签 */
+.dlg-settings__minor-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+/* 连接分类加载失败/加载中 */
+.dlg-settings__srv-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-faint);
+  padding: 14px 8px;
+}
+.dlg-settings__srv-state button {
+  color: var(--ink);
+}
+/* 分类尾部应用区（服务器监听 / 前端连接 / 全部重置） */
+.dlg-settings__cat-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 8px 0;
+}
+/* 快捷键分组小标题（原 shortcut-group 卡片头改平铺分组标题） */
+.settings-shortcut-group {
+  margin-top: 14px;
+}
+.settings-group-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  margin: 0 0 4px;
+  padding-left: 8px;
+}
+/* 快捷键行在设置列表里的排版沿用 .shortcut-row 网格，这里只加行内边距 */
+.settings-shortcut-group .shortcut-row {
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+}
+.settings-shortcut-group .shortcut-row:hover {
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+/* 关于块在设置列表内的容器（收窄居中，原弹窗样式 .about* 全复用） */
+.settings-about {
+  max-width: 520px;
+  margin: 8px auto 0;
 }
 /* 脚本编辑器:固定双栏(打开即最大化)——代码(左,独立滚动) | 参数+JSON(右,独立滚动)。
    双类选择器抬高特异性压过单类的 .macro-editor__scroll(源码顺序在其后,单类必输),

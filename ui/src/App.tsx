@@ -65,7 +65,6 @@ import type { DeviceShareAddress } from "./device-share";
 import { useShareClipboard } from "./use-share-clipboard";
 import { DeviceShareDialog } from "./components/device-share";
 import {
-  AboutDialog,
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
@@ -87,8 +86,7 @@ import {
   ScriptSkillDialog,
   SearchBar,
   SerialConfigDialog,
-  SettingsPanel,
-  ShortcutsDialog,
+  SettingsPage,
   SshAuthDialog,
   SshManagerDialog,
   SshEditDialog,
@@ -96,6 +94,7 @@ import {
   sshAuthLabel,
   TermView,
   validateMacro,
+  type SettingsCategoryId,
 } from "./components";
 import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
 import { SshFileWorkspace } from "./components/ssh-file-workspace";
@@ -109,7 +108,7 @@ import {
   IconPower,
   IconTrash,
 } from "./icons";
-import { getTheme, setTheme, subscribe, toggleTheme, type Theme } from "./theme";
+import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
@@ -270,7 +269,8 @@ export default function App() {
   /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
   const [sshIssue, setSshIssue] = useState<SshIssue | null>(null);
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 设置页当前分类（null=关闭）。原 settings/about/shortcuts 三个模态开关合一。 */
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategoryId | null>(null);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
   const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
   /** 脚本上次运行参数(脚本名 → 键值):参数收集框预填,二次运行只改要动的参数。
@@ -347,15 +347,11 @@ export default function App() {
       return next;
     });
   const [manageMenu, setManageMenu] = useState(false);
-  /** 主题选择菜单(按注册表顺序平铺列出全部主题)。 */
-  const [themeMenu, setThemeMenu] = useState(false);
   useEffect(() => {
     if (activity === null) {
-      setThemeMenu(false);
       setManageMenu(false);
     }
   }, [activity]);
-  const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
   const [skillText, setSkillText] = useState<string | null>(null);
@@ -376,7 +372,6 @@ export default function App() {
   /** 待收集参数的脚本名(非 null=弹参数收集框);null=关闭。 */
   const [pendingRun, setPendingRun] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
   const [scriptPaletteOpen, setScriptPaletteOpen] = useState(false);
   const [portPaletteOpen, setPortPaletteOpen] = useState(false);
@@ -1909,8 +1904,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     },
     "theme.toggle": toggleTheme,
     "port.refresh": refreshPorts,
-    "settings.open": () => setSettingsOpen(true),
-    "about.open": () => setAboutOpen(true),
+    "settings.open": () => setSettingsCategory("appearance"),
+    "about.open": () => setSettingsCategory("about"),
     "remote.open": () => setRemoteOpen(true),
     "macro.palette": () => setMacroPaletteOpen(true),
     "script.palette": () => setScriptPaletteOpen(true),
@@ -1928,8 +1923,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const modalOpen = !!(
     shareOpen || sharedDevice ||
     connectionLauncherOpen ||
-    settingsOpen ||
-    aboutOpen ||
+    settingsCategory ||
     skillOpen ||
     pendingRun ||
     remoteOpen ||
@@ -1939,7 +1933,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     confirmState ||
     editing ||
     editingScript ||
-    shortcutsOpen ||
     macroPaletteOpen ||
     scriptPaletteOpen ||
     portPaletteOpen ||
@@ -1951,29 +1944,27 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   );
   /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
-  const menuOpen = themeMenu || manageMenu || tabMenu !== null;
+  const menuOpen = manageMenu || tabMenu !== null;
 
   useShareClipboard({ enabled: isLocal, ready: remotesReady, blocked: modalOpen || menuOpen, remotes, onShare: setSharedDevice });
 
   // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
   useEffect(() => {
-    if (!themeMenu && !manageMenu) return;
+    if (!manageMenu) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        setThemeMenu(false);
         setManageMenu(false);
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [themeMenu, manageMenu]);
+  }, [manageMenu]);
 
   // 任一对话框模态打开 → 收起菜单(避免菜单浮层压在模态之上)
   useEffect(() => {
     if (modalOpen) {
       setTabMenu(null);
-      setThemeMenu(false);
       setManageMenu(false);
     }
   }, [modalOpen]);
@@ -2061,10 +2052,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           connected={connected}
           width={sidebarWidth}
           tools={<WorkspaceSettingsMenu
-            theme={theme} themeMenu={themeMenu} onThemeMenu={setThemeMenu} onTheme={setTheme}
             manageMenu={manageMenu} onManageMenu={setManageMenu}
-            onSettings={() => setSettingsOpen(true)}
-            onShortcuts={() => setShortcutsOpen(true)} onAbout={() => setAboutOpen(true)}
+            onOpen={setSettingsCategory}
           />}
         >
           {(!isTauri() || isRemote) && (
@@ -2470,9 +2459,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         />
       )}
 
-      {/* 设置面板 */}
-      {settingsOpen && (
-        <SettingsPanel
+      {/* 设置页（VS Code 式：搜索 + 分类 + 列表，整合连接/快捷键/关于） */}
+      {settingsCategory && (
+        <SettingsPage
+          initialCategory={settingsCategory}
+          version={version}
           connConfig={connConfig}
           srvSettings={srvSettings}
           srvFailed={srvFailed}
@@ -2481,9 +2472,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConnChange={(c) => {
             saveConn(c);
             setConnConfig(c);
-            // 关闭设置页,连接结果走 toast(成功/超时失败,见 pendingConn effects)
+            // 不关页：反馈走页内「已应用」脉冲,连接结果走 toast(成功/超时失败,见 pendingConn effects)
             setPendingConn(`${c.host}:${c.port}`);
-            setSettingsOpen(false);
           }}
           onSaveSrv={async (s) => {
             if (!isTauri()) return;
@@ -2496,11 +2486,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               libError(String(e));
             }
           }}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => setSettingsCategory(null)}
         />
       )}
 
-      {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
       {skillOpen && (
         <ScriptSkillDialog text={skillText} failed={skillFailed} onRetry={fetchSkill} onClose={() => setSkillOpen(false)} />
       )}
@@ -2520,7 +2509,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onCancel={() => setPendingRun(null)}
         />
       )}
-      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {macroPaletteOpen && (
         <MacroPalette
           macros={macros}

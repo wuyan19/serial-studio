@@ -13,6 +13,15 @@ export function ConfigRow({ label, children }: { label: string; children: React.
   );
 }
 
+/** 遮罩点击关闭的统一判定:必须 mousedown 起点就是遮罩本身。
+ *  不能用 onClick——框内选字拖到遮罩上松手时,click 会派发到公共祖先(恰是遮罩),
+ *  target 判断防不住,误关丢选区。mousedown 判定是标准方案(react-modal 同款)。 */
+export function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
+  if (e.target !== e.currentTarget) return; // 按下点在对话框内
+  if (guard?.()) return; // 上下文不允许关(如下载进行中)
+  onClose();
+}
+
 /** 模块级对话框栈:嵌套对话框(编辑器上叠确认框、确认框上再叠帮助浮层)的按键归属仲裁——
  *  只有栈顶响应 Esc/Enter,否则 window 级监听会全部触发(一次 Esc 关两层)。
  *  挂载即 push、卸载即 pop;后挂载(视觉上层)者后 push → 栈顶。 */

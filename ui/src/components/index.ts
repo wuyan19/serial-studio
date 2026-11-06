@@ -3,7 +3,6 @@ export { ActivityIcon, CompositePortLabel, ConfigRow, GroupHead, InlineAliasInpu
 export { ContextMenu, type ContextMenuItem } from "./context-menu";
 export { GroupView, SearchBar, TermView } from "./term";
 export {
-  AboutDialog,
   ConfirmDialog,
   DeviceDetailDialog,
   type DeviceDetailInfo,
@@ -15,14 +14,14 @@ export {
   ScriptRunParamsDialog,
   ScriptSkillDialog,
   SerialConfigDialog,
-  SettingsPanel,
-  ShortcutsDialog,
   SshAuthDialog,
   SshManagerDialog,
   SshEditDialog,
   SshTrustDialog,
   sshAuthLabel,
 } from "./dialogs";
+export { SettingsPage } from "./settings-page";
+export { buildSettingsCategories, filterSettings, type SettingsCategoryId } from "./settings-registry";
 export { MacroPalette, PortPalette, ScriptPalette } from "./palettes";
 export { MacroEditor, ScriptEditor, newStep, validateMacro } from "./editors";
 export { RunCards, type RunCardView } from "./run-cards";
