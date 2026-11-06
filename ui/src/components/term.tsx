@@ -463,6 +463,18 @@ export function GroupView({
   filePanel?: ReactNode;
 }) {
   const termRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  // 标签溢出时,激活 tab 可能滚出可视区(侧栏切换/新开端口),把它滚回来。
+  // 手动算 scrollLeft 而非 scrollIntoView(inline):后者会连带滚动外层可滚祖先。
+  useLayoutEffect(() => {
+    const el = tabsRef.current;
+    const tab = el?.querySelector<HTMLElement>(".tab[data-active='true']");
+    if (!el || !tab) return;
+    const t = tab.getBoundingClientRect();
+    const b = el.getBoundingClientRect();
+    if (t.left < b.left) el.scrollLeft += t.left - b.left;
+    else if (t.right > b.right) el.scrollLeft += t.right - b.right;
+  }, [group.activePort]);
   // 空状态快捷键提示用:跟随改键(只在有空 tab 的格子短暂存在,订阅成本可忽略)
   const [bindings, setBindings] = useState<ShortcutMap>(() => getBindings());
   useEffect(() => subscribeBindings(setBindings), []);
@@ -516,7 +528,12 @@ export function GroupView({
     <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
       <div className="group__tab-row">
         <div
+          ref={tabsRef}
           className="group__tabs tab-bar"
+          onWheel={(e) => {
+            // 竖向滚轮转横向滚动:标签栏只有横向溢出,Chromium 默认不做这个映射(Shift+滚轮才行,用户难发现)
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
+          }}
           onDragOver={(e) => {
             if (e.dataTransfer.types.includes("text/x-port")) {
               e.preventDefault();
