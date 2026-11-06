@@ -51,8 +51,8 @@ export function SettingsPage({
 }) {
   const [active, setActive] = useState<SettingsCategoryId>(initialCategory);
   const [query, setQuery] = useState("");
-  /** 最大化 ⇄ 紧凑：最大化=94vw×90vh（默认），紧凑=居中卡片（还原态）。 */
-  const [max, setMax] = useState(true);
+  /** 最大化 ⇄ 紧凑：紧凑=居中卡片 880×680（默认打开），最大化=94vw×90vh。 */
+  const [max, setMax] = useState(false);
   // 外观（原皮肤子菜单）：订阅即得最新值，下拉/输入框受控
   const [theme, setThemeState] = useState<Theme>(getTheme);
   useEffect(() => subscribe(setThemeState), []);
