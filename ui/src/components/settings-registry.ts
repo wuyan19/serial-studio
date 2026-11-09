@@ -86,6 +86,13 @@ export function buildSettingsCategories(showServer: boolean, desktop = isTauri()
 
   return [
     {
+      id: "connection",
+      label: "设置",
+      description: showServer ? "本机服务监听配置，应用后热重启生效。" : "前端连接的 Serial Studio 服务，应用后重连。",
+      keywords: ["connection", "server", "服务器", "端口", "串口服务", "服务", "连接"],
+      items: connectionItems,
+    },
+    {
       id: "appearance",
       label: "外观",
       description: "主题与字号，改动立即生效。",
@@ -94,13 +101,6 @@ export function buildSettingsCategories(showServer: boolean, desktop = isTauri()
         { id: "appearance.theme", label: "主题", description: "界面与终端配色，立即生效；Ctrl+Shift+L 可循环切换", keywords: ["theme", "dark", "light", "暗", "亮"], control: "theme-select" },
         { id: "appearance.font-size", label: "界面与终端字号", description: "全局字号（6–48），终端立即重排", keywords: ["font", "size", "zoom", "缩放"], control: "font-size-input" },
       ],
-    },
-    {
-      id: "connection",
-      label: "服务",
-      description: showServer ? "本机服务监听配置，应用后热重启生效。" : "前端连接的 Serial Studio 服务，应用后重连。",
-      keywords: ["connection", "server", "服务器", "端口", "串口服务", "连接"],
-      items: connectionItems,
     },
     {
       id: "shortcuts",

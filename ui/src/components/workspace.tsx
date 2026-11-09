@@ -1,7 +1,7 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   IconBolt, IconCode, IconGear, IconGlobe,
-  IconMore, IconPlug, IconPlus, IconShare, IconSsh,
+  IconMore, IconPlug, IconPlus, IconRefresh, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
@@ -11,7 +11,7 @@ export type WorkspacePanel = "ports" | "macros" | "scripts";
 
 export function WorkspaceSidebar({
   panel, onPanel, showScripts, counts, running, failed, query,
-  onQuery, onNew, onRemote, onShare, width, collapsed, tools, moreItems, children,
+  onQuery, onNew, onRemote, onShare, width, collapsed, tools, moreItems, view, onRefresh, children,
 }: {
   panel: WorkspacePanel;
   onPanel: (panel: WorkspacePanel) => void;
@@ -29,13 +29,18 @@ export function WorkspaceSidebar({
   tools: ReactNode;
   /** 面板标题栏 ··· 菜单项(App 按当前面板组好:连接=刷新/视图切换,宏/脚本=导入导出/指南)。 */
   moreItems?: ContextMenuItem[];
+  view?: { label: string; items: ContextMenuItem[] };
+  onRefresh?: () => void;
   children: ReactNode;
 }) {
   const panelId = useId();
   const label = panel === "ports" ? "连接" : panel === "macros" ? "宏" : "脚本";
   const moreButton = useRef<HTMLButtonElement>(null);
+  const viewButton = useRef<HTMLButtonElement>(null);
+  const [viewMenu, setViewMenu] = useState<{ x: number; y: number } | null>(null);
   /** ··· 菜单锚点(按钮下方);null=关。 */
   const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => { setViewMenu(null); setMoreMenu(null); }, [panel, collapsed]);
   const entries = [
     { id: "ports" as const, label: "连接", icon: <IconPlug /> },
     { id: "macros" as const, label: "宏", icon: <IconBolt /> },
@@ -78,9 +83,22 @@ export function WorkspaceSidebar({
         </div>
       </div>
       <div id={panelId} className="sidebar__panel" hidden={collapsed}>
-        {/* 面板标题栏:面板名居左,··· 更多操作居右(VS Code Explorer 同款) */}
+        <div className="workspace-sidebar-actions">
+          <label className="workspace-search">
+            <span aria-hidden="true">⌕</span>
+            <input type="search" value={query} onChange={(event) => onQuery(event.target.value)}
+              placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false} />
+          </label>
+          <button className="workspace-create" onClick={onNew} aria-label={`新建${label}`} title={`新建${label}`}><IconPlus /></button>
+        </div>
         <div className="panel-head">
-          <span className="panel-head__title">{label}</span>
+          <span className="panel-head__title">{panel === "ports" ? "连接列表" : label}</span>
+          {view && <button className="workspace-view-badge" ref={viewButton} aria-label={`列表视图：${view.label}`}
+            aria-haspopup="menu" aria-expanded={viewMenu !== null} onClick={() => {
+              const rect = viewButton.current?.getBoundingClientRect();
+              if (rect) { setMoreMenu(null); setViewMenu(viewMenu ? null : { x: rect.left, y: rect.bottom + 6 }); }
+            }}>{view.label}</button>}
+          {onRefresh && <button className="icon-btn panel-head__refresh" onClick={onRefresh} title="刷新列表" aria-label="刷新列表"><IconRefresh /></button>}
           {moreItems && moreItems.length > 0 && (
             <button
               ref={moreButton}
@@ -88,7 +106,7 @@ export function WorkspaceSidebar({
               aria-label="更多操作" aria-haspopup="menu" aria-expanded={moreMenu !== null}
               onClick={() => {
                 const rect = moreButton.current?.getBoundingClientRect();
-                if (rect) setMoreMenu(moreMenu ? null : { x: Math.max(8, rect.right - 170), y: rect.bottom + 6 });
+                if (rect) { setViewMenu(null); setMoreMenu(moreMenu ? null : { x: Math.max(8, rect.right - 170), y: rect.bottom + 6 }); }
               }}
             >
               <IconMore />
@@ -103,19 +121,8 @@ export function WorkspaceSidebar({
               }}
             />
           )}
-        </div>
-        {/* 搜索行:搜索框占满 + 右侧 ＋ 新建(原通栏「新建×」大按钮收进图标) */}
-        <div className="panel-search-row">
-          <label className="workspace-search">
-            <span aria-hidden="true">⌕</span>
-            <input
-              type="search" value={query} onChange={(event) => onQuery(event.target.value)}
-              placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false}
-            />
-          </label>
-          <button className="panel-search-row__add" onClick={onNew} title={`新建${label}`} aria-label={`新建${label}`}>
-            <IconPlus />
-          </button>
+          {viewMenu && view && <ContextMenu x={viewMenu.x} y={viewMenu.y} items={view.items}
+            onClose={(reason) => { setViewMenu(null); if (reason === "item" || reason === "escape") viewButton.current?.focus(); }} />}
         </div>
         <div className="sidebar__content">{children}</div>
       </div>
@@ -123,11 +130,10 @@ export function WorkspaceSidebar({
   );
 }
 
-/** 齿轮按钮：直接打开设置页（外观分类）。原「设置/快捷键/关于」二级菜单已撤——
- *  快捷键与关于在设置页内自有分类，入口合一后无需菜单中转。 */
+/** Open settings directly; categories remain inside the dialog. */
 export function WorkspaceSettingsMenu({ onOpen }: { onOpen: (category: SettingsCategoryId) => void }) {
   return (
-    <button className="workspace-footer-action" title="设置" aria-label="设置" onClick={() => onOpen("appearance")}>
+    <button className="workspace-footer-action" title="设置" aria-label="设置" aria-haspopup="dialog" onClick={() => onOpen("connection")}>
       <IconGear />
     </button>
   );

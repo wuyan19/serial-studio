@@ -615,7 +615,7 @@ export function PortDetailDialog({ info, onClose }: {
   );
 }
 
-// ===== SSH 设备管理（UI 预览：本地 mock 数据 + 连接/测试模拟；后端接入后同一界面换数据源） =====
+// ===== SSH device management =====
 
 /** 认证方式短标签（管理表/详情共用）。 */
 export function sshAuthLabel(auth: SshAuth): string {
@@ -644,6 +644,12 @@ export function SshManagerDialog({
 }) {
   // 表单只在管理列表内部切换(添加/编辑行按钮);右键等直达编辑走独立的 SshEditDialog
   const [form, setForm] = useState<null | { mode: "add" } | { mode: "edit"; host: SshHost }>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(5);
+  const pageCount = Math.max(1, Math.ceil(hosts.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageHosts = hosts.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  useEffect(() => { if (page !== currentPage) setPage(currentPage); }, [page, currentPage]);
   // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回列表，对话框栈仲裁）
   useEscClose(() => {
     if (form === null) onClose();
@@ -685,7 +691,7 @@ export function SshManagerDialog({
                 <span>测试</span>
                 <span>操作</span>
               </div>
-              {hosts.map((h) => {
+              {pageHosts.map((h) => {
                 const test = testOf(h.id);
                 const tst = test?.status;
                 const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : tst === "fail" ? "✗" : "—";
@@ -718,6 +724,22 @@ export function SshManagerDialog({
               })}
             </div>
           )}
+          {hosts.length > 0 && <nav className="ssh-pagination" aria-label="SSH 设备分页">
+            <span className="ssh-pagination__total">共 {hosts.length} 台</span>
+            <label className="ssh-pagination__size">每页
+              <select aria-label="每页设备数" value={pageSize} onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(0);
+              }}>
+                {[5, 10, 20].map(size => <option key={size} value={size}>{size} 台</option>)}
+              </select>
+            </label>
+            <div className="ssh-pagination__pages">
+              <button type="button" className="ssh-pagination__button" aria-label="上一页" title="上一页" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>‹</button>
+              <span className="ssh-pagination__position" aria-live="polite" aria-atomic="true">第 {currentPage + 1} / {pageCount} 页</span>
+              <button type="button" className="ssh-pagination__button" aria-label="下一页" title="下一页" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>›</button>
+            </div>
+          </nav>}
           <div className="btn-row">
             <button className="btn btn--primary" onClick={onClose}>
               关闭

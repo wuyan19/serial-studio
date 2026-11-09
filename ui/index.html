@@ -9,9 +9,9 @@
          不再请求 Google Fonts:离线可用,也免去字体异步就位的终端 fit 竞态 -->
     <style>
       html, body, #root { margin: 0; height: 100%; }
-      html { background: #212120; color-scheme: dark; }
-      html[data-theme="codex"] { background: #212120; }
-      html[data-theme="codex-light"] { background: #ffffff; color-scheme: light; }
+      html { background: #0c0c0c; color-scheme: dark; }
+      html[data-theme="codex"] { background: #0c0c0c; }
+      html[data-theme="codex-light"] { background: #d8dade; color-scheme: light; }
       html[data-theme="linear"] { background: #0a0b0d; }
       /* 新增主题:在此加首帧背景色规则(防白闪),与 styles.css 的 token 覆盖块对应 */
       html[data-theme="linear-light"] { background: #f4f5f6; color-scheme: light; }
@@ -30,7 +30,7 @@
     <script>
       // 首帧前定主题，避免闪烁。优先用户选择，否则跟随系统。
       // 主题 id 数组与 src/theme.ts 的 THEMES 注册表手动同步(内联脚本先于 bundle 执行,无法 import);
-      // legacy 为已下线主题(dark/light → Linear 两态)的迁移表,与 theme.ts 保持一致。
+      // Legacy themes preserve their luminance when migrating to the two workspace themes.
       // lightIds 与 THEMES 各条的 lum="light" 同步——data-lum 驱动 styles.css 浅色家族共用层。
       (function () {
         var ids = [
@@ -42,7 +42,7 @@
           "claude", "claude-light",
           "cursor", "stripe", "sentry",
         ];
-        var legacy = { dark: "linear", light: "linear-light" };
+        var legacy = { dark: "codex", light: "codex-light" };
         var lightIds = {
           "codex-light": 1,
           "linear-light": 1, "apple-light": 1, "raycast-light": 1,
@@ -56,16 +56,14 @@
         try {
           var s = localStorage.getItem("serial-studio-theme");
           var t;
-          if (ids.indexOf(s) >= 0) t = s;
-          else if (legacy[s]) {
-            // 迁移命中即回写:旧 id 不留 localStorage,迁移表未来可退役
-            t = legacy[s];
+          if (ids.indexOf(s) >= 0) t = lightIds[s] ? "codex-light" : "codex";
+          else if (legacy[s]) t = legacy[s];
+          else {
+            t = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "codex-light" : "codex";
+          }
+          if (s !== t) {
             try { localStorage.setItem("serial-studio-theme", t); } catch (e2) {}
-          } else {
-            t =
-              window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
-                ? "codex-light"
-                : "codex";
           }
           apply(t);
         } catch (e) {

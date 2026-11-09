@@ -1,14 +1,8 @@
 /**
- * 主题模块——一个主题 = 注册表里一条完整自洽的定义(明暗是主题自带的属性,不做独立开关)。
- * 真 source of truth 是 <html data-theme>，由 index.html 内联脚本在首帧前写入（防闪烁）。
- * 这里只做：读取当前值、切换（写 localStorage + 改属性 + 通知订阅者）、集中持有各主题的
- * TS 侧配色(xterm 终端 / 搜索高亮 / CodeMirror 语法色——canvas 与 webview 不吃 CSS 变量,必须给纯色值)。
- *
- * 新增主题清单(3 处,组件代码零改动):
- *   1. theme.ts 在 THEMES 登记一条完整定义(下方 ThemeDef,含 term/search/cm)
- *   2. styles.css:token 住 :root 默认块(暗色)或 `:root[data-theme="xxx"]` 覆盖块
- *   3. index.html 内联脚本的 id 数组 + 首帧背景色规则
- *   term.tsx / editors.tsx / App.tsx 均从注册表读取,不再需要手动同步。
+ * The workspace offers two themes. Historical palette definitions remain available
+ * only to migrate saved identifiers by luminance and preserve internal type compatibility.
+ * index.html performs the same migration before paint; this module synchronizes
+ * terminal, search and editor colors with DOM attributes, storage and subscribers.
  */
 import type { ITheme } from "@xterm/xterm";
 import type { ISearchDecorationOptions } from "@xterm/addon-search";
@@ -155,9 +149,7 @@ function searchColors(match: string, active: string, border: string): ISearchDec
   };
 }
 
-/** 主题注册表(有序,toggle 按此循环;主题菜单平铺按此顺序展示)。
- *  as const 保住字面量联合类型,satisfies 只做结构校验、不拓宽类型。
- *  新主题三处登记:此处 + styles.css token 块 + index.html 首帧脚本。 */
+// Historical palettes remain registered so stored identifiers can migrate by luminance.
 export const THEMES = [
   {
     id: "codex",
@@ -165,9 +157,9 @@ export const THEMES = [
     family: "Codex",
     lum: "dark",
     term: {
-      background: "#212120", foreground: "#eeeee9",
-      cursor: "#eeeee9", cursorAccent: "#212120",
-      selectionBackground: "#363633",
+      background: "#1b1b1b", foreground: "#e0e0e0",
+      cursor: "#e0e0e0", cursorAccent: "#1b1b1b",
+      selectionBackground: "#294052",
       black: "#191918", brightBlack: "#a2a29a",
       red: "#e49c95", brightRed: "#efb3ac",
       green: "#92cba2", brightGreen: "#b5ddbe",
@@ -191,7 +183,7 @@ export const THEMES = [
     term: {
       background: "#ffffff", foreground: "#252524",
       cursor: "#252524", cursorAccent: "#ffffff",
-      selectionBackground: "#e6e6e3",
+      selectionBackground: "#dbe8f2",
       black: "#252524", brightBlack: "#656560",
       red: "#aa423b", brightRed: "#a53830",
       green: "#31734e", brightGreen: "#28653e",
@@ -328,12 +320,15 @@ export const THEMES = [
 
 export type Theme = (typeof THEMES)[number]["id"];
 
-/** 已下线的石墨主题 → Linear 的迁移表(老用户的 localStorage 还存着旧 id)。
- *  index.html 内联脚本持有一份等价映射(先于 bundle 执行,负责首帧迁移并回写
- *  localStorage);本表兜底 DOM 属性异常的场景。两处需同步维护。 */
+export const APPEARANCE_THEMES = [
+  { id: "codex", label: "深色", lum: "dark" },
+  { id: "codex-light", label: "浅色", lum: "light" },
+] as const;
+
+// Keep this migration aligned with the pre-paint script in index.html.
 const LEGACY_THEME_MAP: Record<string, Theme> = {
-  dark: "linear",
-  light: "linear-light",
+  dark: "codex",
+  light: "codex-light",
 };
 
 /** 当前主题完整定义(需要 term/cm 配色时用这个,别再各自建映射表)。 */
@@ -360,17 +355,27 @@ function systemTheme(): Theme {
 
 function readDom(): Theme {
   const t = document.documentElement.dataset.theme ?? "";
-  if (isTheme(t)) return t;
+  if (isTheme(t)) return normalizeTheme(t);
   return LEGACY_THEME_MAP[t] ?? systemTheme();
 }
 
 let current: Theme = readDom();
+if (document.documentElement.dataset.theme !== current) {
+  document.documentElement.dataset.theme = current;
+  document.documentElement.dataset.lum = themeDefOf(current).lum;
+  try { localStorage.setItem(KEY, current); } catch { /* Storage may be disabled. */ }
+}
 
 export function getTheme(): Theme {
   return current;
 }
 
+export function normalizeTheme(t: Theme): Theme {
+  return themeDefOf(t).lum === "light" ? "codex-light" : "codex";
+}
+
 export function setTheme(t: Theme) {
+  t = normalizeTheme(t);
   if (t === current) return;
   current = t;
   try {
@@ -385,10 +390,9 @@ export function setTheme(t: Theme) {
   listeners.forEach((l) => l(t));
 }
 
-/** 循环切换到注册表中的下一个主题(快捷键 theme.toggle 用;菜单之外的快速轮换)。 */
+// Keyboard switching uses the same two choices as the appearance panel.
 export function toggleTheme() {
-  const i = THEMES.findIndex((t) => t.id === current);
-  setTheme(THEMES[(i + 1) % THEMES.length].id); // findIndex 落空(-1)时 +1 恰回 0
+  setTheme(current === "codex" ? "codex-light" : "codex");
 }
 
 export function subscribe(l: Listener): () => void {

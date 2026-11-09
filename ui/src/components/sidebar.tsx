@@ -297,9 +297,10 @@ export function PortsPanel({
     const dev = remotes.find((remote) => remote.id === group.devId);
     const canRename = Boolean(dev && getMode() === "local");
     const details = () => onShowDeviceDetail(group.external && group.meta ? { kind: "meta", device: group.meta } : dev ? { kind: "remote", dev } : { kind: "local" });
+    const collapsed = !search && portCollapsed.has(group.devId);
     return <div key={`device:${group.devId}`} className="macro-group port-group">
       <GroupHead
-        name={group.label} count={serialRows.length} collapsed={!search && portCollapsed.has(group.devId)}
+        name={group.label} count={serialRows.length} collapsed={collapsed}
         onToggle={() => onTogglePortGroup(group.devId)}
         leading={<span className={`dot ${group.online === true ? "on" : group.online === false ? "off" : ""}`} />}
         title={dev ? `${dev.host}:${dev.port}` : group.detail}
@@ -314,7 +315,7 @@ export function PortsPanel({
           ] : []),
         ]}
       />
-      {(search || !portCollapsed.has(group.devId)) && (serialRows.length ? serialRows.map((row) => renderSerial(group, row.port, false)) : <p className="sidebar__empty">{group.online === false ? "未连接" : group.online === undefined && group.devId !== "local" ? "连接中…" : "无可用端口"}</p>)}
+      {!collapsed && <div className="connection-tree__children">{serialRows.length ? serialRows.map((row) => renderSerial(group, row.port, false)) : <p className="sidebar__empty">{group.online === false ? "未连接" : group.online === undefined && group.devId !== "local" ? "连接中…" : "无可用端口"}</p>}</div>}
     </div>;
   };
 
@@ -334,9 +335,9 @@ export function PortsPanel({
     {listView === "groups" && !groupsReady && !groupsError && <p className="sidebar__empty">正在同步分组，请确认服务已连接。</p>}
     {listView === "groups" && groupsReady && !grouping.names.length && <p className="sidebar__empty">暂无分组，点击“新建分组”，再右键串口或 SSH 设备添加。</p>}
     {search && buckets.length > 0 && buckets.every((bucket) => !bucket.rows.length && !bucket.name?.toLocaleLowerCase().includes(search)) && <p className="sidebar__empty">没有匹配的连接</p>}
-    {buckets.map((bucket) => {
+    <div className="connection-tree" data-view={listView}>{buckets.map((bucket) => {
       const customName = bucket.name;
-      if (customName === null) return <div key="default">{portGroups.map((group) => {
+      if (customName === null) return <div key="default" className="connection-tree__default">{portGroups.map((group) => {
         if (group.kind !== "ssh") return renderDefaultDevice(group, bucket.rows);
         const row = bucket.rows.find((entry): entry is SshRow => entry.kind === "ssh" && entry.group.devId === group.devId);
         return row ? renderSsh(row, true) : null;
@@ -354,9 +355,9 @@ export function PortsPanel({
           }}
           onDissolve={() => { void updateGroups({ type: "dissolve", name: customName }); }}
         />
-        {!collapsed && (bucket.rows.length ? bucket.rows.map((row) => row.kind === "ssh" ? renderSsh(row) : renderSerial(row.group, row.port, true)) : <p className="sidebar__empty">{search ? "没有匹配的连接" : "在默认视图右键串口或 SSH 设备可添加到此分组"}</p>)}
+        {!collapsed && <div className="connection-tree__children">{bucket.rows.length ? bucket.rows.map((row) => row.kind === "ssh" ? renderSsh(row) : renderSerial(row.group, row.port, true)) : <p className="sidebar__empty">{search ? "没有匹配的连接" : "在默认视图右键串口或 SSH 设备可添加到此分组"}</p>}</div>}
       </div>;
-    })}
+    })}</div>
     {keyMenu && <ContextMenu x={keyMenu.x} y={keyMenu.y} items={keyMenuItems} onClose={() => setKeyMenu(null)} />}
   </>;
 }

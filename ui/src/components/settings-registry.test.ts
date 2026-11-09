@@ -6,7 +6,7 @@ const CATS = buildSettingsCategories(true, true); // 服务器模式（条目最
 
 describe("buildSettingsCategories", () => {
   it("四个分类齐全且 id 唯一", () => {
-    expect(CATS.map((c) => c.id)).toEqual(["appearance", "connection", "shortcuts", "about"]);
+    expect(CATS.map((c) => c.id)).toEqual(["connection", "appearance", "shortcuts", "about"]);
   });
   it("服务器模式连接分类是监听条目，客户端模式是主机/端口", () => {
     const serverIds = CATS.find((c) => c.id === "connection")!.items.map((i) => i.id);
