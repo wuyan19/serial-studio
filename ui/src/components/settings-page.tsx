@@ -1,8 +1,8 @@
-/** VS Code 风格设置页：顶部搜索工具栏 + 左分类导航 + 右滚动设置列表（近全屏模态）。
- *  整合原 SettingsPanel（连接/服务器）、ShortcutsDialog（改键）、AboutDialog（关于）
- *  与齿轮菜单皮肤子菜单（主题/字号）。状态全部沿用既有模块，本组件只做布局与分发。
- *  键盘：单个 window capture 监听统一裁决 Esc 优先级链——帮助浮层 → 录制态 →
- *  （更新下载中守卫）→ 清搜索词 → 关页。 */
+/**
+ * Compact two-column settings keep the existing service, shortcut and update behavior.
+ * Search spans categories; selecting a category returns to that category's full list.
+ * The capture listener preserves the existing Escape priority and update-close guard.
+ */
 import { useEffect, useRef, useState } from "react";
 import type { ActionId, ConnConfig, ShortcutMap, SrvSettings } from "../types";
 import { isTauri } from "../lib";
@@ -10,18 +10,22 @@ import {
   ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo,
   getBindings, resetAll, resetBinding, setBinding, subscribeBindings,
 } from "../shortcuts";
-import { THEMES, getTheme, setTheme, subscribe, type Theme } from "../theme";
+import { APPEARANCE_THEMES, getTheme, setTheme, subscribe, type Theme } from "../theme";
 import { FONT_MAX, FONT_MIN, getFontSize, setFontSize, subscribeFont } from "../term-font";
 import {
   checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage,
   openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus,
 } from "../updater";
 import { overlayClose, useDialogA11y } from "./primitives";
-import { IconClose, IconGear, IconInfo, IconPlug, IconWinMax, IconWinRestore } from "../icons";
+import { IconCheck, IconClose, IconGear, IconInfo, IconKeyboard, IconPlug, IconShirt, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories, filterSettings,
   type FilteredCategory, type SettingItemDef, type SettingsCategoryId,
 } from "./settings-registry";
+
+import "./settings-page.css";
+
+const CATEGORY_ICONS = { connection: <IconGear />, appearance: <IconShirt />, shortcuts: <IconKeyboard />, about: <IconInfo /> };
 
 export function SettingsPage({
   initialCategory,
@@ -220,10 +224,11 @@ export function SettingsPage({
               <button
                 key={c.id}
                 className="dlg-settings__toc-item"
+                aria-current={!queryActive && c.id === active ? "page" : undefined}
                 data-active={!queryActive && c.id === active ? "true" : undefined}
-                onClick={() => setActive(c.id)}
+                onClick={() => { setQuery(""); setActive(c.id); }}
               >
-                <span>{c.label}</span>
+                {CATEGORY_ICONS[c.id]}<span>{c.label}</span>
                 {queryActive && <span className="dlg-settings__toc-count">{hitCount(c)}</span>}
               </button>
             ))}
@@ -385,17 +390,20 @@ export function SettingsPage({
   function renderControl(item: SettingItemDef) {
     switch (item.control) {
       case "theme-select":
-        // setTheme 即写 localStorage + 派发订阅，本页状态经订阅同步，无需手动 setState
         return (
-          <select
-            className="field-select"
-            value={theme}
-            onChange={(e) => setTheme(e.target.value as Theme)}
-          >
-            {THEMES.map((d) => (
-              <option key={d.id} value={d.id}>{d.label}</option>
+          <div className="settings-theme-choices" role="group" aria-label="颜色主题">
+            {APPEARANCE_THEMES.map((choice) => (
+              <button
+                key={choice.id}
+                className="settings-theme-choice"
+                aria-pressed={theme === choice.id}
+                onClick={() => setTheme(choice.id)}
+              >
+                <span className={`settings-theme-preview settings-theme-preview--${choice.lum}`} aria-hidden="true"><i /><b /></span>
+                <span>{choice.label}{theme === choice.id && <IconCheck />}</span>
+              </button>
             ))}
-          </select>
+          </div>
         );
       case "font-size-input":
         return (

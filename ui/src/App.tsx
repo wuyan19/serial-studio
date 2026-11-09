@@ -1920,7 +1920,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     },
     "theme.toggle": toggleTheme,
     "port.refresh": refreshPorts,
-    "settings.open": () => setSettingsCategory("appearance"),
+    "settings.open": () => setSettingsCategory("connection"),
     "about.open": () => setSettingsCategory("about"),
     "remote.open": () => setRemoteOpen(true),
     "macro.palette": () => setMacroPaletteOpen(true),
@@ -2053,14 +2053,17 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onShare={() => setShareOpen(true)}
           width={sidebarWidth}
           tools={<WorkspaceSettingsMenu onOpen={setSettingsCategory} />}
+          view={sidebarPanel === "ports" ? {
+            label: listView === "default" ? "默认" : "分组",
+            items: [
+              { label: "默认", checked: listView === "default", onSelect: () => setListView("default") },
+              { label: "分组", checked: listView === "groups", onSelect: () => setListView("groups") },
+            ],
+          } : undefined}
+          onRefresh={sidebarPanel === "ports" ? () => { refreshPorts(); sharedGroups.reload(); } : undefined}
           /* 面板 ··· 菜单:按当前面板组装(原各面板 section-head 上的动作迁此) */
           moreItems={
-            sidebarPanel === "ports" ? [
-              { label: "刷新端口列表", onSelect: () => { refreshPorts(); sharedGroups.reload(); } },
-              { sep: true },
-              { label: "视图：默认", checked: listView === "default", onSelect: () => setListView("default") },
-              { label: "视图：分组", checked: listView === "groups", onSelect: () => setListView("groups") },
-            ] : sidebarPanel === "macros" ? [
+            sidebarPanel === "ports" ? undefined : sidebarPanel === "macros" ? [
               { label: "导入宏", onSelect: () => importInputRef.current?.click() },
               { label: "导出宏（可多选 / 全选）", disabled: Object.keys(macros).length === 0, onSelect: () => setExportMacrosOpen(true) },
             ] : [

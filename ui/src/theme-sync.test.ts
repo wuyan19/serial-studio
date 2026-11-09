@@ -41,16 +41,19 @@ describe("startup theme selection", () => {
     expect(initialTheme(null, false).attributes).toMatchObject({ "data-theme": "codex", "data-lum": "dark" });
   });
 
-  it("keeps all existing saved theme choices", () => {
+  it("migrates saved themes to the corresponding dark or light choice", () => {
     for (const { id, lum } of themes) {
-      expect(initialTheme(id, lum !== "light").attributes).toMatchObject({ "data-theme": id, "data-lum": lum });
+      const result = initialTheme(id, lum !== "light");
+      const expected = lum === "light" ? "codex-light" : "codex";
+      expect(result.attributes).toMatchObject({ "data-theme": expected, "data-lum": lum });
+      expect(result.values.get("serial-studio-theme")).toBe(expected);
     }
   });
 
   it("preserves the legacy theme migration", () => {
     const result = initialTheme("light", false);
-    expect(result.attributes["data-theme"]).toBe("linear-light");
-    expect(result.values.get("serial-studio-theme")).toBe("linear-light");
+    expect(result.attributes["data-theme"]).toBe("codex-light");
+    expect(result.values.get("serial-studio-theme")).toBe("codex-light");
   });
 
   it("provides a readable fallback without browser storage", () => {
@@ -65,7 +68,8 @@ function extractThemes(): { id: string; lum: string }[] {
   const out: { id: string; lum: string }[] = [];
   const re = /id: "([a-z0-9-]+)"[\s\S]*?lum: "(dark|light)"/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(themeTs))) out.push({ id: m[1], lum: m[2] });
+  const registry = themeTs.split("export const THEMES = [")[1].split("] as const satisfies readonly ThemeDef[];")[0];
+  while ((m = re.exec(registry))) out.push({ id: m[1], lum: m[2] });
   return out;
 }
 
