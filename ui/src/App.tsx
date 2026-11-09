@@ -1359,10 +1359,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const onDragOverHalf = (groupId: string, half: PaneHalf) => setDropHint({ overGroupId: groupId, overHalf: half });
   const onPaneDragLeave = () => setDropHint(null);
 
-  /** 拖 tab 到另一 group 的标签栏：迁移 port 归属（源移除、目标追加 + 设其 activePort）。
-   *  源 group 空 → 坍缩。TermView 经 portal 不 remount → scrollback 保留。逻辑全在 reducer。 */
-  const movePort = (port: string, srcGroupId: string, dstGroupId: string) =>
-    dispatch({ type: "move_port", port, srcGroupId, dstGroupId });
+  /** Reorder within a pane or insert across panes without remounting terminal instances. */
+  const movePort = (port: string, srcGroupId: string, dstGroupId: string, index?: number) =>
+    dispatch({ type: "move_port", port, srcGroupId, dstGroupId, index });
 
   /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例 + 拖动手柄)，leaf→GroupView(标签栏+终端区)。
    *  path = 从根到此节点的子索引序列,供 set_split_ratio 定位(根 split 为 [])。 */
@@ -2083,6 +2082,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
           {sidebarPanel === "ports" && (
             <PortsPanel
+              orderScope={isLocal ? "local" : `${connConfig.host}:${connConfig.port}`}
               grouping={sharedGroups.grouping}
               groupsReady={sharedGroups.ready}
               groupsError={sharedGroups.error}

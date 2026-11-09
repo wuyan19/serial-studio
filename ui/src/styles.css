@@ -1143,6 +1143,20 @@ button {
   line-height: 1.4;
 }
 .connection-tree__children > .sidebar__empty { margin: 0; padding: 6px; }
+.connection-tree [data-sort-id] { position: relative; }
+.connection-tree [data-sort-id][data-drop-position]::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+.connection-tree [data-drop-position="before"]::after { top: 0; }
+.connection-tree [data-drop-position="after"]::after { bottom: 0; }
 
 /* macro rows —— 编辑/删除按钮绝对定位到宏按钮右侧内嵌 */
 .macro-row {
@@ -1446,6 +1460,8 @@ button {
   background: var(--term-bg);
   border-bottom-color: var(--accent);
 }
+.tab[data-drop-before="true"] { box-shadow: inset 2px 0 0 var(--accent); }
+.tab[data-drop-after="true"] { box-shadow: inset -2px 0 0 var(--accent); }
 .tab__dot {
   width: 6px;
   height: 6px;
@@ -1794,11 +1810,62 @@ button {
 .group__tab-row[data-empty="true"] {
   border-bottom-color: transparent;
 }
-.group__tab-row > .group__tabs {
+.tab-strip {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+.tab-strip__window {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+.tab-strip__window > .group__tabs {
   flex: 1;
   min-width: 0;
   border-bottom: 0;
 }
+.tab-strip__window::before,
+.tab-strip__window::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+}
+.tab-strip__window::before { left: 0; background: linear-gradient(to right, var(--workspace-tab-bg), transparent); }
+.tab-strip__window::after { right: 0; background: linear-gradient(to left, var(--workspace-tab-bg), transparent); }
+.tab-strip__window[data-before="true"]::before,
+.tab-strip__window[data-after="true"]::after { opacity: 1; }
+.tab-strip__controls {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 0 4px;
+  border-left: 1px solid var(--hairline-soft);
+}
+.tab-strip__arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-xl);
+  cursor: pointer;
+}
+.tab-strip__arrow:hover:not(:disabled) { background: var(--surface-3); }
+.tab-strip__arrow:disabled { color: var(--ink-faint); opacity: .35; cursor: default; }
 .group__body {
   display: flex;
   flex: 1;

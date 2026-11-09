@@ -145,6 +145,35 @@ describe("dev_online", () => {
 });
 
 describe("drop_half / move_port", () => {
+  it("reorders tabs in either direction using insertion gaps without changing the active port", () => {
+    const s = withPorts("COM1", "COM2", "COM3");
+    const moved = sessionReducer(s, { type: "move_port", port: "COM1", srcGroupId: "g1", dstGroupId: "g1", index: 3 });
+    expect(moved.groups.g1.ports).toEqual(["COM2", "COM3", "COM1"]);
+    expect(moved.groups.g1.activePort).toBe("COM3");
+    expect(moved.layout).toBe(s.layout);
+    expect(moved.openPorts).toBe(s.openPorts);
+    const restored = sessionReducer(moved, { type: "move_port", port: "COM1", srcGroupId: "g1", dstGroupId: "g1", index: 0 });
+    expect(restored.groups.g1.ports).toEqual(["COM1", "COM2", "COM3"]);
+  });
+
+  it("ignores adjacent gaps, missing tabs and malformed insertion indices", () => {
+    const s = withPorts("COM1", "COM2", "COM3");
+    for (const index of [1, 2, NaN, Infinity]) {
+      expect(sessionReducer(s, { type: "move_port", port: "COM2", srcGroupId: "g1", dstGroupId: "g1", index })).toBe(s);
+    }
+    expect(sessionReducer(s, { type: "move_port", port: "missing", srcGroupId: "g1", dstGroupId: "g1", index: 0 })).toBe(s);
+  });
+
+  it("inserts a tab at a specific position across panes and collapses an emptied source", () => {
+    let s = withPorts("COM1", "COM2", "COM3");
+    s = sessionReducer(s, { type: "drop_half", port: "COM3", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "move_port", port: "COM3", srcGroupId: "g2", dstGroupId: "g1", index: 1 });
+    expect(s.groups.g1.ports).toEqual(["COM1", "COM3", "COM2"]);
+    expect(s.groups.g1.activePort).toBe("COM3");
+    expect(s.groups.g2).toBeUndefined();
+    expect(leafGroupIds(s.layout)).toEqual(["g1"]);
+  });
+
   it("拖到另一 group 半区：新建 group + 分裂 + 焦点转移", () => {
     let s = withPorts("COM3", "COM4");
     s = sessionReducer(s, { type: "drop_half", port: "COM4", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
