@@ -1,16 +1,17 @@
-import { useId, useRef, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import {
   IconBolt, IconCode, IconGear, IconGlobe,
-  IconPlug, IconPlus, IconShare, IconSsh,
+  IconMore, IconPlug, IconPlus, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
+import { ContextMenu, type ContextMenuItem } from "./context-menu";
 import { useDialogA11y, useEscClose } from "./primitives";
 
 export type WorkspacePanel = "ports" | "macros" | "scripts";
 
 export function WorkspaceSidebar({
   panel, onPanel, showScripts, counts, running, failed, query,
-  onQuery, onNew, onRemote, onShare, width, collapsed, tools, children,
+  onQuery, onNew, onRemote, onShare, width, collapsed, tools, moreItems, children,
 }: {
   panel: WorkspacePanel;
   onPanel: (panel: WorkspacePanel) => void;
@@ -26,10 +27,15 @@ export function WorkspaceSidebar({
   width: number;
   collapsed: boolean;
   tools: ReactNode;
+  /** 面板标题栏 ··· 菜单项(App 按当前面板组好:连接=刷新/视图切换,宏/脚本=导入导出/指南)。 */
+  moreItems?: ContextMenuItem[];
   children: ReactNode;
 }) {
   const panelId = useId();
   const label = panel === "ports" ? "连接" : panel === "macros" ? "宏" : "脚本";
+  const moreButton = useRef<HTMLButtonElement>(null);
+  /** ··· 菜单锚点(按钮下方);null=关。 */
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
   const entries = [
     { id: "ports" as const, label: "连接", icon: <IconPlug /> },
     { id: "macros" as const, label: "宏", icon: <IconBolt /> },
@@ -72,14 +78,45 @@ export function WorkspaceSidebar({
         </div>
       </div>
       <div id={panelId} className="sidebar__panel" hidden={collapsed}>
-        <button className="workspace-new" onClick={onNew}><IconPlus /><span>新建{label}</span></button>
-        <label className="workspace-search">
-          <span aria-hidden="true">⌕</span>
-          <input
-            type="search" value={query} onChange={(event) => onQuery(event.target.value)}
-            placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false}
-          />
-        </label>
+        {/* 面板标题栏:面板名居左,··· 更多操作居右(VS Code Explorer 同款) */}
+        <div className="panel-head">
+          <span className="panel-head__title">{label}</span>
+          {moreItems && moreItems.length > 0 && (
+            <button
+              ref={moreButton}
+              className="icon-btn panel-head__more"
+              aria-label="更多操作" aria-haspopup="menu" aria-expanded={moreMenu !== null}
+              onClick={() => {
+                const rect = moreButton.current?.getBoundingClientRect();
+                if (rect) setMoreMenu(moreMenu ? null : { x: Math.max(8, rect.right - 170), y: rect.bottom + 6 });
+              }}
+            >
+              <IconMore />
+            </button>
+          )}
+          {moreMenu && moreItems && (
+            <ContextMenu
+              x={moreMenu.x} y={moreMenu.y} items={moreItems}
+              onClose={(reason) => {
+                setMoreMenu(null);
+                if (reason === "item" || reason === "escape") moreButton.current?.focus();
+              }}
+            />
+          )}
+        </div>
+        {/* 搜索行:搜索框占满 + 右侧 ＋ 新建(原通栏「新建×」大按钮收进图标) */}
+        <div className="panel-search-row">
+          <label className="workspace-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              type="search" value={query} onChange={(event) => onQuery(event.target.value)}
+              placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false}
+            />
+          </label>
+          <button className="panel-search-row__add" onClick={onNew} title={`新建${label}`} aria-label={`新建${label}`}>
+            <IconPlus />
+          </button>
+        </div>
         <div className="sidebar__content">{children}</div>
       </div>
     </aside>

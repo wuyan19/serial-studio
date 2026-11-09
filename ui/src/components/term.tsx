@@ -10,7 +10,7 @@ import { installSelectionCopy } from "../term-selection";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
-import { IconChevronDown, IconChevronUp, IconClose, IconPlug } from "../icons";
+import { IconChevronDown, IconChevronUp, IconClose, IconHub, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
 
@@ -635,7 +635,7 @@ export function GroupView({
               跨 group 搬 tab 不重建、保 scrollback。拖拽用原生事件（见 useLayoutEffect）。 */}
           {group.ports.length === 0 && (
             <div className="term-empty">
-              <IconPlug className="term-empty__icon" />
+              <IconHub className="term-empty__icon" />
               <div>从左侧连接列表或“新建连接”打开串口或 SSH 终端</div>
               {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
                   现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。

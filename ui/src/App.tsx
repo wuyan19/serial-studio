@@ -96,7 +96,10 @@ import {
   validateMacro,
   type SettingsCategoryId,
 } from "./components";
-import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
+import {
+  PORT_LIST_VIEW_KEY, loadPortListView, MacroRow, NamedLibraryPanel, PortsPanel,
+  ScriptRow, type PortGroupView, type PortListView,
+} from "./components/sidebar";
 import { SshFileWorkspace } from "./components/ssh-file-workspace";
 import { TitleBar } from "./components/titlebar";
 import { ContextMenu, type ContextMenuItem } from "./components/context-menu";
@@ -336,6 +339,12 @@ export default function App() {
     const saved = Number(localStorage.getItem("sidebar-width"));
     return saved >= 180 && saved <= 480 ? saved : 280;
   });
+  /** 连接列表视图(default/groups)。原属 PortsPanel 内部态,上提以驱动面板 ··· 菜单切换。 */
+  const [listView, setListView] = useState<PortListView>(loadPortListView);
+  useEffect(() => {
+    try { localStorage.setItem(PORT_LIST_VIEW_KEY, listView); }
+    catch { /* 持久化失败不影响切换 */ }
+  }, [listView]);
   /** 分隔条(Splitter)行为参数(VS Code 手势模型,手感不对调这里):
    *  MIN_W/MAX_W 是「面板」宽度上下限(侧栏总宽 = 面板 + 图标栏 RAIL_W);
    *  COLLAPSE_X:展开态鼠标(相对卡片左缘)左推越过此线收起;
@@ -2044,6 +2053,23 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onShare={() => setShareOpen(true)}
           width={sidebarWidth}
           tools={<WorkspaceSettingsMenu onOpen={setSettingsCategory} />}
+          /* 面板 ··· 菜单:按当前面板组装(原各面板 section-head 上的动作迁此) */
+          moreItems={
+            sidebarPanel === "ports" ? [
+              { label: "刷新端口列表", onSelect: () => { refreshPorts(); sharedGroups.reload(); } },
+              { sep: true },
+              { label: "视图：默认", checked: listView === "default", onSelect: () => setListView("default") },
+              { label: "视图：分组", checked: listView === "groups", onSelect: () => setListView("groups") },
+            ] : sidebarPanel === "macros" ? [
+              { label: "导入宏", onSelect: () => importInputRef.current?.click() },
+              { label: "导出宏（可多选 / 全选）", disabled: Object.keys(macros).length === 0, onSelect: () => setExportMacrosOpen(true) },
+            ] : [
+              { label: "脚本编写指南", onSelect: () => { setSkillOpen(true); if (skillText === null) fetchSkill(); } },
+              { sep: true },
+              { label: "导入脚本", onSelect: () => scriptImportInputRef.current?.click() },
+              { label: "导出脚本（可多选 / 全选）", disabled: Object.keys(scripts).length === 0, onSelect: () => setExportScriptsOpen(true) },
+            ]
+          }
         >
           {(!isTauri() || isRemote) && (
             <div className="sidebar__conn">
@@ -2102,13 +2128,13 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               }}
               onShowPortDetail={(pid) => setPortDetail(pid)}
               onRefresh={() => { refreshPorts(); sharedGroups.reload(); }}
+              listView={listView}
             />
           )}
 
           {sidebarPanel === "macros" && (
             <NamedLibraryPanel
               query={sidebarQuery}
-              title={<>宏{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={macros}
               hasItems={Object.keys(macros).length > 0}
               collapsed={macroCollapsed}
@@ -2117,9 +2143,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDissolveGroup={askDissolveMacroGroup}
               importRef={importInputRef}
               onImportFile={onImportFile}
-              onExport={() => setExportMacrosOpen(true)}
-              exportTitle="导出宏（可多选 / 全选）"
-              newItemLabel="宏"
               emptyHint="暂无宏，点击上方“新建宏”添加"
               storageHint={!isLocal ? "宏库与所连服务共用，修改会同步到桌面及其他页面。" : undefined}
               renderRow={(name) => (
@@ -2152,7 +2175,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           {sidebarPanel === "scripts" && (
             <NamedLibraryPanel
               query={sidebarQuery}
-              title={<>脚本{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
               items={scripts}
               hasItems={Object.keys(scripts).length > 0}
               collapsed={scriptCollapsed}
@@ -2161,24 +2183,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDissolveGroup={askDissolveScriptGroup}
               importRef={scriptImportInputRef}
               onImportFile={onImportScripts}
-              onExport={() => setExportScriptsOpen(true)}
-              exportTitle="导出脚本（可多选 / 全选）"
-              newItemLabel="脚本"
               emptyHint="暂无脚本，点击上方“新建脚本”添加"
               storageHint={!isLocal ? scriptEnabled ? "脚本库与所连服务共用，修改会同步到桌面及其他页面。" : "脚本库与所连服务共用；当前可查看和编辑，服务未开启远程脚本执行。" : undefined}
-              extraActions={
-                <button
-                  className="icon-btn"
-                  title="脚本编写指南（查看 / 复制给外部 Agent）"
-                  aria-label="脚本编写指南"
-                  onClick={() => {
-                    setSkillOpen(true);
-                    if (skillText === null) fetchSkill();
-                  }}
-                >
-                  <IconInfo />
-                </button>
-              }
               renderRow={(name) => (
                 <ScriptRow
                   key={name}
@@ -2361,27 +2367,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             );
           })}
         </div>
-
-        {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名）。置底 */}
-        {activePort && activeConfig && (
-          <div className="channel-strip">
-            <span className="channel-strip__port">
-              {activePortLabel}
-            </span>
-            <span className="channel-strip__sep">·</span>
-            <span className="channel-strip__config">
-              {channelConfigText ?? formatConfig(activeConfig)}
-            </span>
-            {activeHolders > 0 && (
-              <>
-                <span className="channel-strip__sep">·</span>
-                <span className="channel-strip__holders">● {activeHolders} 人</span>
-              </>
-            )}
-            <span className="channel-strip__spacer" />
-            <Leds port={activePort} activityRef={activityRef} />
-          </div>
-        )}
       </main>
 
       {tabMenu && <ContextMenu
@@ -2815,6 +2800,25 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           <span className="statusbar__msg" role="status" title={notice}>
             <IconInfo /> {notice}
           </span>
+        )}
+        {/* 通道条(原主区底部迁此,置右):活动端口的仪器状态 + TX/RX LED */}
+        {activePort && activeConfig && (
+          <div className="channel-strip">
+            <span className="channel-strip__port">
+              {activePortLabel}
+            </span>
+            <span className="channel-strip__sep">·</span>
+            <span className="channel-strip__config">
+              {channelConfigText ?? formatConfig(activeConfig)}
+            </span>
+            {activeHolders > 0 && (
+              <>
+                <span className="channel-strip__sep">·</span>
+                <span className="channel-strip__holders">● {activeHolders} 人</span>
+              </>
+            )}
+            <Leds port={activePort} activityRef={activityRef} />
+          </div>
         )}
       </footer>
     </div>

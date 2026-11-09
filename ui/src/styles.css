@@ -229,6 +229,32 @@ button {
   padding: 2px 10px;
   opacity: 1;
 }
+/* 通道条迁入底部状态栏(置右):去自带的底色/描边/高度,配色随主题色底(on-accent 系),
+   原 __spacer 移除——整条 margin-left:auto 靠右,LED 紧随文字 */
+.statusbar .channel-strip {
+  height: auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  gap: 8px;
+  margin-left: auto;
+  background: transparent;
+  border-top: 0;
+  color: color-mix(in srgb, var(--on-accent) 85%, transparent);
+}
+.statusbar .channel-strip__port {
+  color: var(--on-accent);
+}
+.statusbar .channel-strip__sep {
+  color: color-mix(in srgb, var(--on-accent) 50%, transparent);
+}
+.statusbar .channel-strip__config,
+.statusbar .channel-strip__holders {
+  color: color-mix(in srgb, var(--on-accent) 85%, transparent);
+}
+.statusbar .txrx__group {
+  background: color-mix(in srgb, var(--on-accent) 14%, transparent);
+}
 
 /* 卡片公共层次:无阴影,靠画布底色(--bg)与卡片底色(--surface)的色差 + 实描边
    突出卡片轮廓,深浅主题都成立。 */
@@ -416,7 +442,6 @@ button {
   padding-top: 12px;
 }
 .workspace-nav__item,
-.workspace-new,
 .workspace-footer-action {
   display: flex;
   align-items: center;
@@ -434,7 +459,6 @@ button {
 }
 .workspace-footer-action:hover { background: var(--surface-2); color: var(--ink); }
 .workspace-nav__item svg,
-.workspace-new svg,
 .workspace-footer-action svg { width: 18px; height: 18px; flex-shrink: 0; }
 .workspace-nav__item,
 .sidebar__rail-footer .workspace-footer-action {
@@ -465,21 +489,92 @@ button {
   font-size: 0;
 }
 .workspace-nav__badge.failed { background: var(--danger); }
-.workspace-new {
-  width: calc(100% - 28px);
-  margin: 14px 14px 4px;
-  border: 1px solid var(--hairline);
+/* 面板标题栏:面板名居左,··· 更多操作居右(VS Code Explorer 同款);下缘细分隔线 */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--hairline-soft);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.panel-head__title {
   color: var(--ink);
-  background: var(--term-bg);
-  font-weight: 500;
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+.panel-head__more {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.panel-head__more:hover { background: var(--surface-2); color: var(--ink); }
+.panel-head__more[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
+.panel-head__more svg { width: 16px; height: 16px; }
+/* 搜索行:搜索框占满 + 右侧 ＋ 新建(原通栏「新建×」大按钮收进图标) */
+.panel-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 12px 6px;
   flex-shrink: 0;
 }
-.workspace-new:hover { background: var(--surface-2); }
+.panel-search-row .workspace-search {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 10px;
+  background: var(--term-bg);
+  border-radius: var(--r-input);
+  border: 1px solid var(--hairline);
+}
+.panel-search-row .workspace-search > span { font-size: 14px; }
+.panel-search-row__add {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-btn);
+  background: var(--term-bg);
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.panel-search-row__add:hover { background: var(--surface-2); color: var(--ink); }
+.panel-search-row__add svg { width: 16px; height: 16px; }
+/* 分组视图的「+ 新建分组」内联行(原 section-head 按钮迁此) */
+.group-create-row {
+  display: flex;
+  align-items: center;
+  width: calc(100% - 8px);
+  margin: 2px 4px 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.group-create-row:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-faint); }
+.group-create-row:disabled { opacity: 0.5; cursor: default; }
 .workspace-search {
   display: flex;
   align-items: center;
   gap: 9px;
-  margin: 4px 14px 12px;
   padding: 8px 10px;
   color: var(--ink-dim);
   border-radius: 7px;
@@ -516,28 +611,7 @@ button {
 .port-group-create .field { flex: 1; min-width: 0; }
 .port-group-create .mini-btn { flex-shrink: 0; }
 .sidebar__group-error { color: var(--danger); font-size: var(--fs-sm); margin: 4px 0 12px; }
-.port-list-view-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 4px;
-  padding: 2px 4px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--ink-dim);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  line-height: 1.2;
-  vertical-align: middle;
-  white-space: nowrap;
-}
-.port-list-view-button[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
-.section-head.port-list-head { flex-wrap: wrap; gap: 4px; }
-.port-list-head .section-head__title { flex: 1 0 auto; }
-.port-list-head .section-head__actions { margin-left: auto; }
-.icon-btn.port-group-create-button { width: auto; padding: 0 3px; flex-shrink: 0; color: var(--ink-dim); font-size: var(--fs-base); white-space: nowrap; }
-.icon-btn.port-group-create-button:disabled { opacity: 0.3; cursor: not-allowed; }
-.ctx-menu__check { display: inline-flex; width: 18px; height: 18px; margin-left: auto; color: var(--ink); }
+.icon-btn.icon-btn.ctx-menu__check { display: inline-flex; width: 18px; height: 18px; margin-left: auto; color: var(--ink); }
 .ctx-menu__check svg { width: 18px; height: 18px; }
 .ctx-menu__item[role="menuitemradio"] { padding: 9px 10px; font-size: var(--fs-base); }
 .ctx-menu__item[role="menuitemradio"]:focus-visible { outline: 1px solid var(--ink-dim); outline-offset: -1px; background: var(--surface-2); }
@@ -573,27 +647,37 @@ button {
     radial-gradient(circle, var(--accent) 1px, transparent 1.4px);
 }
 /* 侧栏分组(宏/脚本按 group 折叠;组头整行可点) */
-.macro-group {
-  margin-bottom: 16px;
+/* 分组扁平化(VS Code Explorer 风格):组头=箭头+纯文字,无卡底/描边;组间细分隔线 */
+.macro-group,
+.port-custom-group {
+  margin-bottom: 0;
+  padding: 4px 0 10px;
+}
+.macro-group:not(:last-child),
+.port-custom-group:not(:last-child) {
+  border-bottom: 1px solid var(--hairline-soft);
+  margin-bottom: 8px;
 }
 .macro-group__head {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 8px 6px;
+  padding: 4px 4px;
   background: transparent;
   border: none;
-  color: var(--ink);
-  font-size: var(--fs-base);
-  font-weight: 600;
-  letter-spacing: normal;
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
   cursor: pointer;
   border-radius: var(--r-sm);
   position: relative; /* 锚定 .group-menu 浮层 */
 }
 .macro-group__head:hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--ink);
 }
 /* 折叠三角:单字形 + 旋转(▼/▶ 两字形平台字体大小不一,收起态偏大);
    inline-block 是 transform 生效的前提。字号 7px ≈ 旧 ▼@9px 的视觉大小
@@ -612,8 +696,9 @@ button {
   text-align: left;
 }
 .macro-group__count {
-  font-size: var(--fs-sm);
-  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
   font-weight: 400;
 }
 /* 组操作浮层（右键组头弹出,绝对定位锚定鼠标位置） */
@@ -721,36 +806,6 @@ button {
   background: var(--danger);
 }
 
-.section-head {
-  min-height: 32px;
-  gap: 8px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-}
-.section-head__actions {
-  display: flex;
-  gap: 4px;
-}
-.section-head__title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-family: var(--font-ui);
-  font-size: var(--fs-base);
-  font-weight: 400;
-  letter-spacing: normal;
-  text-transform: none;
-  color: var(--ink-dim);
-}
-.section-head__title .accent {
-  color: var(--ink-dim);
-  margin-left: 6px;
-  letter-spacing: 0.04em;
-  text-transform: none;
-}
 
 /* 图标按钮 · 「薰衣草反应」:无框,悬停染交互色——"可点=薰衣草"语言延伸到每个图标按钮。
    全程只引用 --accent,换主题(Claude 等)自动跟随。方案对比见 design-preview-icon-btn.html */
@@ -1535,9 +1590,6 @@ button {
 .channel-strip__holders {
   color: var(--link);
 }
-.channel-strip__spacer {
-  flex: 1;
-}
 .txrx {
   display: flex;
   flex-shrink: 0;
@@ -1771,9 +1823,9 @@ button {
   padding: 24px;
 }
 .term-empty__icon {
-  width: 40px;
-  height: 40px;
-  color: var(--surface-3);
+  width: 72px;
+  height: 72px;
+  color: var(--ink-faint);
 }
 .term-empty kbd {
   font-family: var(--font-mono);

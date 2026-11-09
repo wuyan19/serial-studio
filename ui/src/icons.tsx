@@ -334,3 +334,41 @@ export function IconExport({ className }: IconProps) {
     </Svg>
   );
 }
+
+/** 中心+四向节点(拓扑/枢纽):主区未打开端口时的空态图标。
+ *  用户手绘原稿 0 0 100 视图,笔宽 2(等比到 24 视图 ≈0.5,故独立 svg 不走 24 视图的 Svg 包装,
+ *  保持原比例的轻线条观感)。 */
+export function IconHub({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 100 100"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="50" cy="50" r="15" />
+      <circle cx="50" cy="16" r="8" />
+      <circle cx="50" cy="84" r="8" />
+      <circle cx="16" cy="50" r="8" />
+      <circle cx="84" cy="50" r="8" />
+      <line x1="50" y1="24" x2="50" y2="35" />
+      <line x1="50" y1="65" x2="50" y2="76" />
+      <line x1="24" y1="50" x2="35" y2="50" />
+      <line x1="65" y1="50" x2="76" y2="50" />
+    </svg>
+  );
+}
+
+/** 横向三点(面板标题栏「更多操作」)。实心小圆点,与单线条图标组混用时按点群处理。 */
+export function IconMore({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="19" cy="12" r="1.6" />
+    </svg>
+  );
+}

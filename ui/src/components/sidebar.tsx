@@ -11,18 +11,17 @@ import {
   IconEdit,
   IconExport,
   IconImport,
-  IconListFilter,
   IconPower,
-  IconRefresh,
   IconTrash,
 } from "../icons";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
 
-const PORT_LIST_VIEW_KEY = "serial-studio-port-list-view";
-type PortListView = "default" | "groups";
+/** 列表视图状态上提到 App(面板 ··· 菜单切换),持久化键与加载器由此导出。 */
+export const PORT_LIST_VIEW_KEY = "serial-studio-port-list-view";
+export type PortListView = "default" | "groups";
 
-function loadPortListView(): PortListView {
+export function loadPortListView(): PortListView {
   try { return localStorage.getItem(PORT_LIST_VIEW_KEY) === "groups" ? "groups" : "default"; }
   catch { return "default"; }
 }
@@ -78,6 +77,7 @@ export function PortsPanel({
   onCopyPortKey,
   onShowPortDetail,
   onRefresh,
+  listView,
   query = "",
   visible = true,
   grouping,
@@ -124,25 +124,13 @@ export function PortsPanel({
   /** 右键「端口详情」:打开该端点的只读详情弹窗(端口键/属主设备/状态等)。 */
   onShowPortDetail: (pid: PortId) => void;
   onRefresh: () => void;
+  /** 列表视图(default/groups)已上提到 App(··· 菜单切换),此处只消费。 */
+  listView: PortListView;
 }) {
-  const [listView, setListView] = useState<PortListView>(loadPortListView);
-  const [viewMenu, setViewMenu] = useState<{ x: number; y: number } | null>(null);
-  const viewButton = useRef<HTMLButtonElement>(null);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [groupSaving, setGroupSaving] = useState(false);
-  const changeListView = (view: PortListView) => {
-    setListView(view);
-    if (view === "default") {
-      setCreatingGroup(false);
-      setGroupError("");
-    }
-  };
-  useEffect(() => {
-    try { localStorage.setItem(PORT_LIST_VIEW_KEY, listView); }
-    catch { /* View switching still works without persistent storage. */ }
-  }, [listView]);
   const search = query.trim().toLocaleLowerCase();
   const buckets = (listView === "default" ? [null] : grouping.names).map((name) => ({
     name,
@@ -171,7 +159,6 @@ export function PortsPanel({
   )) | null>(null);
   useEffect(() => {
     if (!visible) {
-      setViewMenu(null);
       setKeyMenu(null);
     }
   }, [visible]);
@@ -332,26 +319,12 @@ export function PortsPanel({
   };
 
   return <>
-    <div className="section-head port-list-head">
-      <h4 className="section-head__title">连接列表 <span className="port-list-view-badge">{listView === "default" ? "默认" : "分组"}</span></h4>
-      <div className="section-head__actions">
-        {listView === "groups" && <button className="icon-btn port-group-create-button" disabled={!groupsReady} onClick={() => setCreatingGroup(true)}>新建分组</button>}
-        <button className="icon-btn" onClick={onRefresh} title="刷新" aria-label="刷新端口列表"><IconRefresh /></button>
-        <button ref={viewButton} className="icon-btn port-list-view-button" title="切换列表视图" aria-label="切换列表视图" aria-haspopup="menu" aria-expanded={viewMenu !== null}
-          onClick={() => {
-            const rect = viewButton.current?.getBoundingClientRect();
-            if (rect) setViewMenu(viewMenu ? null : { x: Math.max(8, rect.right - 168), y: rect.bottom + 6 });
-          }}
-        ><IconListFilter /></button>
-      </div>
-    </div>
-    {viewMenu && <ContextMenu x={viewMenu.x} y={viewMenu.y}
-      items={[
-        { label: "默认", checked: listView === "default", onSelect: () => changeListView("default") },
-        { label: "分组", checked: listView === "groups", onSelect: () => changeListView("groups") },
-      ]}
-      onClose={(reason) => { setViewMenu(null); if (reason === "item" || reason === "escape") viewButton.current?.focus(); }}
-    />}
+    {/* 分组视图的「+ 新建分组」内联行(原 section-head 上的按钮迁此;标题/刷新/切视图收进面板 ··· 菜单) */}
+    {listView === "groups" && !creatingGroup && (
+      <button className="group-create-row" disabled={!groupsReady} onClick={() => setCreatingGroup(true)}>
+        + 新建分组
+      </button>
+    )}
     {listView === "groups" && creatingGroup && <form className="port-group-create" onSubmit={(event) => { event.preventDefault(); void createGroup(); }}>
       <input className="field" aria-label="新分组名称" placeholder="分组名称" autoFocus maxLength={64} value={groupName} onChange={(event) => setGroupName(event.target.value)} />
       <button className="mini-btn" type="submit" disabled={!groupsReady || groupSaving}>{groupSaving ? "保存中…" : "创建"}</button>
@@ -388,9 +361,10 @@ export function PortsPanel({
   </>;
 }
 
-/** Shared library content; creation lives in the workspace sidebar. */
+/** Shared library content; creation lives in the workspace sidebar.
+ *  段标题/导入/导出等面板级动作已上收至面板标题栏的 ··· 菜单(App 组装),
+ *  此处只留隐藏的导入 file input(菜单触发 importRef.click())与列表本体。 */
 export function NamedLibraryPanel<T extends { group?: string }>({
-  title,
   items,
   hasItems,
   collapsed,
@@ -399,18 +373,12 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   onDissolveGroup,
   importRef,
   onImportFile,
-  onExport,
-  exportTitle,
-  newItemLabel,
   emptyHint,
   renderRow,
   children,
-  extraActions,
   storageHint,
   query = "",
 }: {
-  /** 段标题（MACROS / SCRIPTS，含 → activePort 后缀由调用方拼好）。 */
-  title: React.ReactNode;
   query?: string;
   items: Record<string, T>;
   hasItems: boolean;
@@ -420,46 +388,24 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   onDissolveGroup: (name: string) => void;
   importRef: RefObject<HTMLInputElement>;
   onImportFile: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onExport: () => void;
-  exportTitle: string;
-  newItemLabel: string;
   emptyHint: string;
   /** 分组内单行（运行/编辑/删除按钮组）。 */
   renderRow: (name: string) => React.ReactNode;
   /** 运行卡片等尾随内容。 */
   children?: React.ReactNode;
-  /** Additional actions such as the script guide. */
-  extraActions?: React.ReactNode;
   /** 存储位置说明（Web 模式:localStorage,与桌面端落盘不同——防止误以为存服务器）。 */
   storageHint?: string;
 }) {
   const filteredItems = Object.entries(items).filter(([name, item]) => `${name} ${item.group ?? ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   return (
     <>
-      <div className="section-head">
-        <h4 className="section-head__title">{title}</h4>
-        <div className="section-head__actions">
-          <button className="icon-btn" onClick={() => importRef.current?.click()} title={`导入${newItemLabel}`}>
-            <IconImport />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={onExport}
-            disabled={!hasItems}
-            title={exportTitle}
-          >
-            <IconExport />
-          </button>
-          {extraActions}
-        </div>
-        <input
-          ref={importRef}
-          type="file"
-          accept=".json,application/json"
-          style={{ display: "none" }}
-          onChange={onImportFile}
-        />
-      </div>
+      <input
+        ref={importRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: "none" }}
+        onChange={onImportFile}
+      />
       {storageHint && <p className="sidebar__storage-hint">{storageHint}</p>}
       {!hasItems && <p className="sidebar__empty">{emptyHint}</p>}
       {hasItems && !filteredItems.length && <p className="sidebar__empty">没有匹配的条目</p>}
