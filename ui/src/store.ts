@@ -70,8 +70,8 @@ export type SessionAction =
   | { type: "switch_tab"; groupId: string; port: PortId }
   /** 拖 tab 到某 group 终端区半区：新建 group 并分裂。 */
   | { type: "drop_half"; port: PortId; srcGroupId: string; dstGroupId: string; half: PaneHalf }
-  /** 拖 tab 到另一 group 的标签栏：迁移归属。 */
-  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string }
+  /** Move a tab into an insertion gap; an omitted index keeps cross-pane append behavior. */
+  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string; index?: number }
   /** 拖分栏手柄改比例。path = 从根到目标 split 节点的子索引序列（根 split 为 []）。 */
   | { type: "set_split_ratio"; path: number[]; ratio: number };
 
@@ -81,17 +81,30 @@ function groupOf(groups: Record<string, Group>, pid: PortId): string | undefined
   return undefined;
 }
 
-/** move_port 的共享实现（drop_half 落空 group 时也复用）。 */
-function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId: string): SessionState {
-  if (srcGroupId === dstGroupId) return s;
+/** Preserve terminal ownership while reordering tabs or moving between panes. */
+function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId: string, index?: number): SessionState {
   const src = s.groups[srcGroupId];
   const dst = s.groups[dstGroupId];
-  if (!src || !dst || !src.ports.includes(port) || dst.ports.includes(port)) return s;
+  if (!src || !dst || !src.ports.includes(port)) return s;
+  if (index !== undefined && !Number.isFinite(index)) return s;
+  const slot = index === undefined ? dst.ports.length : Math.max(0, Math.min(dst.ports.length, Math.trunc(index)));
+  if (srcGroupId === dstGroupId) {
+    if (index === undefined) return s;
+    const from = src.ports.indexOf(port);
+    const to = slot > from ? slot - 1 : slot;
+    if (from === to) return s;
+    const ports = src.ports.filter(p => p !== port);
+    ports.splice(to, 0, port);
+    return { ...s, groups: { ...s.groups, [srcGroupId]: { ...src, ports } } };
+  }
+  if (dst.ports.includes(port)) return s;
+  const dstPorts = [...dst.ports];
+  dstPorts.splice(slot, 0, port);
   const sp = src.ports.filter((p) => p !== port);
   const srcEmpty = sp.length === 0; // 只有这一个 → 迁出后空
   const groups: Record<string, Group> = {
     ...s.groups,
-    [dstGroupId]: { ...dst, ports: [...dst.ports, port], activePort: port },
+    [dstGroupId]: { ...dst, ports: dstPorts, activePort: port },
   };
   if (srcEmpty) delete groups[srcGroupId];
   else groups[srcGroupId] = { ...src, ports: sp, activePort: src.activePort === port ? sp[sp.length - 1] : src.activePort };
@@ -278,7 +291,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
     }
 
     case "move_port":
-      return movePort(s, a.port, a.srcGroupId, a.dstGroupId);
+      return movePort(s, a.port, a.srcGroupId, a.dstGroupId, a.index);
     default: {
       // 联合已穷尽；default 仅满足返回类型检查
       const _exhaustive: never = a;

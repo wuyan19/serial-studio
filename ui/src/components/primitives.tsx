@@ -262,6 +262,7 @@ export function GroupHead({
   renamePlaceholder = "分组名",
   title,
   badge,
+  dragProps,
 }: {
   name: string;
   count: number;
@@ -286,6 +287,7 @@ export function GroupHead({
   title?: string;
   /** 组名尾随徽标（SSH 设备卡的 "SSH" 标记——与远程 ss 设备卡的视觉区分）。 */
   badge?: string;
+  dragProps?: React.HTMLAttributes<HTMLDivElement>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -312,6 +314,8 @@ export function GroupHead({
 
   return (
     <div
+      {...dragProps}
+      draggable={renaming ? false : dragProps?.draggable}
       className="macro-group__head"
       ref={headRef}
       title={title}

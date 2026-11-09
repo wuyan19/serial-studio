@@ -13,6 +13,7 @@ import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../sh
 import { IconChevronDown, IconChevronUp, IconClose, IconHub, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
+import { TabOverflow } from "./tab-overflow";
 
 // ===== 终端视图 =====
 
@@ -455,8 +456,8 @@ export function GroupView({
   onDropHalf: (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => void;
   /** 当前拖拽高亮提示（{overGroupId, overHalf} | null）。 */
   dropHint: { overGroupId: string; overHalf: PaneHalf } | null;
-  /** 拖 tab 到本 group 标签栏：迁移 port 归属到本 group。 */
-  onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string) => void;
+  /** Insert at a gap in the destination's original tab order, before removing the source. */
+  onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string, index?: number) => void;
   /** 终端容器 DOM 就绪/卸载上报（App 把 TermView 经 DOM reparent 挪入，跨 group 搬 tab 保 scrollback）。 */
   termContainerRef: (el: HTMLDivElement | null) => void;
   fileTools?: ReactNode;
@@ -464,6 +465,24 @@ export function GroupView({
 }) {
   const termRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<HTMLDivElement>(null);
+  const [tabDropIndex, setTabDropIndex] = useState<number | null>(null);
+  useEffect(() => {
+    const clearTabDrop = () => setTabDropIndex(null);
+    window.addEventListener("dragend", clearTabDrop);
+    window.addEventListener("drop", clearTabDrop);
+    return () => {
+      window.removeEventListener("dragend", clearTabDrop);
+      window.removeEventListener("drop", clearTabDrop);
+    };
+  }, []);
+  const insertionIndex = (clientX: number) => {
+    const tabs = Array.from(tabsRef.current?.querySelectorAll<HTMLElement>(".tab") ?? []);
+    const index = tabs.findIndex(tab => {
+      const rect = tab.getBoundingClientRect();
+      return clientX < rect.left + rect.width / 2;
+    });
+    return index === -1 ? tabs.length : index;
+  };
   // 标签溢出时,激活 tab 可能滚出可视区(侧栏切换/新开端口),把它滚回来。
   // 手动算 scrollLeft 而非 scrollIntoView(inline):后者会连带滚动外层可滚祖先。
   useLayoutEffect(() => {
@@ -527,6 +546,7 @@ export function GroupView({
   return (
     <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
       <div className="group__tab-row" data-empty={group.ports.length === 0 ? "true" : undefined}>
+        <TabOverflow scrollRef={tabsRef}>
         <div
           ref={tabsRef}
           className="group__tabs tab-bar"
@@ -538,22 +558,29 @@ export function GroupView({
             if (e.dataTransfer.types.includes("text/x-port")) {
               e.preventDefault();
               e.dataTransfer.dropEffect = "move";
+              setTabDropIndex(insertionIndex(e.clientX));
+              onDragLeave();
             }
+          }}
+          onDragLeave={(e) => {
+            if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) setTabDropIndex(null);
           }}
           onDrop={(e) => {
             e.preventDefault();
+            setTabDropIndex(null);
+            onDragLeave();
             const raw = e.dataTransfer.getData("text/x-port");
             if (raw) {
               try {
                 const { port, src } = JSON.parse(raw) as { port: string; src: string };
-                onDropOnTabs(port, src, group.id);
+                if (typeof port === "string" && typeof src === "string") onDropOnTabs(port, src, group.id, insertionIndex(e.clientX));
               } catch {
                 /* ignore */
               }
             }
           }}
         >
-          {group.ports.map((port) => {
+          {group.ports.map((port, index) => {
             const isActive = port === group.activePort;
             const editingThis = aliasEditTab?.port === port;
             const portName = displayPortName(port); // 多级复合键也只显示串口名(设备归属由 source 标签表达)
@@ -566,13 +593,15 @@ export function GroupView({
                 data-active={isActive}
                 data-disconnected={disconnected ? "true" : undefined}
                 data-editing={editingThis ? "true" : undefined}
+                data-drop-before={tabDropIndex === index ? "true" : undefined}
+                data-drop-after={tabDropIndex === group.ports.length && index === group.ports.length - 1 ? "true" : undefined}
                 draggable={!editingThis}
                 onDragStart={(e) => {
                   e.dataTransfer.effectAllowed = "move";
                   e.dataTransfer.setData("text/x-port", JSON.stringify({ port, src: group.id }));
                   e.dataTransfer.setData("text/plain", port); // 部分 webview 需 text/plain 才进 drop
                 }}
-                onDragEnd={onDragLeave}
+                onDragEnd={() => { setTabDropIndex(null); onDragLeave(); }}
                 onClick={() => {
                   if (!editingThis) onSwitchTab(port);
                 }}
@@ -627,6 +656,7 @@ export function GroupView({
             );
           })}
         </div>
+        </TabOverflow>
         {fileTools}
       </div>
       <div className="group__body">

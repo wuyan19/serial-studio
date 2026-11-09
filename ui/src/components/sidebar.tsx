@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import type { DeviceView, PortId, PortInfo, PortRow, RemoteDevice } from "../types";
 import { displayPortName, getMode, groupBy } from "../lib";
 import { connectionRows, selectSshPort, type ConnectionListRow } from "../connection-list";
+import { useListOrder } from "../use-list-order";
 import {
   getGroupMemberships, type PortGrouping, type PortGroupsOperation,
 } from "../port-groups";
@@ -85,7 +86,9 @@ export function PortsPanel({
   groupsError,
   onUpdateGroups,
   onToggleCustomGroup,
+  orderScope = "local",
 }: {
+  orderScope?: string;
   grouping: PortGrouping;
   groupsReady: boolean;
   groupsError: string;
@@ -131,11 +134,20 @@ export function PortsPanel({
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [groupSaving, setGroupSaving] = useState(false);
+  const order = useListOrder(orderScope);
+  const devices = order.sort("devices", portGroups, group => group.devId);
+  const customNames = order.sort("groups", grouping.names, name => name);
+  const memberScope = (name: string) => JSON.stringify(["group", name]);
+  const deviceScope = (id: string) => JSON.stringify(["device", id]);
+  const rowKey = (row: ConnectionListRow) => JSON.stringify(row.kind === "ssh" ? ["ssh", row.group.devId] : ["serial", row.port.pid]);
   const search = query.trim().toLocaleLowerCase();
-  const buckets = (listView === "default" ? [null] : grouping.names).map((name) => ({
-    name,
-    rows: connectionRows(portGroups, grouping, name, query),
-  }));
+  const buckets = (listView === "default" ? [null] : customNames).map((name) => {
+    const matches = connectionRows(devices, grouping, name, query);
+    if (name === null) return { name, rows: matches };
+    const visibleIds = new Set(matches.map(rowKey));
+    return { name, rows: order.sort(memberScope(name), connectionRows(devices, grouping, name, ""), rowKey)
+      .filter(row => visibleIds.has(rowKey(row))) };
+  });
   const updateGroups = async (operation: PortGroupsOperation): Promise<boolean> => {
     setGroupError("");
     try { await onUpdateGroups(operation); return true; }
@@ -225,12 +237,14 @@ export function PortsPanel({
     ...(grouping.names.length ? [{ sep: true }, ...portMembershipItems(keyMenu.port)] : []),
   ];
 
-  const renderSerial = (group: PortGroupView, port: PortRow, showSource: boolean) => {
+  const renderSerial = (group: PortGroupView, port: PortRow, showSource: boolean, scope: string, ids: string[]) => {
     const pid = port.pid;
     const shown = displayPortName(port.name);
     const editing = aliasEditPort === pid;
     const canForce = getMode() === "local" && port.opened;
     return <div
+      {...order.bind(scope, rowKey({ kind: "serial", group, port }), ids)}
+      draggable={!editing}
       key={`serial:${pid}`} className="port-item-row port-item-row--single"
       data-active={pid === activePort} data-opened={port.opened || undefined}
       data-force={canForce || undefined} data-editing={editing || undefined}
@@ -263,7 +277,7 @@ export function PortsPanel({
       {canForce && <button className="port-item__force" title={`强制关闭 ${shown}（断开远程）`} aria-label={`强制关闭 ${shown}`} onClick={() => onForceClose(pid)}><IconPower /></button>}
     </div>;
   };
-  const renderSsh = (row: SshRow, deviceLevel = false) => {
+  const renderSsh = (row: SshRow, scope: string, ids: string[], deviceLevel = false) => {
     const { group, ports } = row;
     const selected = selectSshPort(ports, activePort);
     const opened = ports.filter((port) => port.opened);
@@ -272,6 +286,7 @@ export function PortsPanel({
       else if (!group.external) onSshAction(group.devId, "connect");
     };
     return <div
+      {...order.bind(scope, deviceLevel ? group.devId : rowKey(row), ids)}
       key={`ssh:${group.devId}`} className={`port-item-row port-item-row--single port-item-row--ssh${deviceLevel ? " port-item-row--device" : ""}`}
       data-active={ports.some((port) => port.pid === activePort)} data-opened={opened.length > 0 || undefined}
       title={`${group.label} · ${group.detail ?? group.meta?.detail ?? "SSH"}`}
@@ -292,7 +307,11 @@ export function PortsPanel({
     </div>;
   };
   const renderDefaultDevice = (group: PortGroupView, rows: ConnectionListRow[]) => {
-    const serialRows = rows.filter((row): row is Extract<ConnectionListRow, { kind: "serial" }> => row.kind === "serial" && row.group.devId === group.devId);
+    const scope = deviceScope(group.devId);
+    const allRows = order.sort(scope, connectionRows([group], grouping, null, ""), rowKey);
+    const rowIds = allRows.map(rowKey);
+    const visibleIds = new Set(rows.map(rowKey));
+    const serialRows = allRows.filter((row): row is Extract<ConnectionListRow, { kind: "serial" }> => row.kind === "serial" && visibleIds.has(rowKey(row)));
     if (!serialRows.length && (group.ports.length > 0 || (search && !`${group.label} ${group.detail ?? ""}`.toLocaleLowerCase().includes(search)))) return null;
     const dev = remotes.find((remote) => remote.id === group.devId);
     const canRename = Boolean(dev && getMode() === "local");
@@ -300,6 +319,7 @@ export function PortsPanel({
     const collapsed = !search && portCollapsed.has(group.devId);
     return <div key={`device:${group.devId}`} className="macro-group port-group">
       <GroupHead
+        dragProps={order.bind("devices", group.devId, devices.map(device => device.devId))}
         name={group.label} count={serialRows.length} collapsed={collapsed}
         onToggle={() => onTogglePortGroup(group.devId)}
         leading={<span className={`dot ${group.online === true ? "on" : group.online === false ? "off" : ""}`} />}
@@ -315,7 +335,7 @@ export function PortsPanel({
           ] : []),
         ]}
       />
-      {!collapsed && <div className="connection-tree__children">{serialRows.length ? serialRows.map((row) => renderSerial(group, row.port, false)) : <p className="sidebar__empty">{group.online === false ? "未连接" : group.online === undefined && group.devId !== "local" ? "连接中…" : "无可用端口"}</p>}</div>}
+      {!collapsed && <div className="connection-tree__children">{serialRows.length ? serialRows.map((row) => renderSerial(group, row.port, false, scope, rowIds)) : <p className="sidebar__empty">{group.online === false ? "未连接" : group.online === undefined && group.devId !== "local" ? "连接中…" : "无可用端口"}</p>}</div>}
     </div>;
   };
 
@@ -337,15 +357,18 @@ export function PortsPanel({
     {search && buckets.length > 0 && buckets.every((bucket) => !bucket.rows.length && !bucket.name?.toLocaleLowerCase().includes(search)) && <p className="sidebar__empty">没有匹配的连接</p>}
     <div className="connection-tree" data-view={listView}>{buckets.map((bucket) => {
       const customName = bucket.name;
-      if (customName === null) return <div key="default" className="connection-tree__default">{portGroups.map((group) => {
+      if (customName === null) return <div key="default" className="connection-tree__default">{devices.map((group) => {
         if (group.kind !== "ssh") return renderDefaultDevice(group, bucket.rows);
         const row = bucket.rows.find((entry): entry is SshRow => entry.kind === "ssh" && entry.group.devId === group.devId);
-        return row ? renderSsh(row, true) : null;
+        return row ? renderSsh(row, "devices", devices.map(device => device.devId), true) : null;
       })}</div>;
       if (search && !bucket.rows.length && !customName.toLocaleLowerCase().includes(search)) return null;
       const collapsed = !search && grouping.collapsed.includes(customName);
+      const scope = memberScope(customName);
+      const ids = order.sort(scope, connectionRows(devices, grouping, customName, ""), rowKey).map(rowKey);
       return <div key={`custom:${customName}`} className="port-custom-group">
         <GroupHead name={customName} count={bucket.rows.length} collapsed={collapsed}
+          dragProps={order.bind("groups", customName, customNames)}
           onToggle={() => onToggleCustomGroup(customName)}
           onRename={(value) => {
             if (value.trim() === customName) { setGroupError(""); return; }
@@ -355,7 +378,7 @@ export function PortsPanel({
           }}
           onDissolve={() => { void updateGroups({ type: "dissolve", name: customName }); }}
         />
-        {!collapsed && <div className="connection-tree__children">{bucket.rows.length ? bucket.rows.map((row) => row.kind === "ssh" ? renderSsh(row) : renderSerial(row.group, row.port, true)) : <p className="sidebar__empty">{search ? "没有匹配的连接" : "在默认视图右键串口或 SSH 设备可添加到此分组"}</p>}</div>}
+        {!collapsed && <div className="connection-tree__children">{bucket.rows.length ? bucket.rows.map((row) => row.kind === "ssh" ? renderSsh(row, scope, ids) : renderSerial(row.group, row.port, true, scope, ids)) : <p className="sidebar__empty">{search ? "没有匹配的连接" : "在默认视图右键串口或 SSH 设备可添加到此分组"}</p>}</div>}
       </div>;
     })}</div>
     {keyMenu && <ContextMenu x={keyMenu.x} y={keyMenu.y} items={keyMenuItems} onClose={() => setKeyMenu(null)} />}
