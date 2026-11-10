@@ -518,7 +518,8 @@ button {
   white-space: nowrap;
 }
 .panel-head__more,
-.panel-head__refresh {
+.panel-head__refresh,
+.panel-head__view {
   width: 26px;
   height: 26px;
   display: inline-flex;
@@ -532,14 +533,19 @@ button {
   flex-shrink: 0;
   margin-left: auto;
 }
+/* 右侧图标组首个成员扛 margin-left:auto 推到右缘,随后的清零防 auto 均分出现间隙 */
+.panel-head__view + .panel-head__refresh,
 .panel-head__refresh + .panel-head__more { margin-left: 0; }
 .panel-head__more:hover,
-.panel-head__refresh:hover { background: var(--surface-2); color: var(--ink); }
-.panel-head__more[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
+.panel-head__refresh:hover,
+.panel-head__view:hover { background: var(--surface-2); color: var(--ink); }
+.panel-head__more[aria-expanded="true"],
+.panel-head__view[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
 .panel-head__more svg,
-.panel-head__refresh svg { width: 16px; height: 16px; }
+.panel-head__refresh svg,
+.panel-head__view svg { width: 16px; height: 16px; }
 .workspace-sidebar-actions {
-  padding: 16px 12px 4px;
+  padding: 6px 12px 4px; /* 顶距收小:原 16px 是当首行时对上缘的留白,挪到标题栏下后成了行间大缝 */
   flex-shrink: 0;
   display: flex;
   align-items: stretch;
@@ -564,24 +570,6 @@ button {
 .workspace-create:hover { background: var(--surface-2); border-color: var(--ink-faint); }
 .workspace-create svg { width: 18px; height: 18px; flex-shrink: 0; }
 .workspace-sidebar-actions .workspace-search { flex: 1; min-width: 0; min-height: 36px; }
-.workspace-sidebar-actions .workspace-search > span { font-size: 18px; }
-.workspace-view-badge {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 1px 5px;
-  border: 1px solid var(--hairline);
-  border-radius: 5px;
-  background: var(--surface-2);
-  color: var(--ink-dim);
-  font: inherit;
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  cursor: pointer;
-}
-.workspace-view-badge:hover { color: var(--ink); border-color: var(--ink-faint); }
-.workspace-view-badge__caret { width: 12px; height: 12px; flex-shrink: 0; }
 /* 分组视图的「+ 新建分组」内联行(原 section-head 按钮迁此) */
 .group-create-row {
   display: flex;
@@ -619,7 +607,12 @@ button {
   font: inherit;
 }
 .workspace-search input::placeholder { color: var(--ink-dim); }
-.workspace-search > span { font-size: 22px; line-height: 1; }
+.workspace-search > span {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+  transform: translateY(-3px); /* ⌕ 字形基线偏上,光学居中 */
+}
 .workspace-footer-action { font-size: var(--fs-sm); }
 .workspace-footer-action > span { flex: 1; }
 .workspace-service { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: var(--fs-sm); white-space: nowrap; }
@@ -1962,6 +1955,7 @@ button {
   min-width: 0;
   min-height: 0;
 }
+/* 空状态(VS Code 空编辑器式):上方小淡水印图标,下方动作文字居左+键帽居右的行式列表 */
 .term-empty {
   position: absolute;
   inset: 0;
@@ -1969,17 +1963,31 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--ink-faint);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  text-align: center;
-  padding: 24px;
+  gap: 28px;
+  padding: 0 24px;
+  overflow: hidden;
 }
 .term-empty__icon {
-  width: 72px;
-  height: 72px;
+  width: 96px;
+  height: 96px;
   color: var(--ink-faint);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.term-empty__hint {
+  /* 两端对齐但容器收窄:键帽右对齐成列,文字与键帽又不至于隔太远 */
+  width: min(180px, 90%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.term-empty__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--ink-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
 }
 .term-empty kbd {
   font-family: var(--font-mono);
@@ -1988,18 +1996,6 @@ button {
   border-radius: var(--r-sm);
   padding: 1px 6px;
   color: var(--ink-dim);
-}
-/* 空状态快捷键提示行(kbd 走上方 .term-empty kbd 现成样式) */
-.term-empty__hint {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  justify-content: center;
-  margin-top: 6px;
-  font-size: 12px;
-}
-.term-empty__hint kbd {
-  margin-right: 4px;
 }
 
 /* ============================================================

@@ -234,6 +234,19 @@ export function IconChevronRight({ className }: IconProps) {
   );
 }
 
+/** 连接列表视图（默认/分组）切换：行首圆点 + 三行列表。 */
+export function IconListView({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M8 6h12" />
+      <path d="M8 12h12" />
+      <path d="M8 18h12" />
+      {/* round cap + 零长度路径 = 行首圆点 */}
+      <path d="M4 6h.01M4 12h.01M4 18h.01" />
+    </Svg>
+  );
+}
+
 export function IconPlus({ className }: IconProps) {
   return (
     <Svg className={className}>

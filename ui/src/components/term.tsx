@@ -666,14 +666,13 @@ export function GroupView({
           {group.ports.length === 0 && (
             <div className="term-empty">
               <IconHub className="term-empty__icon" />
-              <div>从左侧连接列表或“新建连接”打开串口或 SSH 终端</div>
               {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
                   现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。
                   动作被解绑(combo 空)时不渲染键帽,只留文字——不显示"—"残影 */}
               <div className="term-empty__hint">
-                <span><HintKbd combo={bindings["port.palette"].combo} /> 串口面板</span>
-                <span><HintKbd combo={bindings["macro.palette"].combo} /> 宏</span>
-                <span><HintKbd combo={bindings["script.palette"].combo} /> 脚本</span>
+                <span className="term-empty__row"><span>打开连接</span><HintKbd combo={bindings["port.palette"].combo} /></span>
+                <span className="term-empty__row"><span>执行宏</span><HintKbd combo={bindings["macro.palette"].combo} /></span>
+                <span className="term-empty__row"><span>执行脚本</span><HintKbd combo={bindings["script.palette"].combo} /></span>
               </div>
             </div>
           )}

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
-  IconBolt, IconChevronDown, IconCode, IconGear, IconGlobe,
+  IconBolt, IconCode, IconGear, IconGlobe, IconListView,
   IconMore, IconPlug, IconPlus, IconRefresh, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
@@ -83,21 +83,14 @@ export function WorkspaceSidebar({
         </div>
       </div>
       <div id={panelId} className="sidebar__panel" hidden={collapsed}>
-        <div className="workspace-sidebar-actions">
-          <label className="workspace-search">
-            <span aria-hidden="true">⌕</span>
-            <input type="search" value={query} onChange={(event) => onQuery(event.target.value)}
-              placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false} />
-          </label>
-          <button className="workspace-create" onClick={onNew} aria-label={`新建${label}`} title={`新建${label}`}><IconPlus /></button>
-        </div>
         <div className="panel-head">
           <span className="panel-head__title">{panel === "ports" ? "连接列表" : label}</span>
-          {view && <button className="workspace-view-badge" ref={viewButton} aria-label={`列表视图：${view.label}`}
+          {view && <button ref={viewButton} className="icon-btn panel-head__view"
+            aria-label={`列表视图：${view.label}，点击切换`} title={`列表视图：${view.label}，点击切换`}
             aria-haspopup="menu" aria-expanded={viewMenu !== null} onClick={() => {
               const rect = viewButton.current?.getBoundingClientRect();
               if (rect) { setMoreMenu(null); setViewMenu(viewMenu ? null : { x: rect.left, y: rect.bottom + 6 }); }
-            }}>{view.label}<IconChevronDown className="workspace-view-badge__caret" /></button>}
+            }}><IconListView /></button>}
           {onRefresh && <button className="icon-btn panel-head__refresh" onClick={onRefresh} title="刷新列表" aria-label="刷新列表"><IconRefresh /></button>}
           {moreItems && moreItems.length > 0 && (
             <button
@@ -123,6 +116,14 @@ export function WorkspaceSidebar({
           )}
           {viewMenu && view && <ContextMenu x={viewMenu.x} y={viewMenu.y} items={view.items}
             onClose={(reason) => { setViewMenu(null); if (reason === "item" || reason === "escape") viewButton.current?.focus(); }} />}
+        </div>
+        <div className="workspace-sidebar-actions">
+          <label className="workspace-search">
+            <input type="search" value={query} onChange={(event) => onQuery(event.target.value)}
+              placeholder={`搜索${label}…`} aria-label={`搜索${label}`} autoCapitalize="off" spellCheck={false} />
+            <span aria-hidden="true">⌕</span>
+          </label>
+          <button className="workspace-create" onClick={onNew} aria-label={`新建${label}`} title={`新建${label}`}><IconPlus /></button>
         </div>
         <div className="sidebar__content">{children}</div>
       </div>

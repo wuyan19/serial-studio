@@ -46,7 +46,7 @@ describe("workspace sidebar layout interactions", () => {
   it("opens the badge view menu and changes the view without triggering creation", async () => {
     const value = props();
     await act(async () => root.render(<WorkspaceSidebar {...value} />));
-    await click("列表视图：默认");
+    await click("列表视图：默认，点击切换");
     expect(document.querySelector('[role="menuitemradio"][aria-checked="true"]')?.textContent).toBe("默认");
     await click("分组");
     expect(value.view!.items[1].onSelect).toHaveBeenCalledOnce();
@@ -72,12 +72,12 @@ describe("workspace sidebar layout interactions", () => {
   it("closes view menus when navigating away and preserves library import operations", async () => {
     const value = props(); const onImport = vi.fn();
     await act(async () => root.render(<WorkspaceSidebar {...value} />));
-    await click("列表视图：默认");
+    await click("列表视图：默认，点击切换");
     await act(async () => root.render(<WorkspaceSidebar {...value} panel="macros" view={undefined} onRefresh={undefined} moreItems={[{ label: "导入宏", onSelect: onImport }]} />));
     expect(document.querySelector('[role="menu"]')).toBeNull();
     await click("更多操作"); await click("导入宏");
     expect(onImport).toHaveBeenCalledOnce();
-    expect(container.querySelector(".workspace-view-badge")).toBeNull();
+    expect(container.querySelector(".panel-head__view")).toBeNull();
   });
   it("opens settings directly in the settings category", async () => {
     const open = vi.fn();
