@@ -225,6 +225,15 @@ export function IconChevronDown({ className }: IconProps) {
   );
 }
 
+/** 分组折叠指示：">" 单线雪佛龙，展开态由 CSS 旋转 90° 朝下。 */
+export function IconChevronRight({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M9 6l6 6-6 6" />
+    </Svg>
+  );
+}
+
 export function IconPlus({ className }: IconProps) {
   return (
     <Svg className={className}>

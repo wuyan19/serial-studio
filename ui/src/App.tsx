@@ -2064,12 +2064,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           moreItems={
             sidebarPanel === "ports" ? undefined : sidebarPanel === "macros" ? [
               { label: "导入宏", onSelect: () => importInputRef.current?.click() },
-              { label: "导出宏（可多选 / 全选）", disabled: Object.keys(macros).length === 0, onSelect: () => setExportMacrosOpen(true) },
+              { label: "导出宏", disabled: Object.keys(macros).length === 0, onSelect: () => setExportMacrosOpen(true) },
             ] : [
               { label: "脚本编写指南", onSelect: () => { setSkillOpen(true); if (skillText === null) fetchSkill(); } },
               { sep: true },
               { label: "导入脚本", onSelect: () => scriptImportInputRef.current?.click() },
-              { label: "导出脚本（可多选 / 全选）", disabled: Object.keys(scripts).length === 0, onSelect: () => setExportScriptsOpen(true) },
+              { label: "导出脚本", disabled: Object.keys(scripts).length === 0, onSelect: () => setExportScriptsOpen(true) },
             ]
           }
         >

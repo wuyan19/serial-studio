@@ -1,6 +1,7 @@
 /** 底层原语：布局行、通用 hook、端口名标签、别名 inline 输入、分组头、活动栏图标。
 各对话框/编辑器/终端视图共用，不依赖其它组件模块。 */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconChevronRight } from "../icons";
 
 // ===== 通用 =====
 
@@ -348,9 +349,8 @@ export function GroupHead({
       }}
     >
       {leading}
-      {/* 单字形 + 旋转:▼/▶ 两个字形在各平台字体里字号不一致(收起态偏大),
-          同一 ▶ 旋转 90° 保证两种状态视觉同大,顺带平滑过渡 */}
-      <span className={`macro-group__caret${collapsed ? "" : " macro-group__caret--open"}`}>▶</span>
+      {/* ">" 单线雪佛龙 + 旋转(90° 朝下):展开/收起两态同一字形,平滑过渡 */}
+      <IconChevronRight className={`macro-group__caret${collapsed ? "" : " macro-group__caret--open"}`} />
       {renaming ? (
         <InlineAliasInput
           initial={renameInitial ?? name}

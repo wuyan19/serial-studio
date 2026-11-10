@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
-  IconBolt, IconCode, IconGear, IconGlobe,
+  IconBolt, IconChevronDown, IconCode, IconGear, IconGlobe,
   IconMore, IconPlug, IconPlus, IconRefresh, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
@@ -97,7 +97,7 @@ export function WorkspaceSidebar({
             aria-haspopup="menu" aria-expanded={viewMenu !== null} onClick={() => {
               const rect = viewButton.current?.getBoundingClientRect();
               if (rect) { setMoreMenu(null); setViewMenu(viewMenu ? null : { x: rect.left, y: rect.bottom + 6 }); }
-            }}>{view.label}</button>}
+            }}>{view.label}<IconChevronDown className="workspace-view-badge__caret" /></button>}
           {onRefresh && <button className="icon-btn panel-head__refresh" onClick={onRefresh} title="刷新列表" aria-label="刷新列表"><IconRefresh /></button>}
           {moreItems && moreItems.length > 0 && (
             <button

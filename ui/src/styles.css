@@ -567,7 +567,10 @@ button {
 .workspace-sidebar-actions .workspace-search > span { font-size: 18px; }
 .workspace-view-badge {
   flex-shrink: 0;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
   border: 1px solid var(--hairline);
   border-radius: 5px;
   background: var(--surface-2);
@@ -578,6 +581,7 @@ button {
   cursor: pointer;
 }
 .workspace-view-badge:hover { color: var(--ink); border-color: var(--ink-faint); }
+.workspace-view-badge__caret { width: 12px; height: 12px; flex-shrink: 0; }
 /* 分组视图的「+ 新建分组」内联行(原 section-head 按钮迁此) */
 .group-create-row {
   display: flex;
@@ -672,22 +676,32 @@ button {
   margin-bottom: 0;
   padding: 4px 0 10px;
 }
+/* 分组分隔线:仅串口设备卡(.port-group)保留;宏/脚本列表无横线,靠组距区隔 */
 .macro-group:not(:last-child) {
-  border-bottom: 1px solid var(--hairline-soft);
   margin-bottom: 8px;
+}
+.port-group:not(:last-child) {
+  border-bottom: 1px solid var(--hairline-soft);
+}
+/* 宏/脚本列表紧凑化:组距对齐串口列表 --connection-group-gap(6px = 下留白2+组间2+上留白2) */
+.macro-group:not(.port-group) {
+  padding: 2px 0;
+}
+.macro-group:not(.port-group):not(:last-child) {
+  margin-bottom: 2px;
 }
 .macro-group__head {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 4px 4px;
+  padding: 3px 4px;
   background: transparent;
   border: none;
   color: var(--ink-dim);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  letter-spacing: normal;
   text-transform: none;
   cursor: pointer;
   border-radius: var(--r-sm);
@@ -697,13 +711,12 @@ button {
   background: color-mix(in srgb, var(--ink) 5%, transparent);
   color: var(--ink);
 }
-/* 折叠三角:单字形 + 旋转(▼/▶ 两字形平台字体大小不一,收起态偏大);
-   inline-block 是 transform 生效的前提。字号 7px ≈ 旧 ▼@9px 的视觉大小
-   (▶ 字形本身偏大,统一用它后需整体缩小回原观感) */
+/* 折叠指示:">" 单线雪佛龙 SVG(字形随平台字体稳定),展开态旋转 90° 朝下 */
 .macro-group__caret {
-  display: inline-block;
-  font-size: 7px;
-  color: var(--ink-faint);
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ink);
   transition: transform var(--t-fast) var(--ease);
 }
 .macro-group__caret--open {
@@ -914,7 +927,6 @@ button {
 .port-item-row[data-active="true"] .port-item {
   background: var(--surface-2);
   color: var(--ink);
-  border-left-color: var(--accent);
 }
 .port-item__force {
   position: absolute;
@@ -1092,7 +1104,6 @@ button {
 .port-group > .macro-group__head > .macro-group__caret { text-align: center; }
 .port-group > .macro-group__head > .macro-group__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .port-item-row--device .port-item__dot { width: 6px; height: 6px; box-shadow: none; }
-.port-item-row--device[data-active="true"] .port-item { box-shadow: inset 2px 0 0 var(--accent); }
 
 /* Both connection views share the same tree density and expanded child layout. */
 .connection-tree {
@@ -1126,11 +1137,6 @@ button {
   padding: 6px;
   line-height: 1.4;
 }
-.connection-tree .macro-group__head {
-  font-size: var(--fs-base);
-  font-weight: 600;
-  letter-spacing: normal;
-}
 .connection-tree__children {
   padding-top: var(--connection-row-gap);
   padding-left: var(--connection-indent);
@@ -1161,7 +1167,7 @@ button {
 /* macro rows —— 编辑/删除按钮绝对定位到宏按钮右侧内嵌 */
 .macro-row {
   position: relative;
-  margin-bottom: 5px;
+  margin-bottom: 2px;
 }
 .macro-run {
   width: 100%;
@@ -1169,9 +1175,9 @@ button {
   align-items: center;
   gap: 7px;
   text-align: left;
-  padding: 10px 56px 10px 9px;
+  padding: 6px 56px 6px 9px;
   background: transparent;
-  color: var(--ink);
+  color: var(--ink-dim);
   border: 1px solid transparent;
   border-radius: var(--r-md); /* 列表行按钮:固定中圆角,不跟 --r-btn(胶囊家族下整行胶囊很怪) */
   cursor: pointer;
@@ -1179,8 +1185,9 @@ button {
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 .macro-run:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--surface-3);
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--ink);
 }
 .macro-run:disabled {
   color: var(--ink-faint);
@@ -1729,8 +1736,12 @@ button {
 
 /* terminal area */
 .termview-term {
-  margin: 16px;
+  margin: 4px 4px 4px 8px;
   min-width: 0;
+  /* xterm 只能整行渲染,容器高 mod 行高的余量沉在底部且随窗口尺寸波动;
+     涂终端同色让余量读作屏幕的一部分,底边距视觉恒定 */
+  background: var(--term-bg);
+  border-radius: 6px;
 }
 .term-area {
   flex: 1;
@@ -2304,6 +2315,18 @@ button {
   width: 340px;
   max-width: 90vw;
 }
+/* 串口参数框:narrow 族共用宽度不动,仅此框放宽——「自动换行符」选项文案长
+   ("CRLF (\r\n) — Windows/AT"),340px 行宽低于 select 最小内容宽,该行被撑得
+   比别的 select 宽;380px 让各行 flex:1 均分同宽(用户实测调整值) */
+.dialog--port {
+  min-width: 380px;
+  width: 380px;
+}
+/* 设备/端口详情框:只读值(host 地址/设备 ID)无长度上限,放宽减少折行 */
+.dialog--detail {
+  min-width: 420px;
+  width: 420px;
+}
 .dialog--med {
   width: 560px;
   max-width: 90vw;
@@ -2516,6 +2539,17 @@ button {
   display: flex;
   justify-content: flex-end;
   margin: -26px 0 8px; /* 拉回到副描述行右端，不占独立行高 */
+  position: relative; /* 锚定快捷键说明浮层 */
+}
+/* 说明浮层锚在按钮行旁:按钮正下方右对齐(基础 .script-help 的 46px/14px
+   是脚本编辑器的固定锚,这里按按钮行实际位置定位) */
+.dlg-settings__cat-tools .script-help {
+  top: calc(100% + 6px);
+  right: 0;
+}
+/* 遮罩随浮层锚进行内后,absolute 只盖住按钮那行——改 fixed 盖全屏,点任意处关闭 */
+.dlg-settings__cat-tools .script-help__backdrop {
+  position: fixed;
 }
 /* 设置行：粗体名 + 说明 + 控件（VS Code 同构），hover 浅 wash */
 .settings-row {

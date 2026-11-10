@@ -273,6 +273,9 @@ export function SettingsPage({
                       >
                         <IconInfo /> 说明
                       </button>
+                      {/* 浮层锚在本行(position:relative)内,渲染在按钮旁而非页面级——
+                          页面级渲染会以设置页根为定位祖先,飘到整页右上角 */}
+                      {helpOpen && <ShortcutsHelpPanel onClose={() => setHelpOpen(false)} />}
                     </div>
                     {c.shortcutGroups.map((g) => (
                       <div key={g.title} className="settings-shortcut-group">
@@ -380,7 +383,6 @@ export function SettingsPage({
             ))}
           </div>
         </div>
-        {helpOpen && <ShortcutsHelpPanel onClose={() => setHelpOpen(false)} />}
       </div>
     </div>
   );
