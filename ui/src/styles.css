@@ -1456,8 +1456,8 @@ button {
   background: rgba(255, 255, 255, 0.02);
 }
 .tab[data-active="true"] {
-  color: var(--ink);
-  background: var(--term-bg);
+  color: var(--workspace-tab-active-ink, var(--ink));
+  background: var(--workspace-tab-active-bg, var(--term-bg));
   border-bottom-color: var(--accent);
 }
 .tab[data-drop-before="true"] { box-shadow: inset 2px 0 0 var(--accent); }
@@ -1476,7 +1476,7 @@ button {
 .tab[data-active="true"] .port-label__raw,
 .tab[data-active="true"] .port-label__dev,
 .tab[data-active="true"] .tab__src {
-  color: var(--ink);
+  color: var(--workspace-tab-active-ink, var(--ink));
 }
 .tab__btn {
   display: inline-flex;
@@ -4024,6 +4024,8 @@ button {
   --term-bg: #1b1b1b;
   --workspace-rail-bg: #303030;
   --workspace-tab-bg: #222222;
+  --workspace-tab-active-bg: #454545;
+  --workspace-tab-active-ink: #ffffff;
   --workspace-shell-border: #080808;
   --workspace-shell-shadow: 0 1px 4px rgb(0 0 0 / 28%);
   --hairline: #3b3b3b;
