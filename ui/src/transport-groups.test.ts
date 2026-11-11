@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalTransport, RemoteTransport } from "./transport";
+import { DEFAULT_CONFIG } from "./lib";
 import type { PortGroupsSnapshot } from "./port-groups";
 import { mockIPC, clearMocks } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 class Socket {
+  static CONNECTING = 0;
   static OPEN = 1;
   static instances: Socket[] = [];
   readyState = 0;
@@ -47,6 +49,27 @@ describe("shared configuration transports", () => {
     socket.open();
     return { transport, socket };
   }
+
+  it("rejects SSH opens interrupted during WebSocket handshake and allows retry", async () => {
+    const transport = new RemoteTransport("127.0.0.1", 18700, "remote");
+    transports.push(transport);
+    const port = "host::shell";
+    const outcome = vi.fn();
+    void transport.open(port, DEFAULT_CONFIG).then(() => outcome("opened"), outcome);
+    Socket.instances[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome).toHaveBeenCalledWith(new Error("连接已断开"));
+    await expect(transport.open(port, DEFAULT_CONFIG)).rejects.toThrow("连接已断开");
+
+    await vi.advanceTimersToNextTimerAsync();
+    const socket = Socket.instances[1];
+    socket.open();
+    const retry = transport.open(port, DEFAULT_CONFIG);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(socket.sent).toEqual([{ action: "open", port, config: DEFAULT_CONFIG }]);
+    socket.receive({ type: "acquired", port, config: DEFAULT_CONFIG, opened: true, holders: 1 });
+    await expect(retry).resolves.toMatchObject({ port, opened: true });
+  });
 
   it("preserves SSH test classifications and fingerprints over WebSocket", async () => {
     const { transport, socket } = remote();

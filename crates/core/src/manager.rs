@@ -17,7 +17,7 @@ use crate::types::{
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
@@ -33,6 +33,7 @@ static NEXT_PORT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct SerialManager {
     ports: Arc<Mutex<HashMap<String, PortHandle>>>,
+    open_locks: std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>,
     event_bus: Arc<EventBus>,
     opener: Arc<dyn PortOpener>,
     disconnect_tx: mpsc::Sender<Disconnect>,
@@ -50,6 +51,7 @@ impl SerialManager {
         let (disconnect_tx, disconnect_rx) = mpsc::channel::<Disconnect>(32);
         Self {
             ports,
+            open_locks: std::sync::Mutex::new(HashMap::new()),
             event_bus,
             opener,
             disconnect_tx,
@@ -66,16 +68,21 @@ impl SerialManager {
         opener: Arc<dyn PortOpener>,
         key_resolver: KeyResolver,
     ) -> Self {
-        let ports = Arc::new(Mutex::new(HashMap::<String, PortHandle>::new()));
-        let (disconnect_tx, disconnect_rx) = mpsc::channel::<Disconnect>(32);
         Self {
-            ports,
-            event_bus,
-            opener,
-            disconnect_tx,
-            disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
             key_resolver: Some(key_resolver),
+            ..Self::new(event_bus, opener)
         }
+    }
+
+    fn open_lock(&self, port: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.open_locks.lock().unwrap();
+        if let Some(lock) = locks.get(port).and_then(Weak::upgrade) {
+            return lock;
+        }
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(port.to_owned(), Arc::downgrade(&lock));
+        lock
     }
 
     /// 键规范化唯一入口:normalize(剥遗留 local::)+ 可选别名解析。
@@ -177,7 +184,6 @@ impl SerialManager {
     }
 
     /// 占有端口份额：首个持有者真正打开，后续持有者附加（忽略其 config）。
-    /// 并发安全：慢路径打开后做 TOCTOU 重检，避免泄漏句柄与相互覆盖。
     /// 端口键入口经 canon_key 规范化+解析,结果带 `resolved`(实际 map 键)——
     /// 调用方从结果取,勿在入口外再自行 canon(两次解析间索引可能重建而分叉)。
     pub async fn acquire(
@@ -188,6 +194,9 @@ impl SerialManager {
     ) -> Result<AcquireResult, SerialError> {
         let port = self.canon_key(&port);
         self.maybe_spawn_drainer(); // 首次 acquire 启动 drainer(new() 不能 spawn:无 reactor 会 panic)
+
+        // Concurrent opens of the same port can replace its underlying SSH channel.
+        let open_guard = self.open_lock(&port).lock_owned().await;
 
         // 锁内判定三分支 + 附加(HashSet 幂等,同 session 重复 acquire 不重复计数):
         //   Attach — 端口已占有且连接中 → 附加,返回当前配置
@@ -236,20 +245,25 @@ impl SerialManager {
         }
 
         // Open / Reopen 共用:锁外 spawn_blocking 打开(不持锁做 I/O)
-        let opened = {
+        let (_open_guard, opened) = {
             let opener = Arc::clone(&self.opener);
             let port_name = port.clone();
             let cfg = config.clone();
-            tokio::task::spawn_blocking(move || opener.open(&port_name, &cfg))
-                .await
-                .map_err(|e| SerialError::OpenFailed {
-                    port: port.clone(),
-                    message: format!("join 错误: {}", e),
-                    detail: None,
-                })??
+            // The blocking opener outlives a cancelled acquire, so it must own the lock.
+            let (result, guard) = tokio::task::spawn_blocking(move || {
+                let result = opener.open(&port_name, &cfg);
+                (result, open_guard)
+            })
+            .await
+            .map_err(|e| SerialError::OpenFailed {
+                port: port.clone(),
+                message: format!("join 错误: {}", e),
+                detail: None,
+            })?;
+            (guard, result?)
         };
 
-        // 锁内 TOCTOU 装回(Open 插新 / Reopen 复用逻辑层重建物理层;并发赢家则丢弃句柄转 attach)
+        // A release or disconnect can still change the port while the opener is running.
         let result = {
             let mut ports = self.ports.lock().await;
             if let Some(handle) = ports.get_mut(&port) {
@@ -739,14 +753,14 @@ mod tests {
         }
     }
 
-    /// 慢 opener：open 时 sleep，强制并发 acquire 同时停在慢路径，确定性触发 TOCTOU 重检。
-    struct SlowFakeOpener;
+    struct SlowFakeOpener(std::sync::atomic::AtomicUsize);
     impl PortOpener for SlowFakeOpener {
         fn open(
             &self,
             _port: &str,
             _config: &SerialConfig,
         ) -> Result<Box<dyn PortIo>, SerialError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(50));
             Ok(Box::new(FakePort { disconnect: false }))
         }
@@ -1039,8 +1053,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_acquire_one_opens_one_attaches_no_leak() {
-        // 慢 opener 强制两路 acquire 同时进入慢路径，确定性触发 TOCTOU 重检分支
-        let m = SerialManager::new(Arc::new(EventBus::new(16)), Arc::new(SlowFakeOpener));
+        let opener = Arc::new(SlowFakeOpener(std::sync::atomic::AtomicUsize::new(0)));
+        let m = SerialManager::new(Arc::new(EventBus::new(16)), opener.clone());
         let s1 = SessionId::next();
         let s2 = SessionId::next();
         let (r1, r2) = tokio::join!(
@@ -1058,6 +1072,7 @@ mod tests {
         .count();
         assert_eq!(n_opened, 1, "应有且仅有一个 Opened（另一为 Attached）");
         assert_eq!(m.holder_count("COM7").await, Some(2));
+        assert_eq!(opener.0.load(Ordering::Relaxed), 1);
         // 关键：端口任务只有一个（旧 open 的并发竞态会泄漏/覆盖 handle）
         assert_eq!(
             m.list_open_ports().await.len(),

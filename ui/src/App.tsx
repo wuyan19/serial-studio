@@ -600,13 +600,17 @@ export default function App() {
   const sshHostOfPid = (pid: PortId): SshHost | undefined =>
     sshHosts.find((h) => h.id === (portRowOf(pid)?.device?.id ?? parsePortId(pid).devId));
 
+  const openingPortsRef = useRef(new Map<PortId, Transport>());
   /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
    *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
   const openPort = useCallback(async (pid: PortId, config: SerialConfig, groupId?: string) => {
+    const transport = cmdTransport();
+    if (!transport || openingPortsRef.current.get(pid) === transport) return undefined;
+    openingPortsRef.current.set(pid, transport);
     try {
       // transport 命令面收完整 pid:本地 IPC 直传(Rust 规范化),WS 侧剥首段成远端线名
-      const res = await cmdTransport()?.open(pid, config);
-      if (!res) return undefined;
+      const res = await transport.open(pid, config);
+      if (cmdTransport() !== transport) return undefined;
       // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
       dispatch({ type: "port_acquired", pid, config: res.config, groupId });
       if (!res.opened) {
@@ -622,6 +626,7 @@ export default function App() {
       }
       return res;
     } catch (e) {
+      if (cmdTransport() !== transport) return undefined;
       // SSH 分类错误(auth/host key)→ 交互闭环弹窗;其余原样 toast。
       // setSshIssue 是稳定 setter,不破坏 openPort 身份链(勿引入状态依赖)。
       const ssh = (e as OpenError).ssh;
@@ -631,6 +636,8 @@ export default function App() {
         libError(String(e instanceof Error ? e.message : e));
       }
       return undefined;
+    } finally {
+      if (openingPortsRef.current.get(pid) === transport) openingPortsRef.current.delete(pid);
     }
   }, [libNotify, libError, cmdTransport, portRowOf]);
 
@@ -1468,6 +1475,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       const gid = groupOfPort.get(pid);
       if (gid) switchTabInGroup(gid, pid);
       else switchPort(pid);
+      if (pid === activePort) focusTab(pid);
     } else {
       const info = portInfoOf(pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
