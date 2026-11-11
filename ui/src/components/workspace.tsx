@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
-  IconBolt, IconCode, IconGear, IconGlobe, IconListView,
+  IconBolt, IconCode, IconGear, IconGlobe, IconLink, IconListView,
   IconMore, IconPlug, IconPlus, IconRefresh, IconShare, IconSsh,
 } from "../icons";
 import type { SettingsCategoryId } from "./settings-registry";
@@ -42,7 +42,7 @@ export function WorkspaceSidebar({
   const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => { setViewMenu(null); setMoreMenu(null); }, [panel, collapsed]);
   const entries = [
-    { id: "ports" as const, label: "连接", icon: <IconPlug /> },
+    { id: "ports" as const, label: "连接", icon: <IconLink /> },
     { id: "macros" as const, label: "宏", icon: <IconBolt /> },
     ...(showScripts ? [{ id: "scripts" as const, label: "脚本", icon: <IconCode /> }] : []),
   ];
@@ -84,7 +84,7 @@ export function WorkspaceSidebar({
       </div>
       <div id={panelId} className="sidebar__panel" hidden={collapsed}>
         <div className="panel-head">
-          <span className="panel-head__title">{panel === "ports" ? "连接列表" : label}</span>
+          <span className="panel-head__title">{label}</span>
           {view && <button ref={viewButton} className="icon-btn panel-head__view"
             aria-label={`列表视图：${view.label}，点击切换`} title={`列表视图：${view.label}，点击切换`}
             aria-haspopup="menu" aria-expanded={viewMenu !== null} onClick={() => {
