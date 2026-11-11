@@ -173,9 +173,8 @@ async fn trust(mgr: &SshManager, host_id: &str) {
     assert!(fp.starts_with("SHA256:"), "指纹形态: {fp}");
 }
 
-/// 端到端主干：open（建连+认证+PTY+shell）→ write → 回显 read → drop 关闭。
 #[tokio::test]
-async fn open_write_read_roundtrip() {
+async fn concurrent_first_open_keeps_shell_usable() {
     let dir = std::env::temp_dir().join(format!("ss-ssh-test-{}", std::process::id()));
     std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -185,24 +184,36 @@ async fn open_write_read_roundtrip() {
     mgr.update_registry(vec![record("sshdev1", &host, port)]);
     trust(&mgr, "sshdev1").await;
 
-    let m = Arc::clone(&mgr);
-    let mut io = tokio::task::spawn_blocking(move || {
-        m.open_blocking("sshdev1", "shell", &SerialConfig::default())
-    })
-    .await
-    .unwrap()
-    .expect("open 失败");
-
-    // PortIo 是同步阻塞接口(write 内 recv_timeout 等回执)——必须 spawn_blocking,
-    // 在 current_thread 测试 runtime 的 async 上下文直接调会冻结唯一线程(命令循环停摆)。
-    let echoed = tokio::task::spawn_blocking(move || {
-        io.write_all(b"ping-ssh\n").unwrap();
-        read_until(&mut io, b"ping-ssh\n".len(), Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
-    assert_eq!(echoed, b"ping-ssh\n", "回显服务器应原样返回");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bus = Arc::new(EventBus::new(16));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        tokio::sync::broadcast::channel(16).0,
+        "inst-ssh-open",
+    ));
+    let manager = SerialManager::new(
+        bus,
+        Arc::new(ss_server::device::CompositeOpener::new(devices, mgr)),
+    );
+    let port = "sshdev1::shell";
+    let session = ss_core::SessionId::next();
+    let (first, duplicate) = tokio::join!(
+        manager.acquire(port.into(), SerialConfig::default(), session),
+        manager.acquire(port.into(), SerialConfig::default(), session),
+    );
+    use ss_core::AcquireResult::{Attached, Opened};
+    assert!(matches!(
+        (first.unwrap(), duplicate.unwrap()),
+        (Opened { holders: 1, .. }, Attached { holders: 1, .. })
+            | (Attached { holders: 1, .. }, Opened { holders: 1, .. })
+    ));
+    assert_eq!(
+        manager
+            .write(port.into(), bytes::Bytes::from_static(b"\r"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(manager.drain_buffer(port, 2_000).await.unwrap(), b"\r");
+    manager.release(port, session).await.unwrap();
 }
 
 /// 多实例：shell 与 shell@2 两条独立 PTY,各写各读互不串流。

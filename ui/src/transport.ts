@@ -607,13 +607,19 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
+    const state = this.ws.readyState;
+    if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) throw new Error("连接已断开");
     const wire = this.wireName(port);
-    // 先挂 controller 再发：确保 "acquired" 回复到达时 controller 已就位（不靠微任务时序）。
-    const result = new Promise<AcquiredResult>((resolve, reject) => {
-      this.openResolvers.set(wire, { resolve, reject });
+    return new Promise<AcquiredResult>((resolve, reject) => {
+      const request = { resolve, reject };
+      this.openResolvers.set(wire, request);
+      // A disconnect can reject the request before send finishes waiting for the handshake.
+      void this.send(JSON.stringify({ action: "open", port: wire, config })).catch((error) => {
+        if (this.openResolvers.get(wire) !== request) return;
+        this.openResolvers.delete(wire);
+        reject(error);
+      });
     });
-    await this.send(JSON.stringify({ action: "open", port: wire, config }));
-    return result;
   }
   async close(port: string) {
     await this.send(JSON.stringify({ action: "close", port: this.wireName(port) }));
