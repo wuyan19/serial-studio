@@ -802,7 +802,7 @@ function SshHostForm({
 }: {
   /** 编辑时的原设备；添加为 null。 */
   initial: SshHost | null;
-  /** 既有设备（重复地址校验；编辑时排除自身）。 */
+  /** 既有设备（重复校验 user@host:port；编辑时排除自身）。 */
   existing: SshHost[];
   onBack: () => void;
   /** 左侧退出按钮文案：落点是回列表传「返回」，直接关弹窗传「关闭」。 */
@@ -822,7 +822,7 @@ function SshHostForm({
   // 编辑且原认证为密码时才有已存密码；切到密码方式且无存货则必须输入
   const savedPassword = initial?.auth.type === "password" ? initial.auth.password : "";
   const others = existing.filter((h) => h.id !== initial?.id);
-  const dup = host.trim() !== "" && others.some((h) => h.host === host.trim() && h.port === port);
+  const dup = host.trim() !== "" && others.some((h) => h.host === host.trim() && h.port === port && h.username === username.trim());
   const missingPassword = authType === "password" && password === "" && savedPassword === "";
   const invalid =
     host.trim() === "" ||
@@ -954,7 +954,7 @@ function SshHostForm({
         )}
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
-            已存在同地址设备 {host.trim()}:{port}，无需重复添加。
+            已存在相同设备 {username.trim()}@{host.trim()}:{port}，无需重复添加。
           </p>
         )}
         <div className="btn-row">
