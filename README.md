@@ -10,12 +10,14 @@
 ![React](https://img.shields.io/badge/React-18-61dafb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**A multi-form serial-port terminal — desktop, web, and remote. Built with Tauri + Rust + React.**
+**A device-debugging workbench — serial & SSH terminals, macros & scripting, MCP for AI agents.
+Desktop, web, and remote devices. Built with Tauri + Rust + React.**
 
-Serial Studio lets you talk to serial devices from a polished desktop app, from any
-browser on your network, or driven by an LLM over MCP — all backed by the same Rust core.
-Multiple clients can share a single port, you can script repetitive exchanges as macros,
-and label ports with device aliases.
+Serial Studio lets you talk to devices from a polished desktop app, from any
+browser on your network, or driven by an LLM over MCP — over serial, over SSH into
+remote Linux, or through boards cascaded in via the remote-device protocol — all backed
+by the same Rust core. Multiple clients can share a single port, you can script
+repetitive exchanges as macros, and label ports with device aliases.
 
 <p align="center"><img src="docs/screenshot.png" width="720" alt="Serial Studio screenshot"></p>
 
@@ -23,36 +25,43 @@ and label ports with device aliases.
 
 ## ✨ Features
 
-- **Multi-port terminal** — concurrent ports in tabs or split side-by-side (VS Code-style editor groups), powered by xterm.js.
+- **Multi-port terminal** — concurrent ports in tabs or split side-by-side, powered by xterm.js.
 - **Port sharing** — multiple windows / clients attach to the same port. The first opener's
   config wins; later clients join read/write. Force-close kicks every holder off.
 - **Macros** — step sequences (`send` / `delay` / `expect` / `clear`), importable / exportable
   as JSON so they travel between machines.
 - **Scripting** — full JS control flow (retry / branching / loops / parsing) for what macros can't express. Runs on the open port; pass a port arg to drive several ports from one script. Declare runtime parameters and they're collected in a popup, so reruns need no code edits.
+Running scripts can be paused and resumed.
 - **Port aliases** — label a port with the device it connects, e.g. `GPS (COM7)`.
+- **SSH terminals** — log into remote Linux (servers, routers, OpenWrt) side by side with
+  serial; a file panel prefers SFTP and falls back to an SSH compatibility mode for
+  BusyBox/Dropbear — browse, preview, drag-drop upload, folder download. Host
+  fingerprints verified.
+- **Remote device cascade** — register remote devices (a full serial-studio or a
+  few-dozen-KB bridge on the board); their ports appear locally as `nickname::port`,
+  addressable from the Web UI, scripts and MCP alike, and can cascade multiple levels.
 - **Three ways in:**
   - **Local** desktop app (IPC, bypasses the network entirely).
   - **Web** — open `http://host:port/` in a browser; the UI is embedded in the binary.
   - **Remote** — connect a desktop window to another machine's Serial Studio.
-- **MCP** — expose the serial port to LLMs (`serial_list` / `send` / `read` / `grep` /
-  `status` / `clear`), addressable by port name **or** alias.
+- **MCP** — expose ports to LLMs: 12 tools covering I/O, search, status and scripting,
+  addressable by port name **or** alias; remote-device ports included.
 - **Telnet** — works with classic terminal clients.
-- **Instrumented UI** — dark/light themes, in-terminal search (Ctrl+F), font zoom, RX/TX LEDs.
 
 ## 🧱 Architecture
 
 Control plane and data plane are deliberately separated:
 
 - **Control plane** (Tauri IPC) — settings, service lifecycle, alias & macro persistence.
-- **Data plane** (axum) — WebSocket, MCP, Telnet; all adapters over the same
-  `SerialManager` + `EventBus`.
+- **Data plane** (axum) — WebSocket, MCP, Telnet, SSH, remote-device cascade; the
+  serial side shares one `SerialManager` + `EventBus`.
 
 ### Crates
 
 | Crate | Role |
 |---|---|
-| `ss-core` | Serial manager: port ownership (acquire / release / force-close), RX buffer, macro runner. Pure runtime — no persistence, no UI. |
-| `ss-server` | axum WS / MCP / Telnet + embedded SPA (`rust-embed`). Shared by the Tauri shell and the standalone binary. |
+| `ss-core` | Serial manager: port ownership (acquire / release / force-close), RX buffer, macro runner, QuickJS script engine (with pause/resume). Pure runtime — no persistence, no UI. |
+| `ss-server` | axum WS / MCP / Telnet / SSH / remote-device cascade + embedded SPA (`rust-embed`). Shared by the Tauri shell and the standalone binary. |
 | `serial-studio` (`tauri-app`) | The Tauri shell — service supervisor + control-plane commands. |
 
 ## 🛠 Tech stack
@@ -105,9 +114,13 @@ Runtime config lives next to the binary:
 
 | File | Holds |
 |---|---|
-| `settings.json` | server listen address / WS port / Telnet port |
+| `settings.json` | server listen address / ports, `enable_scripting` and other switches |
 | `ports.json` | per-port metadata (aliases) |
 | `macros.json` | macros |
+| `scripts.json` | script library |
+| `remotes.json` | remote devices |
+| `groups.json` | port groups |
+| `ssh_hosts.json` / `ssh_known_hosts.json` | SSH hosts & fingerprints |
 
 ## 🤖 MCP
 
@@ -117,7 +130,8 @@ Runtime config lives next to the binary:
 both gated by `enable_scripting`), and 4 script library management (`serial_save_script`,
 `serial_get_script`, `serial_list_scripts`, `serial_delete_script` — data-only, not gated).
 The `port` argument accepts a real port name **or** an alias.
-A `serial_script_guide` prompt documents the scripting API and constraints.
+Two prompts: `serial_usage_guide` (tool workflow) and `serial_script_guide`
+(scripting API and constraints).
 
 ### Connect from Claude Code
 
@@ -159,9 +173,9 @@ the port can open / send to your serial ports and read their output. Bind to `12
 
 Remote JS scripting (WS `run_script` / MCP `serial_debug_script` + `serial_run_script`) is gated by `enable_scripting`
 in `settings.json`, **off by default**. When enabled, any reachable client can execute JS
-against your serial ports. The script sandbox only exposes the serial primitives
-(`send`/`expect`/`clear`/`sleep`) — there is no file, network, or process access — but it can
-still drive your devices arbitrarily and read their output. Keep it disabled on untrusted
+against your serial ports. The script sandbox exposes the serial primitives
+(`send`/`expect`/`clear`/`sleep`) **and host-file read/write** (`read_file`/`write_file`/
+`append_file` etc.) — there is no network or process access. Keep it disabled on untrusted
 networks.
 
 The script library tools (`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
@@ -175,8 +189,8 @@ rule applies.
 ```
 serial-studio/
 ├─ crates/
-│  ├─ core/        # ss-core: serial manager + port ownership + macros
-│  ├─ server/      # ss-server: axum WS/MCP/Telnet + embedded SPA
+│  ├─ core/        # ss-core: serial manager + port ownership + macros + script engine
+│  ├─ server/      # ss-server: axum WS/MCP/Telnet/SSH/device cascade + embedded SPA
 │  └─ tauri-app/   # serial-studio: Tauri shell (control plane)
 ├─ ui/             # React + TS + Vite frontend
 └─ Cargo.toml      # workspace

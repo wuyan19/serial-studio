@@ -10,10 +10,11 @@
 ![React](https://img.shields.io/badge/React-18-61dafb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**多形态串口通信工具 —— 本地桌面 / Web 浏览器 / 远程。基于 Tauri + Rust + React。**
+**设备调试工作台 —— 串口 / SSH 终端、宏与脚本、MCP 供 AI 接入。本地桌面 / Web 浏览器 / 远程设备。基于 Tauri + Rust + React。**
 
-Serial Studio 让你能从精致的桌面应用、局域网内任意浏览器、或由 LLM 经 MCP 驱动来收发串口数据
-——后端都是同一套 Rust 核心。多个客户端可共享同一端口，重复交互能写成宏，端口还能标注设备别名。
+Serial Studio 让你从桌面应用、局域网内任意浏览器，或由 LLM 经 MCP 驱动来调试设备——串口直连、
+SSH 登录远端 Linux、或把开发板经远程设备协议级联进来，后端都是同一套 Rust 核心。多个客户端可
+共享同一端口，重复交互能写成宏，端口还能标注设备别名。
 
 <p align="center"><img src="docs/screenshot.png" width="720" alt="Serial Studio 界面截图"></p>
 
@@ -21,36 +22,39 @@ Serial Studio 让你能从精致的桌面应用、局域网内任意浏览器、
 
 ## ✨ 功能特性
 
-- **多端口终端** —— 多端口并发，标签页切换或 VS Code 风格分栏并排，基于 xterm.js。
+- **多端口终端** —— 多端口并发，标签页切换或分栏并排，基于 xterm.js。
 - **端口共享** —— 多窗口 / 多客户端可 attach 到同一端口。首开者配置生效，后来者加入收发。
   强制关闭可踢掉所有持有者。
 - **宏** —— 步骤序列（`send` / `delay` / `expect` / `clear`），可导入 / 导出 JSON，
   跨机器分享。
-- **脚本** —— 宏不够用时用 JS 写完整控制流（重试 / 分支 / 循环 / 解析）。脚本跑在已打开的端口上，传可选 port 参数即可用一个脚本驱动多个串口；声明运行时参数后，运行时弹窗收集，换参数重跑无需改代码。
+- **脚本** —— 宏不够用时用 JS 写完整控制流（重试 / 分支 / 循环 / 解析）。脚本跑在已打开的端口上，传可选 port 参数即可用一个脚本驱动多个串口；声明运行时参数后，运行时弹窗收集，换参数重跑无需改代码。运行中可暂停 / 继续。
 - **串口别名** —— 给端口标注所连设备，如 `GPS (COM7)`。
+- **SSH 终端** —— 登录远端 Linux（服务器 / 路由器 / OpenWrt），终端与串口并列同窗；文件面板
+  优先 SFTP，BusyBox / Dropbear 自动回退 SSH 兼容模式，支持浏览、预览、拖拽上传与下载。
+- **远程设备级联** —— 注册远端设备（完整 serial-studio 或板上几十 KB 的 bridge），端口以
+  `昵称::端口名` 汇入本机，Web UI / 脚本 / MCP 统一寻址，可多级级联。
 - **三种使用形态：**
   - **本地** 桌面应用（IPC 直连，绕过网络）。
   - **Web** —— 浏览器开 `http://host:port/`，界面内嵌在二进制里。
   - **远程** —— 从桌面应用开一个远程窗口连到另一台机器的 Serial Studio。
-- **MCP** —— 把串口暴露给 LLM（`serial_list` / `send` / `read` / `grep` / `status` /
-  `clear`），可用端口名 **或别名** 寻址。
+- **MCP** —— 把端口暴露给 LLM：12 个工具覆盖读写、搜索、状态与脚本，可用端口名
+  **或别名** 寻址，远程设备端口同样直达。
 - **Telnet** —— 兼容老式终端客户端。
-- **仪器风 UI** —— 暗 / 亮主题、终端内搜索（Ctrl+F）、字体缩放、RX/TX 流量指示灯。
 
 ## 🧱 架构
 
 控制面和数据面刻意分离：
 
 - **控制面**（Tauri IPC）—— 配置、服务生命周期、别名与宏的持久化。
-- **数据面**（axum）—— WebSocket、MCP、Telnet；都是同一套 `SerialManager` + `EventBus`
-  之上的适配器。
+- **数据面**（axum）—— WebSocket、MCP、Telnet、SSH、远程设备级联；串口侧共用
+  同一套 `SerialManager` + `EventBus`。
 
 ### Crate 划分
 
 | Crate | 职责 |
 |---|---|
-| `ss-core` | 串口管理器：端口占有权（acquire / release / force-close）、接收缓冲、宏执行器。纯运行时——不碰持久化、不碰 UI。 |
-| `ss-server` | axum WS / MCP / Telnet + 内嵌 SPA（`rust-embed`）。Tauri 外壳和独立二进制共用。 |
+| `ss-core` | 串口管理器：端口占有权（acquire / release / force-close）、接收缓冲、宏执行器、QuickJS 脚本引擎（含暂停 / 继续）。纯运行时——不碰持久化、不碰 UI。 |
+| `ss-server` | axum WS / MCP / Telnet / SSH / 远程设备级联 + 内嵌 SPA（`rust-embed`）。Tauri 外壳和独立二进制共用。 |
 | `serial-studio`（`tauri-app`） | Tauri 外壳——服务监督 + 控制面命令。 |
 
 ## 🛠 技术栈
@@ -102,9 +106,13 @@ release 产物为 `serial-studio.exe`。
 
 | 文件 | 内容 |
 |---|---|
-| `settings.json` | 服务监听地址 / WS 端口 / Telnet 端口 |
+| `settings.json` | 服务监听地址 / 端口、`enable_scripting` 等开关 |
 | `ports.json` | 端口元数据（别名等） |
 | `macros.json` | 宏 |
+| `scripts.json` | 脚本库 |
+| `remotes.json` | 远程设备注册 |
+| `groups.json` | 端口分组 |
+| `ssh_hosts.json` / `ssh_known_hosts.json` | SSH 主机与指纹 |
 
 ## 🤖 MCP
 
@@ -114,7 +122,7 @@ release 产物为 `serial-studio.exe`。
 ——均受 `enable_scripting` 开关控制),4 个脚本库管理(`serial_save_script`、
 `serial_get_script`、`serial_list_scripts`、`serial_delete_script`——纯数据管理,
 不受开关限制)。`port` 参数可用真实端口名 **或别名**。
-`serial_script_guide` prompt 记录了脚本 API 与约束。
+两个 prompt：`serial_usage_guide`（工具面工作流）与 `serial_script_guide`（脚本 API 与约束）。
 
 ### 从 Claude Code 接入
 
@@ -154,8 +162,8 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 
 远程 JS 脚本执行（WS `run_script` / MCP `serial_debug_script`、`serial_run_script`）受
 `settings.json` 的 `enable_scripting` 开关控制，**默认关闭**。开启后任何可达客户端都能对
-串口执行 JS。沙箱只暴露串口原语（`send`/`expect`/`clear`/`sleep`）——无文件、网络、进程
-访问——但仍可任意驱动设备并读取输出。不可信网络请保持关闭。
+串口执行 JS。沙箱暴露串口原语（`send`/`expect`/`clear`/`sleep`）与**宿主机文件读写**
+（`read_file`/`write_file`/`append_file` 等），无网络、进程访问。不可信网络请保持关闭。
 
 脚本库四工具（`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
 `serial_delete_script`）属数据管理，**不受 `enable_scripting` 限制、始终可访问**：任何
@@ -167,8 +175,8 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 ```
 serial-studio/
 ├─ crates/
-│  ├─ core/        # ss-core: 串口管理器 + 端口占有权 + 宏
-│  ├─ server/      # ss-server: axum WS/MCP/Telnet + 内嵌 SPA
+│  ├─ core/        # ss-core: 串口管理器 + 端口占有权 + 宏 + 脚本引擎
+│  ├─ server/      # ss-server: axum WS/MCP/Telnet/SSH/设备级联 + 内嵌 SPA
 │  └─ tauri-app/   # serial-studio: Tauri 外壳（控制面）
 ├─ ui/             # React + TS + Vite 前端
 └─ Cargo.toml      # workspace
