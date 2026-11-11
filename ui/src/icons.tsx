@@ -133,6 +133,18 @@ export function IconSliders({ className }: IconProps) {
   );
 }
 
+/** Server stack — the 服务 settings category (listen / connection config). */
+export function IconServer({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="2.5" y="3" width="19" height="7.5" rx="2" />
+      <rect x="2.5" y="13.5" width="19" height="7.5" rx="2" />
+      <path d="M6.5 6.75h.01" />
+      <path d="M6.5 17.25h.01" />
+    </Svg>
+  );
+}
+
 /** Gear — used inside the manage menu for Settings. */
 export function IconGear({ className }: IconProps) {
   return (

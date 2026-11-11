@@ -17,7 +17,7 @@ import {
   openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus,
 } from "../updater";
 import { overlayClose, useDialogA11y } from "./primitives";
-import { IconCheck, IconClose, IconGear, IconInfo, IconKeyboard, IconPlug, IconShirt, IconWinMax, IconWinRestore } from "../icons";
+import { IconCheck, IconClose, IconGear, IconInfo, IconKeyboard, IconPlug, IconServer, IconShirt, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories, filterSettings,
   type FilteredCategory, type SettingItemDef, type SettingsCategoryId,
@@ -25,7 +25,7 @@ import {
 
 import "./settings-page.css";
 
-const CATEGORY_ICONS = { connection: <IconGear />, appearance: <IconShirt />, shortcuts: <IconKeyboard />, about: <IconInfo /> };
+const CATEGORY_ICONS = { connection: <IconServer />, appearance: <IconShirt />, shortcuts: <IconKeyboard />, about: <IconInfo /> };
 
 export function SettingsPage({
   initialCategory,

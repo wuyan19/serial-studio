@@ -87,7 +87,7 @@ export function buildSettingsCategories(showServer: boolean, desktop = isTauri()
   return [
     {
       id: "connection",
-      label: "设置",
+      label: "服务",
       description: showServer ? "本机服务监听配置，应用后热重启生效。" : "前端连接的 Serial Studio 服务，应用后重连。",
       keywords: ["connection", "server", "服务器", "端口", "串口服务", "服务", "连接"],
       items: connectionItems,
