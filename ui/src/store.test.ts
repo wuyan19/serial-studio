@@ -21,6 +21,18 @@ function withPorts(...pids: string[]): SessionState {
 }
 
 describe("port_acquired", () => {
+  it("uses the existing connection tab without switching away from the current tab", () => {
+    const pid = "ssh::shell";
+    let s = sessionReducer(withPorts("COM3"), { type: "port_open_started", pid, config: CFG });
+    expect(s.groups.g1.activePort).toBe(pid);
+    expect(s.openPorts).toEqual(["COM3"]);
+    s = sessionReducer(s, { type: "switch_tab", groupId: "g1", port: "COM3" });
+    s = sessionReducer(s, { type: "port_acquired", pid, config: CFG });
+    expect(s.groups.g1).toEqual({ id: "g1", ports: ["COM3", pid], activePort: "COM3" });
+    expect(s.openPorts).toEqual(["COM3", pid]);
+    expect(s.portAttempts.has(pid)).toBe(false);
+  });
+
   it("记录配置、追加 openPorts、进焦点 group 并设为活动端口", () => {
     const cfg = { baud_rate: 9600, data_bits: "eight", stop_bits: "one", parity: "none", flow_control: "none", line_ending: "lf" };
     const s = sessionReducer(initialSession, { type: "port_acquired", pid: "COM3", config: cfg });

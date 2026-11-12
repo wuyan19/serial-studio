@@ -1514,6 +1514,8 @@ button {
   background: var(--danger);
   box-shadow: none;
 }
+.tab[data-connection="opening"] .tab__dot { background: var(--warn); }
+.tab[data-connection="failed"] .tab__dot { background: var(--danger); }
 /* 重连按钮(仅断开 tab 条件渲染);复用 .tab__btn 基类,只覆盖 hover 色。 */
 .tab__btn--reconnect {
   color: var(--accent);
@@ -1967,6 +1969,57 @@ button {
   padding: 0 24px;
   overflow: hidden;
 }
+.term-connection {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  overflow: auto;
+}
+.term-connection[data-state="disconnected"] {
+  /* Keep the card above xterm's selection and decorations while history stays visible. */
+  z-index: 11;
+  pointer-events: none;
+}
+.term-connection[data-state="disconnected"] .term-connection__card { pointer-events: auto; }
+.term-connection__card {
+  width: min(100%, 360px);
+  padding: 16px;
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  overflow-wrap: anywhere;
+}
+.term-connection__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-weight: 600;
+}
+.term-connection__title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--danger);
+}
+.term-connection__spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--hairline);
+  border-top-color: var(--warn);
+  border-radius: 50%;
+  animation: term-connection-spin 0.8s linear infinite;
+}
+@keyframes term-connection-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .term-connection__spinner { animation: none; }
+}
+.term-connection__target, .term-connection__error {
+  margin: 8px 0 0;
+  color: var(--ink-dim);
+}
+.term-connection__card .btn { margin-top: 12px; }
 .term-empty__icon {
   width: 96px;
   height: 96px;
