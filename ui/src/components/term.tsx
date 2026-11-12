@@ -5,12 +5,13 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
+import type { PortAttempt } from "../store";
 import { copyText, displayPortName, readClipboardText } from "../lib";
 import { installSelectionCopy } from "../term-selection";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
-import { IconChevronDown, IconChevronUp, IconClose, IconHub, IconPlug } from "../icons";
+import { IconAlert, IconChevronDown, IconChevronUp, IconClose, IconHub, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
 import { TabOverflow } from "./tab-overflow";
@@ -159,6 +160,7 @@ export function TermView({
     onReady({ term, fit, search });
     const stopSelectionCopy = installSelectionCopy(term, container);
     const disposable = term.onData((data) => {
+      if (disconnectedRef.current) return;
       // 任何输入(字符/回车/退格/控制序列)都回到底部：onData 只在真正产生待发送数据时触发，
       // 单独修饰键不会到这里，故在此滚底不会重现 scrollOnUserInput=true 的"按 Ctrl 误跳"。
       // 滚到底后设备回显到达会自然跟随。
@@ -249,9 +251,10 @@ export function TermView({
       { label: "复制", disabled: !sel, onSelect: () => void copyText(sel) },
       {
         label: "粘贴",
+        disabled: disconnected,
         onSelect: () => {
           void readClipboardText().then((text) => {
-            if (!text) return;
+            if (!text || disconnectedRef.current) return;
             // 粘贴等价键盘输入但不经 onData(Ctrl+V 原生粘贴才走 onData)，回底需单独补
             termRef.current?.scrollToBottom();
             onWrite(port, text);
@@ -404,6 +407,7 @@ export function GroupView({
   aliasOf,
   sourceLabelOf,
   disconnectedOf,
+  portAttempts,
   onReconnectTab,
   onSwitchTab,
   onCloseTab,
@@ -434,6 +438,7 @@ export function GroupView({
   sourceLabelOf?: (port: string) => string | undefined;
   /** 该端口是否处于"设备断开"态(灰显 + 显示重连按钮)。 */
   disconnectedOf?: (port: string) => boolean;
+  portAttempts?: ReadonlyMap<string, PortAttempt>;
   /** 重连断开的 tab。 */
   onReconnectTab?: (port: string) => void;
   onSwitchTab: (port: string) => void;
@@ -463,6 +468,10 @@ export function GroupView({
   fileTools?: ReactNode;
   filePanel?: ReactNode;
 }) {
+  const attempt = portAttempts?.get(group.activePort);
+  const connectionStatus = attempt?.status ?? (group.activePort && disconnectedOf?.(group.activePort) ? "disconnected" : undefined);
+  const connectionSource = connectionStatus && sourceLabelOf?.(group.activePort);
+  const connectionTitle = connectionStatus === "opening" ? "正在连接…" : connectionStatus === "failed" ? "连接失败" : "连接已断开";
   const termRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<HTMLDivElement>(null);
   const [tabDropIndex, setTabDropIndex] = useState<number | null>(null);
@@ -586,12 +595,14 @@ export function GroupView({
             const portName = displayPortName(port); // 多级复合键也只显示串口名(设备归属由 source 标签表达)
             const src = sourceLabelOf?.(port);
             const disconnected = disconnectedOf?.(port) ?? false;
+            const status = portAttempts?.get(port)?.status;
             return (
               <div
                 key={port}
                 className="tab"
                 data-active={isActive}
                 data-disconnected={disconnected ? "true" : undefined}
+                data-connection={status}
                 data-editing={editingThis ? "true" : undefined}
                 data-drop-before={tabDropIndex === index ? "true" : undefined}
                 data-drop-after={tabDropIndex === group.ports.length && index === group.ports.length - 1 ? "true" : undefined}
@@ -605,14 +616,15 @@ export function GroupView({
                 onClick={() => {
                   if (!editingThis) onSwitchTab(port);
                 }}
-                onDoubleClick={() => onRenameTab(port)}
+                onDoubleClick={() => { if (!status) onRenameTab(port); }}
                 onContextMenu={(e) => {
                   if (editingThis) return;
                   e.preventDefault();
+                  if (status) return;
                   onSwitchTab(port);
                   onTabContextMenu(port, { x: e.clientX, y: e.clientY });
                 }}
-                title={`切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
+                title={status === "opening" ? "正在连接…" : status === "failed" ? "连接失败" : disconnected ? "连接已断开" : `切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
               >
                 <span className="tab__dot" />
                 <span className="tab__name">
@@ -640,7 +652,7 @@ export function GroupView({
                 >
                   <IconClose />
                 </span>
-                {disconnected && (
+                {disconnected && !status && (
                   <span
                     className="tab__btn tab__btn--reconnect"
                     onClick={(e) => {
@@ -673,6 +685,26 @@ export function GroupView({
                 <span className="term-empty__row"><span>打开连接</span><HintKbd combo={bindings["port.palette"].combo} /></span>
                 <span className="term-empty__row"><span>执行宏</span><HintKbd combo={bindings["macro.palette"].combo} /></span>
                 <span className="term-empty__row"><span>执行脚本</span><HintKbd combo={bindings["script.palette"].combo} /></span>
+              </div>
+            </div>
+          )}
+          {connectionStatus && (
+            <div className="term-connection" data-state={connectionStatus}>
+              <div className="term-connection__card">
+                <div role={connectionStatus === "opening" ? "status" : "alert"}>
+                  <div className="term-connection__title">
+                    {connectionStatus === "opening" ? <span className="term-connection__spinner" aria-hidden="true" /> : <IconAlert />}
+                    {connectionTitle}
+                  </div>
+                  <p className="term-connection__target">
+                    <PortLabel name={displayPortName(group.activePort)} alias={aliasOf(group.activePort)} />
+                    {connectionSource && <> · {connectionSource}</>}
+                  </p>
+                  {attempt?.status === "failed" && <p className="term-connection__error">{attempt.message}</p>}
+                </div>
+                {connectionStatus !== "opening" && (
+                  <button className="btn" aria-keyshortcuts="Enter" onClick={() => onReconnectTab?.(group.activePort)}>重试连接</button>
+                )}
               </div>
             </div>
           )}

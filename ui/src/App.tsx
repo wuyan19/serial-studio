@@ -209,7 +209,7 @@ export default function App() {
   // ===== 会话状态（reducer）：transport 事件回调会读写的领域状态统一于此。
   // 事件回调只 dispatch（永不 stale），不再需要 per-state 的 ref 镜像。见 store.ts。
   const [session, dispatch] = useReducer(sessionReducer, initialSession);
-  const { portsByDev, devOnline, openPorts, disconnectedPorts, portConfigs, groups, layout, focusedGroupId } = session;
+  const { portsByDev, devOnline, openPorts, portAttempts, disconnectedPorts, portConfigs, groups, layout, focusedGroupId } = session;
   // 唯一的快照镜像：bindTransport（空依赖、只绑一次）读最新会话状态用（重连重放的端口清单）。
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -600,19 +600,37 @@ export default function App() {
   const sshHostOfPid = (pid: PortId): SshHost | undefined =>
     sshHosts.find((h) => h.id === (portRowOf(pid)?.device?.id ?? parsePortId(pid).devId));
 
-  const openingPortsRef = useRef(new Map<PortId, Transport>());
-  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
-   *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
-  const openPort = useCallback(async (pid: PortId, config: SerialConfig, groupId?: string) => {
+  const openingPortsRef = useRef(new Map<PortId, {
+    transport: Transport; config: SerialConfig; alias?: string; dismissed: boolean; releasing: boolean;
+  }>());
+  const openPort = useCallback(async (pid: PortId, config: SerialConfig, groupId?: string, alias?: string) => {
     const transport = cmdTransport();
-    if (!transport || openingPortsRef.current.get(pid) === transport) return undefined;
-    openingPortsRef.current.set(pid, transport);
+    const previous = openingPortsRef.current.get(pid);
+    if (previous && previous.transport === transport) {
+      if (previous.dismissed && !previous.releasing) {
+        previous.dismissed = false;
+        dispatch({ type: "port_open_started", pid, config: previous.config, alias: previous.alias, groupId });
+      }
+      return;
+    }
+    dispatch({ type: "port_open_started", pid, config, alias, groupId });
+    if (!transport) {
+      dispatch({ type: "port_open_failed", pid, message: "服务尚未连接，请连接后重试。" });
+      return;
+    }
+    const request = { transport, config, alias, dismissed: false, releasing: false };
+    const hadPort = sessionRef.current.openPorts.includes(pid);
+    openingPortsRef.current.set(pid, request);
+    let acquired = false;
     try {
-      // transport 命令面收完整 pid:本地 IPC 直传(Rust 规范化),WS 侧剥首段成远端线名
       const res = await transport.open(pid, config);
-      if (cmdTransport() !== transport) return undefined;
-      // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
-      dispatch({ type: "port_acquired", pid, config: res.config, groupId });
+      acquired = true;
+      if (request.dismissed || openingPortsRef.current.get(pid) !== request) return;
+      if (cmdTransport() !== transport) {
+        dispatch({ type: "port_open_failed", pid, message: "服务连接已变更，请重试。" });
+        return;
+      }
+      dispatch({ type: "port_acquired", pid, config: res.config });
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置。SSH 等非串口无
         // 波特率语义（线上 kind 判别；老 server 缺省按串口文案）。
@@ -624,20 +642,32 @@ export default function App() {
           8000
         );
       }
-      return res;
+      if (alias !== undefined && res.opened) {
+        void transport.setAlias(pid, alias).then(() => transport.list()).catch((e) => {
+          libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
+        });
+      } else if (alias !== undefined) {
+        libNotify("端口已被其它会话打开，本次别名未生效。");
+      }
     } catch (e) {
-      if (cmdTransport() !== transport) return undefined;
-      // SSH 分类错误(auth/host key)→ 交互闭环弹窗;其余原样 toast。
-      // setSshIssue 是稳定 setter,不破坏 openPort 身份链(勿引入状态依赖)。
-      const ssh = (e as OpenError).ssh;
+      if (request.dismissed || openingPortsRef.current.get(pid) !== request) return;
+      if (cmdTransport() !== transport) {
+        dispatch({ type: "port_open_failed", pid, message: "服务连接已变更，请重试。" });
+        return;
+      }
+      const ssh = (e as OpenError)?.ssh;
+      const detail = e instanceof Error ? e.message : String(e);
+      const message = ssh?.kind === "other" ? ssh.message : detail.replace(/^串口 .+? 打开失败: /, "");
+      dispatch({ type: "port_open_failed", pid, message });
       if (ssh && ssh.kind !== "other") {
         setSshIssue({ pid, error: ssh });
-      } else {
-        libError(String(e instanceof Error ? e.message : e));
       }
-      return undefined;
     } finally {
-      if (openingPortsRef.current.get(pid) === transport) openingPortsRef.current.delete(pid);
+      if (request.dismissed && (acquired || hadPort) && cmdTransport() === transport) {
+        request.releasing = true;
+        await transport.close(pid).catch(() => {});
+      }
+      if (openingPortsRef.current.get(pid) === request) openingPortsRef.current.delete(pid);
     }
   }, [libNotify, libError, cmdTransport, portRowOf]);
 
@@ -686,6 +716,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
  *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
   const prunePort = useCallback((pid: PortId) => {
+    const request = openingPortsRef.current.get(pid);
+    if (request) request.dismissed = true;
+    setSshIssue((issue) => issue && "pid" in issue && issue.pid === pid ? null : issue);
     terminalsRef.current.delete(pid);
     activityRef.current.delete(pid);
     // 记录会话收尾:等在途批落盘后,尾批积压 + flush + 摘句柄原子完成
@@ -883,7 +916,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const replayDisconnected = (upDev: string) => {
       const st = sessionRef.current;
       for (const pid of st.disconnectedPorts) {
-        if (parsePortId(pid).devId !== upDev) continue;
+        if (parsePortId(pid).devId !== upDev || !st.openPorts.includes(pid)) continue;
         void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
       }
     };
@@ -967,7 +1000,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
-        prunePort(wireToPid(devId, port));
+        const pid = wireToPid(devId, port);
+        if (sessionRef.current.openPorts.includes(pid) && !openingPortsRef.current.has(pid)) prunePort(pid);
         t.list();
       }),
       t.onPortDisconnected((port) => {
@@ -1271,7 +1305,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   }, [activePort]);
 
   /** 打开对话框确认：先 open，仅首开（opened=true）才落别名——与串口参数同逻辑（附加时别名忽略）。 */
-  const confirmOpen = async (config: SerialConfig, alias: string) => {
+  const confirmOpen = (config: SerialConfig, alias: string) => {
     const pid = pendingPort;
     if (!pid) return;
     saveConfig(config);
@@ -1281,27 +1315,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     // 把空串归一为清除)。此前"留空直接 return"把清空误当不设置,旧别名残留。
     const initial = (aliasOf(pid) ?? "").trim();
     const trimmed = alias.trim();
-    const res = await openPort(pid, config);
-    if (res?.opened) {
-      if (trimmed !== initial) {
-        try {
-          await cmdTransport()?.setAlias(pid, trimmed);
-          refreshPorts();
-        } catch (e) {
-          libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
-        }
-      }
-    } else if (res && !res.opened) {
-      // 附加：别名未生效（端口已被其它会话先开）
-      libNotify("端口已被其它会话打开，本次别名未生效。");
-    }
+    void openPort(pid, config, undefined, trimmed !== initial ? trimmed : undefined);
   };
 
   /** 关端口：释放占有权 + 移除 tab（prune_port 全量状态变更在 reducer，prunePort 补清终端资源）。 */
   const closePort = (pid: PortId) => {
     // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
     if (aliasEdit?.port === pid) setAliasEdit(null);
-    cmdTransport()?.close(pid);
+    if (!openingPortsRef.current.has(pid) && openPorts.includes(pid)) void cmdTransport()?.close(pid);
     prunePort(pid);
   };
 
@@ -1392,7 +1413,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const g = groups[node.groupId];
     if (!g) return null;
     const isFocused = node.groupId === focusedGroupId;
-    const fileTarget = sshTabTarget(portRowOf(g.activePort), Boolean(sshHostOfPid(g.activePort)));
+    const fileTarget = openPorts.includes(g.activePort) && !portAttempts.has(g.activePort)
+      ? sshTabTarget(portRowOf(g.activePort), Boolean(sshHostOfPid(g.activePort)))
+      : undefined;
     return (
       <SshFileWorkspace key={g.id} transport={cmdTransport()} hostId={fileTarget?.hostId}
         label={sshHostOfPid(g.activePort)?.nickname || fileTarget?.hostId || "SSH"}>
@@ -1420,6 +1443,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
             }}
             disconnectedOf={(pid) => disconnectedPorts.has(pid)}
+            portAttempts={portAttempts}
             onReconnectTab={reconnectPort}
             onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
             onCloseTab={closePort}
@@ -1458,22 +1482,28 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term)。成功即 port_acquired,
    *  断开标记由 reducer 一并清除(失败保持断开态待手动重试)。 */
-  const reconnectPort = (pid: PortId) =>
-    openPort(pid, portConfigs[pid] ?? DEFAULT_CONFIG);
+  const reconnectPort = (pid: PortId) => {
+    const attempt = portAttempts.get(pid);
+    return openPort(pid, attempt?.config ?? portConfigs[pid] ?? DEFAULT_CONFIG, undefined, attempt?.alias);
+  };
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。
    *  串口/非串口的分野读线上 kind(isNonSerialPid)——与设备表无关,三种形态统一,
    *  不再有"pid 首段 ∈ sshHosts"的形态敏感猜测。 */
   const triggerPort = (pid: PortId) => {
+    const existingGroup = groupOfPort.get(pid);
+    if (portAttempts.has(pid) && existingGroup) {
+      switchTabInGroup(existingGroup, pid);
+      return;
+    }
     if (disconnectedPorts.has(pid)) {
       void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
       return;
     }
     if (openPorts.includes(pid)) {
       // 已开：聚焦到端口所属 group 并切其 tab（端口可能不在当前聚焦 group，纯 switchPort 会 no-op）
-      const gid = groupOfPort.get(pid);
-      if (gid) switchTabInGroup(gid, pid);
+      if (existingGroup) switchTabInGroup(existingGroup, pid);
       else switchPort(pid);
       if (pid === activePort) focusTab(pid);
     } else {
@@ -1485,7 +1515,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
 
   const runMacro = (name: string) => {
-    if (!activePort) {
+    if (!activePort || portAttempts.has(activePort)) {
       libError("请先选择并打开一个串口");
       return;
     }
@@ -1502,8 +1532,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }
     // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
     // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
-    const mainPort = activePort ?? "";
-    const devId = activePort ? parsePortId(activePort).devId : isLocal ? "local" : (remotes[0]?.id ?? "");
+    const mainPort = portAttempts.has(activePort) ? "" : activePort;
+    const devId = mainPort ? parsePortId(mainPort).devId : isLocal ? "local" : (remotes[0]?.id ?? "");
     const transport = cmdTransport();
     if (!transport) {
       libError(isLocal ? "本地服务未就绪，无法运行脚本；请重启应用后重试" : "尚无可用连接，请先添加并连接一台远程设备");
@@ -1579,7 +1609,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       confirmText: "删除",
       tone: "danger",
       onConfirm: () => {
-        openPorts.filter((p) => parsePortId(p).devId === dev.id).forEach((pid) => prunePort(pid));
+        [...groupOfPort.keys()].filter((p) => parsePortId(p).devId === dev.id).forEach(prunePort);
         if (isLocal) {
           // 桌面:设备在后端——save_remotes 的落盘钩子触发 update_registry(断连+移除)
           dispatch({ type: "teardown_dev", devId: dev.id });
@@ -1709,7 +1739,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       if (!await commitSshHost({ ...host, auth: { type: "password", password } }, false)) return;
     }
     if ("hostId" in issue) await testSsh(host);
-    else await openPort(issue.pid, DEFAULT_CONFIG);
+    else if (sessionRef.current.portAttempts.has(issue.pid)) await reconnectPort(issue.pid);
   };
 
   /** 指纹信任确认:记录指纹(直连即断)并立即重开。 */
@@ -1727,7 +1757,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     }
     if (cmdTransport() !== transport) return;
     if ("hostId" in issue) await testSsh(host);
-    else await openPort(issue.pid, DEFAULT_CONFIG);
+    else if (sessionRef.current.portAttempts.has(issue.pid)) await reconnectPort(issue.pid);
   };
 
   /** 侧栏 SSH 卡菜单动作分发。 */
@@ -1764,7 +1794,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
    *  与「删除设备」的差别:保留设备定义,可随时重连。 */
   const disconnectRemote = (dev: RemoteDevice) => {
     const label = dev.nickname?.trim() || `${dev.host}:${dev.port}`;
-    const tabs = openPorts.filter((p) => parsePortId(p).devId === dev.id);
+    const tabs = [...groupOfPort.keys()].filter((p) => parsePortId(p).devId === dev.id);
     const doDisconnect = () => {
       if (isLocal) {
         // 后端断连;断开事件会经 devices-changed 到达,tab 保留(Rust 侧 drainer 标 disconnected)
@@ -1887,8 +1917,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const r = remotes.find((x) => x.id === devId);
     return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
   };
-  const activeConfig = activePort ? portConfigs[activePort] : undefined;
-  const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
+  const activeConfig = portAttempts.has(activePort) ? undefined : portConfigs[activePort];
+  const activeTerm = portAttempts.has(activePort) ? undefined : terminalsRef.current.get(activePort);
   // 活动端口拆段:devId 优先换设备昵称,查无昵称/非本表设备(web 形态级联中段)
   // 退回裸 id;本地口("local")无前缀。悬停补 id+地址——与侧栏设备组标签的
   // tooltip 同一套信息。
@@ -1920,6 +1950,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     return h ? `${h.username}@${h.host}:${h.port} · PTY` : "PTY";
   })();
 
+  const activeAttempt = portAttempts.get(activePort);
+  const canRetryActivePort = !!activePort && (activeAttempt
+    ? activeAttempt.status === "failed"
+    : disconnectedPorts.has(activePort));
+
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
     "search.open": () => {
@@ -1938,6 +1973,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     "activity.toggle-scripts": () => setActivity(activity === "scripts" ? null : "scripts"),
     "port.close-active": () => {
       if (activePort) closePort(activePort);
+    },
+    "port.reconnect": () => {
+      if (canRetryActivePort) void reconnectPort(activePort);
     },
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),
@@ -1998,6 +2036,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }
       const combo = eventToCombo(e);
       if (!combo) return;
+      if (
+        combo === "enter" && canRetryActivePort && !e.isComposing &&
+        !e.defaultPrevented && !document.querySelector(".ctx-menu")
+      ) {
+        const control = t?.closest?.('button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"]');
+        if (!control || control.matches('.port-item-row[data-active="true"] .port-item, .term-connection__card button')) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) dispatchAction("port.reconnect");
+          return;
+        }
+      }
       const hit = findAction(combo, "global");
       if (hit) {
         e.preventDefault();
@@ -2007,7 +2057,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [dispatchAction, modalOpen, menuOpen]);
+  }, [dispatchAction, modalOpen, menuOpen, canRetryActivePort]);
 
   // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)。
   // deps 只有 modalOpen:仅在模态关闭那一拍触发;闭包里的 activePort 即当时的活动端口。
@@ -2340,8 +2390,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 key={port}
                 port={port}
                 targetContainer={gid ? groupContainers.get(gid) ?? null : null}
-                visible={!!g && g.activePort === port}
-                focused={!!g && gid === focusedGroupId && g.activePort === port}
+                visible={!!g && g.activePort === port && !portAttempts.has(port)}
+                focused={!!g && gid === focusedGroupId && g.activePort === port && !portAttempts.has(port)}
                 onWrite={(p, data) => {
                   touch(p, "tx");
                   cmdTransport()?.write(p, data);

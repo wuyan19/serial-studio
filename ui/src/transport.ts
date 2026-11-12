@@ -406,13 +406,14 @@ export class RemoteTransport extends TransportEventBase implements Transport {
             message: msg.message as string,
             ssh: msg.ssh as SshOpenError | undefined,
           };
-          this.handlers.error.forEach((cb) => cb(msg.message));
           // 在途 open 的失败回执(port 匹配 wire name)→ reject 该 open(此前 Promise
           // 永悬,认证失败只 toast 不闭环)
           const wire = typeof msg.port === "string" ? msg.port : null;
           if (wire && this.openResolvers.has(wire)) {
             this.openResolvers.get(wire)!.reject(Object.assign(new Error(openErr.message), openErr));
             this.openResolvers.delete(wire);
+          } else {
+            this.handlers.error.forEach((cb) => cb(msg.message));
           }
           break;
         }

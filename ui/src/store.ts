@@ -15,6 +15,11 @@ import { parsePortId, wireToPid } from "./lib";
 import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
 import type { Group, PaneHalf, PaneNode, PortId, PortInfo, PortRow, SerialConfig } from "./types";
 
+export type PortAttempt = { config: SerialConfig; alias?: string } & (
+  | { status: "opening" }
+  | { status: "failed"; message: string }
+);
+
 export interface SessionState {
   /** 按设备域分桶的端口列表（key=devId："local"/远程设备 UUID/窗口 "remote"）。
    *  桶内条目带 ingest 定型的 pid（单源，消费方不再各自反算）。 */
@@ -23,6 +28,7 @@ export interface SessionState {
   devOnline: Record<string, boolean>;
   /** 本会话打开的端口复合键，有序。 */
   openPorts: PortId[];
+  portAttempts: ReadonlyMap<PortId, PortAttempt>;
   /** 设备断开(USB 拔出/WS 断连)但 tab 保留的端口——可重连。 */
   disconnectedPorts: Set<PortId>;
   /** 端口实际生效的配置（acquire 结果），key=PortId。 */
@@ -41,6 +47,7 @@ export const initialSession: SessionState = {
   portsByDev: {},
   devOnline: {},
   openPorts: [],
+  portAttempts: new Map(),
   disconnectedPorts: new Set(),
   portConfigs: {},
   groups: { g1: { id: "g1", ports: [], activePort: "" } },
@@ -60,6 +67,8 @@ export type SessionAction =
   | { type: "port_opened_evt"; devId: string; port: string }
   /** 设备物理断开（USB 拔出）→ 保留 tab，仅标记断开待重连。 */
   | { type: "port_disconnected_evt"; devId: string; port: string }
+  | { type: "port_open_started"; pid: PortId; config: SerialConfig; alias?: string; groupId?: string }
+  | { type: "port_open_failed"; pid: PortId; message: string }
   /** Acquire uses an optional source group so asynchronous duplication preserves its destination. */
   | { type: "port_acquired"; pid: PortId; config: SerialConfig; groupId?: string }
   /** 移除端口（用户主动关 + 远端被关共用）：清 openPorts/portConfigs/groups/layout。 */
@@ -79,6 +88,21 @@ export type SessionAction =
 function groupOf(groups: Record<string, Group>, pid: PortId): string | undefined {
   for (const g of Object.values(groups)) if (g.ports.includes(pid)) return g.id;
   return undefined;
+}
+
+function addTab(s: SessionState, pid: PortId, groupId?: string): SessionState["groups"] {
+  if (groupOf(s.groups, pid)) return s.groups;
+  const group = (groupId && s.groups[groupId]) || s.groups[s.focusedGroupId];
+  return group
+    ? { ...s.groups, [group.id]: { ...group, ports: [...group.ports, pid], activePort: pid } }
+    : s.groups;
+}
+
+function clearAttempt(s: SessionState, pid: PortId): SessionState["portAttempts"] {
+  if (!s.portAttempts.has(pid)) return s.portAttempts;
+  const attempts = new Map(s.portAttempts);
+  attempts.delete(pid);
+  return attempts;
 }
 
 /** Preserve terminal ownership while reordering tabs or moving between panes. */
@@ -180,6 +204,19 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
       return { ...s, disconnectedPorts };
     }
 
+    case "port_open_started": {
+      const { pid, config, alias, groupId } = a;
+      const portAttempts = new Map(s.portAttempts).set(pid, { status: "opening", config, alias });
+      return { ...s, portAttempts, groups: addTab(s, pid, groupId) };
+    }
+
+    case "port_open_failed": {
+      const attempt = s.portAttempts.get(a.pid);
+      if (attempt?.status !== "opening") return s;
+      const portAttempts = new Map(s.portAttempts).set(a.pid, { ...attempt, status: "failed", message: a.message });
+      return { ...s, portAttempts };
+    }
+
     case "port_acquired": {
       const { pid, config } = a;
       const openPorts = s.openPorts.includes(pid) ? s.openPorts : [...s.openPorts, pid];
@@ -188,27 +225,14 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
       const disconnectedPorts = s.disconnectedPorts.has(pid)
         ? new Set([...s.disconnectedPorts].filter((p) => p !== pid))
         : s.disconnectedPorts;
-      // Preserve existing ownership on reconnect; only new tabs use the requested destination.
-      const targetGroupId = a.groupId && s.groups[a.groupId] ? a.groupId : s.focusedGroupId;
-      const cur = s.groups[targetGroupId];
-      const alreadyGrouped = groupOf(s.groups, pid) !== undefined;
-      const groups = cur && !alreadyGrouped
-        ? {
-            ...s.groups,
-            [targetGroupId]: {
-              ...cur,
-              ports: cur.ports.includes(pid) ? cur.ports : [...cur.ports, pid],
-              activePort: pid,
-            },
-          }
-        : s.groups;
-      return { ...s, openPorts, portConfigs, disconnectedPorts, groups };
+      return { ...s, openPorts, portConfigs, disconnectedPorts, groups: addTab(s, pid, a.groupId), portAttempts: clearAttempt(s, pid) };
     }
 
     case "prune_port": {
       const pid = a.pid;
       const gid = groupOf(s.groups, pid);
       const openPorts = s.openPorts.filter((p) => p !== pid);
+      const portAttempts = clearAttempt(s, pid);
       const portConfigs = { ...s.portConfigs };
       delete portConfigs[pid];
       const disconnectedPorts = s.disconnectedPorts.has(pid)
@@ -216,7 +240,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
         : s.disconnectedPorts;
       // 顺带清断开标记（有意修正）：原实现不删，用户关掉"断开待重连"的 tab 后，
       // 设备重连时会按重放集合把这个已关的端口重新打开（僵尸复活）。
-      if (!gid) return { ...s, openPorts, portConfigs, disconnectedPorts }; // 不在任何 group（异常）
+      if (!gid) return { ...s, openPorts, portConfigs, disconnectedPorts, portAttempts };
       const cur = s.groups[gid];
       const rest = cur.ports.filter((p) => p !== pid);
       const groups = { ...s.groups };
@@ -230,7 +254,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
         delete groups[gid];
         layout = leafGroupIds(s.layout).length <= 1 ? s.layout : removeLeaf(s.layout, gid) ?? s.layout;
       }
-      return { ...s, openPorts, portConfigs, disconnectedPorts, groups, layout };
+      return { ...s, openPorts, portConfigs, disconnectedPorts, portAttempts, groups, layout };
     }
 
     case "set_focused_group":
