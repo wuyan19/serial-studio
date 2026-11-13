@@ -1,6 +1,6 @@
 /** 终端区：xterm 实例池（TermView，DOM reparent 跨 group 保 scrollback）、
 editor group（标签栏 + 终端区 + 拖拽分栏）、终端内搜索条。 */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -26,12 +26,14 @@ const HintKbd = ({ combo }: { combo: string }) => (combo ? <kbd>{formatCombo(com
 const MONO_STACK =
   "'IBM Plex Mono', 'Cascadia Mono', 'JetBrains Mono', Consolas, ui-monospace, monospace";
 
-function termThemeFor(t: Theme) {
-  return themeDefOf(t).term;
+function termThemeFor(t: Theme, cursorColor?: string) {
+  const theme = themeDefOf(t).term;
+  return cursorColor ? { ...theme, cursor: cursorColor } : theme;
 }
 
 export function TermView({
   port,
+  cursorColor,
   visible,
   focused,
   targetContainer,
@@ -44,6 +46,7 @@ export function TermView({
   recCtl,
 }: {
   port: string;
+  cursorColor?: string;
   visible: boolean;
   focused: boolean;
   /** 所属 group 的终端容器：本组件根 div 用 appendChild 挪进去（DOM reparent）。
@@ -111,7 +114,7 @@ export function TermView({
       lineHeight: 1.3,
       cursorBlink: true,
       cursorStyle: "bar",
-      theme: termThemeFor(getTheme()),
+      theme: termThemeFor(getTheme(), cursorColor),
       allowProposedApi: true,
       scrollback: 10000,
       // 保持关闭：xterm 默认会因任意 keydown(含单独按 Ctrl)把滚动位置打回最新，属误触。
@@ -205,10 +208,12 @@ export function TermView({
 
   // 主题切换 → 同步 xterm canvas 配色（canvas 不吃 CSS 变量）
   useEffect(() => {
-    return subscribe((t) => {
-      if (termRef.current) termRef.current.options.theme = termThemeFor(t);
-    });
-  }, []);
+    const apply = (theme: Theme) => {
+      if (termRef.current) termRef.current.options.theme = termThemeFor(theme, cursorColor);
+    };
+    apply(getTheme());
+    return subscribe(apply);
+  }, [cursorColor, port]);
 
   // 字号变化（Ctrl + +/-/0）→ 应用到本终端并 fit() 重排列数
   useEffect(() => {
@@ -405,6 +410,7 @@ export function GroupView({
   focused,
   aliasEditTab,
   aliasOf,
+  tabColorOf,
   sourceLabelOf,
   disconnectedOf,
   portAttempts,
@@ -434,6 +440,7 @@ export function GroupView({
   focused: boolean;
   aliasEditTab: { port: string } | null;
   aliasOf: (port: string) => string | undefined;
+  tabColorOf?: (port: string) => string | undefined;
   /** Tab 来源标识（多设备时非本地端口后缀设备昵称/地址）；undefined = 不显示。 */
   sourceLabelOf?: (port: string) => string | undefined;
   /** 该端口是否处于"设备断开"态(灰显 + 显示重连按钮)。 */
@@ -596,10 +603,12 @@ export function GroupView({
             const src = sourceLabelOf?.(port);
             const disconnected = disconnectedOf?.(port) ?? false;
             const status = portAttempts?.get(port)?.status;
+            const tabColor = tabColorOf?.(port);
             return (
               <div
                 key={port}
                 className="tab"
+                style={tabColor ? { "--tab-accent": tabColor } as CSSProperties : undefined}
                 data-active={isActive}
                 data-disconnected={disconnected ? "true" : undefined}
                 data-connection={status}

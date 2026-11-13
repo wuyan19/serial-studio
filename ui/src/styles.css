@@ -1458,7 +1458,7 @@ button {
 .tab[data-active="true"] {
   color: var(--workspace-tab-active-ink, var(--ink));
   background: var(--workspace-tab-active-bg, var(--term-bg));
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--tab-accent, var(--accent));
 }
 .tab[data-drop-before="true"] { box-shadow: inset 2px 0 0 var(--accent); }
 .tab[data-drop-after="true"] { box-shadow: inset -2px 0 0 var(--accent); }
@@ -4409,3 +4409,21 @@ button {
   min-height: 0;
 }
 .ssh-files-slot > .ssh-files { max-width: 100%; }
+
+.connection-color-row,
+.connection-color-row label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.connection-color-row { margin-top: 12px; }
+.connection-color-row label { flex: 1; justify-content: space-between; }
+.connection-color-row input[type="color"] {
+  width: 38px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
