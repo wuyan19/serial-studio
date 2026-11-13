@@ -1,0 +1,18 @@
+.access-settings {
+  display: grid;
+  gap: 10px;
+}
+.access-settings fieldset { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.access-settings__field { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr); gap: 8px; align-items: center; }
+.access-settings__field :is(.field, .field-select) { width: 100%; }
+.access-settings__targets { display: grid; gap: 4px; max-height: 180px; overflow: auto; padding: 6px; border: 1px solid var(--hairline-soft); border-radius: var(--r-sm); }
+.access-settings__targets label { padding: 2px 4px; }
+.access-settings__targets small { color: var(--ink-dim); }
+.access-settings__code { display: grid; gap: 8px; }
+.access-settings__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.access-settings__actions code { color: var(--ink); font: 600 1.25em var(--font-mono); letter-spacing: .14em; }
+.access-dialog__field { display: grid; gap: 6px; margin-top: 12px; }
+.access-dialog__field .field { width: 100%; }
+.access-locked { color: var(--warn); white-space: nowrap; }
+.access-banner { padding: 6px 10px; background: var(--surface-2); color: var(--ink-dim); font-size: var(--fs-sm); }
+.access-banner button { margin-left: 8px; }

@@ -64,6 +64,8 @@ import { sharedLibrarySource } from "./shared-library";
 import type { DeviceShareAddress } from "./device-share";
 import { useShareClipboard } from "./use-share-clipboard";
 import { DeviceShareDialog } from "./components/device-share";
+import { AccessDialog } from "./components/access-dialog";
+import { accessOrigin, DEFAULT_ACCESS_PORT, fetchAccessStatus, logoutWebAccess, verifyWebAccess, type PublicAccessStatus } from "./access";
 import {
   ConfirmDialog,
   ExportMacrosDialog,
@@ -191,7 +193,7 @@ const SCRIPT_SPEC: LibrarySpec<Script> = {
 
 /** Web/远程窗口：把单连接配置派生为单设备列表（id 固定 "remote"，无 localStorage 持久化）。 */
 function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
-  return [{ id: "remote", host: c.host, port: c.port }];
+  return [{ id: "remote", host: c.host, port: c.port, securePort: c.secure ? c.port : undefined }];
 }
 
 /**
@@ -237,6 +239,20 @@ export default function App() {
   const [pendingPort, setPendingPort] = useState<string | null>(null);
   const [serialConfig, setSerialConfig] = useState<SerialConfig>(loadConfig);
   const [connConfig, setConnConfig] = useState<ConnConfig>(initConn);
+  const [accessStatus, setAccessStatus] = useState<PublicAccessStatus | null>();
+  const [accessCheck, setAccessCheck] = useState(0);
+  const [accessError, setAccessError] = useState("");
+  const [remoteAccess, setRemoteAccess] = useState<RemoteDevice | null>(null);
+  const [webAccessOpen, setWebAccessOpen] = useState(false);
+  const secureWeb = !isTauri() && location.protocol === "https:";
+  const sameHttpService = location.protocol === "http:" && connConfig.host === location.hostname &&
+    connConfig.port === Number(location.port || 80);
+  const allowHttpVerification = !isTauri() && sameHttpService && accessStatus?.allow_http === true;
+  const canOpenHttps = accessStatus?.https_available !== false;
+  const showWebAccess = webAccessOpen && allowHttpVerification && !accessStatus?.authenticated;
+  const webAccessRequired = secureWeb && accessStatus?.enabled === true && !accessStatus.authenticated;
+  const webAccessWaiting = secureWeb && accessStatus === undefined;
+  const readOnlySsh = !isLocal && accessStatus?.enabled === true;
   // 已知远程设备列表：桌面端先空（mount effect 异步 invoke load_remotes 填充，见下）；
   // Web/远程窗口由 connConfig 派生单设备（不持久化）。
   const [remotes, setRemotes] = useState<RemoteDevice[]>(() =>
@@ -254,7 +270,7 @@ export default function App() {
   const [remotesReady, setRemotesReady] = useState(!isLocal);
   const [shareOpen, setShareOpen] = useState(false);
   const [sharedDevice, setSharedDevice] = useState<DeviceShareAddress | null>(null);
-  const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
+  const [remoteInput, setRemoteInput] = useState<{ host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean }>({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
   /** 通用设备详情弹窗目标(remote/ssh 按 id 实时查本地注册表;meta = 级联补充卡,
    *  按 device.id 从端口行实时查元数据;local = 本机)。 */
@@ -1118,6 +1134,38 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected]);
 
+  useEffect(() => {
+    if (isLocal) return;
+    let origin: string;
+    try { origin = secureWeb ? location.origin : accessOrigin(connConfig.host, connConfig.port, false); }
+    catch { return; }
+    if (!secureWeb && origin !== location.origin) {
+      setAccessStatus(null);
+      setWebAccessOpen(false);
+      return;
+    }
+    const controller = new AbortController();
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const status = await fetchAccessStatus(origin, controller.signal);
+        if (!controller.signal.aborted) {
+          setAccessStatus(status);
+          setAccessError("");
+        }
+      } catch {
+        if (secureWeb && !controller.signal.aborted) setAccessError("无法确认远程访问状态，请重试");
+      } finally { checking = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5_000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [isLocal, secureWeb, connConfig.host, connConfig.port, accessCheck]);
+
+  // Rebuild the WebSocket when an HTTP session gains or loses its authorization cookie.
+  const httpAuthenticated = allowHttpVerification && accessStatus?.authenticated === true;
   // 远程 Transport 引用计数（按需）——仅 Web/远程窗口形态:前端直连远端 ss。
   // 桌面形态远程设备已下沉到后端(DeviceClientManager),本地只有 "local" 一个 transport,
   // 设备连接/重连/断开全由 Rust 侧管理,前端经 devices 事件观察状态。
@@ -1125,7 +1173,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     if (isLocal) return;
     // Web/远窗是单 transport 形态:所有口(含远端设备桶)都走它,恒保持连接——
     // 活跃 tab 计数按 pid 首段统计,远端设备的口不会计入本设备 id,不能作拆连依据。
-    const wanted = new Set(remotes.map((d) => d.id));
+    const wanted = new Set(webAccessRequired || webAccessWaiting ? [] : remotes.map((d) => d.id));
     const map = transportsRef.current;
     const addrMap = remoteAddrRef.current;
     const teardown = (id: string) => {
@@ -1134,17 +1182,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       map.get(id)?.dispose();
       map.delete(id);
       addrMap.delete(id);
+      dispatch({ type: "dev_online", devId: id, online: false });
       dispatch({ type: "teardown_dev", devId: id });
     };
     const create = (d: RemoteDevice) => {
-      const t = new RemoteTransport(d.host, d.port, d.id);
+      const t = new RemoteTransport(d.host, d.securePort ?? d.port, d.id, d.securePort !== undefined);
       map.set(d.id, t);
-      addrMap.set(d.id, `${d.host}:${d.port}`);
+      addrMap.set(d.id, `${d.host}:${d.port}:${d.securePort ?? ""}:${httpAuthenticated}`);
       unsubsByDev.current.set(d.id, bindTransport(d.id, t));
     };
     for (const d of remotes) {
       const existing = map.get(d.id);
-      const addrChanged = addrMap.get(d.id) !== `${d.host}:${d.port}`;
+      const addrChanged = addrMap.get(d.id) !== `${d.host}:${d.port}:${d.securePort ?? ""}:${httpAuthenticated}`;
       if (wanted.has(d.id)) {
         if (!existing) create(d);
         else if (addrChanged) {
@@ -1156,17 +1205,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remotes, bindTransport]);
+  }, [remotes, bindTransport, webAccessRequired, webAccessWaiting, httpAuthenticated]);
 
   // Web/远程窗口：connConfig 变 → 同步单设备 remotes[0] 的 host/port（驱动上面的引用计数 effect 重连）。
   useEffect(() => {
     if (isLocal) return;
     setRemotes((prev) => {
       const r = prev[0];
-      if (r && r.host === connConfig.host && r.port === connConfig.port) return prev;
-      return [{ id: r?.id ?? "remote", host: connConfig.host, port: connConfig.port }];
+      const securePort = connConfig.secure ? connConfig.port : undefined;
+      if (r && r.host === connConfig.host && r.port === connConfig.port && r.securePort === securePort) return prev;
+      return [{ id: r?.id ?? "remote", host: connConfig.host, port: connConfig.port, securePort }];
     });
-  }, [isLocal, connConfig.host, connConfig.port]);
+  }, [isLocal, connConfig.host, connConfig.port, connConfig.secure]);
 
   useEffect(() => {
     if (!isLocal && !connected) return;
@@ -1483,6 +1533,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term)。成功即 port_acquired,
    *  断开标记由 reducer 一并清除(失败保持断开态待手动重试)。 */
   const reconnectPort = (pid: PortId) => {
+    const row = portRowOf(pid);
+    if (row?.locked) {
+      void openPortAccess(row);
+      return;
+    }
     const attempt = portAttempts.get(pid);
     return openPort(pid, attempt?.config ?? portConfigs[pid] ?? DEFAULT_CONFIG, undefined, attempt?.alias);
   };
@@ -1492,6 +1547,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
    *  串口/非串口的分野读线上 kind(isNonSerialPid)——与设备表无关,三种形态统一,
    *  不再有"pid 首段 ∈ sshHosts"的形态敏感猜测。 */
   const triggerPort = (pid: PortId) => {
+    const info = portInfoOf(pid);
+    if (info?.locked) {
+      void openPortAccess(info);
+      return;
+    }
     const existingGroup = groupOfPort.get(pid);
     if (portAttempts.has(pid) && existingGroup) {
       switchTabInGroup(existingGroup, pid);
@@ -1507,7 +1567,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       else switchPort(pid);
       if (pid === activePort) focusTab(pid);
     } else {
-      const info = portInfoOf(pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
       else if (isNonSerialPid(pid)) void openPort(pid, DEFAULT_CONFIG); // SSH 等非串口：直连(无配置框)
       else setPendingPort(pid); // 串口未开：弹配置框
@@ -1560,16 +1619,66 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。
    *  重复地址由 RemoteDialog 内联拦截(含 Enter 路径),此处再兜一层防御——
    *  校验只在 UI 入口做等于只拦鼠标不拦键盘。 */
-  const addRemoteDevice = (input: { host: string; port: number; nickname?: string }) => {
+  const openSecureAccess = async (suggestedPort?: number) => {
+    if (secureWeb) {
+      setAccessCheck((value) => value + 1);
+      return;
+    }
+    try {
+      const url = accessOrigin(connConfig.host, suggestedPort ?? accessStatus?.tls_port ?? DEFAULT_ACCESS_PORT, true);
+      if (isTauri()) {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(url);
+      } else {
+        window.location.assign(url);
+      }
+    } catch {
+      libError("无法打开目标设备的 HTTPS 验证页面");
+    }
+  };
+
+  const openPortAccess = async (row: PortInfo) => {
+    if (allowHttpVerification) {
+      if (httpAuthenticated) { refreshPorts(); return; }
+      setWebAccessOpen(true);
+      return;
+    }
+    if (row.access_tls_port !== undefined || (accessStatus?.enabled && canOpenHttps) || secureWeb) {
+      await openSecureAccess(row.access_tls_port);
+      return;
+    }
+    try {
+      const url = accessOrigin(connConfig.host, connConfig.port, false);
+      if (isTauri()) {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(url);
+      } else if (url !== location.origin) {
+        window.location.assign(url);
+      } else {
+        setAccessCheck((value) => value + 1);
+      }
+    } catch { libError("无法打开目标设备的验证页面"); }
+  };
+
+  const addRemoteDevice = (input: { host: string; port: number; nickname?: string; securePort?: number; verifyHttp?: boolean }) => {
     const host = input.host.trim();
     if (!host) return false;
     if (remotes.some((r) => r.host === host && r.port === input.port)) return false;
     const id = crypto.randomUUID();
-    const dev: RemoteDevice = { id, host, port: input.port, nickname: input.nickname?.trim() || undefined };
+    const dev: RemoteDevice = { id, host, port: input.port, nickname: input.nickname?.trim() || undefined, securePort: input.securePort, verifyHttp: input.verifyHttp };
     // 持久化在 updater 外调(StrictMode 双跑 updater,副作用内嵌会双发 save_remotes);
     // 重复地址已在上面拦截,这里基于当前闭包 remotes 计算即无并发风险。
     setRemotes((prev) => [...prev, dev]);
-    if (isLocal) persistRemotes([...remotes, dev]);
+    if (isLocal) {
+      if (dev.securePort !== undefined || dev.verifyHttp) {
+        void tauriInvoke("save_remotes", { remotes: [...remotes, dev] }).then(() => setRemoteAccess(dev)).catch((error) => {
+          setRemotes((current) => current.filter((item) => item.id !== dev.id));
+          libError(`保存远程设备失败：${String(error)}`);
+        });
+      } else {
+        void persistRemotes([...remotes, dev]);
+      }
+    }
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
     return true;
   };
@@ -1582,8 +1691,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const loadShareAddresses = useCallback(async (): Promise<DeviceShareAddress[]> => {
     if (isLocal) return tauriInvoke<DeviceShareAddress[]>("get_share_addresses");
     if (!connected) throw new Error("设备尚未连接，请连接后再分享");
-    return [{ host: connConfig.host, port: connConfig.port }];
-  }, [isLocal, connected, connConfig.host, connConfig.port]);
+    return [{ host: connConfig.host, port: connConfig.port, secure: connConfig.secure }];
+  }, [isLocal, connected, connConfig.host, connConfig.port, connConfig.secure]);
 
   /** 设备卡改名（空串 = 清除昵称，标题回退 host:port）。预校验 + updater 外持久化（同 addRemote）；
    * 落盘钩子 update_registry 对同 id 同地址仅昵称变 → 后端原地更新（连接不断，`新昵称::COM5` 寻址即时生效）。 */
@@ -1764,6 +1873,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
+    if (readOnlySsh && action !== "connect") return;
     if (action === "connect") void newShellSession(devId);
     else if (action === "edit") setSshEditDirect(host);
     else deleteSshHost(host);
@@ -1772,6 +1882,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 手动重连。桌面:后端删旧连接建新(device_connect);远程窗口/Web:前端重建 transport。 */
   const reconnectRemote = (dev: RemoteDevice) => {
     if (isLocal) {
+      if (dev.securePort !== undefined || dev.verifyHttp) { setRemoteAccess(dev); return; }
       void tauriInvoke("device_connect", { devId: dev.id }).catch((e) => libError(String(e)));
       return;
     }
@@ -1988,6 +2099,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     skillOpen ||
     pendingRun ||
     remoteOpen ||
+    remoteAccess ||
+    webAccessRequired ||
+    showWebAccess ||
     pendingPort ||
     aliasEdit ||
     exportMacrosOpen ||
@@ -2094,6 +2208,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     <div className="app">
       {/* 自绘标题栏:仅 Tauri 桌面(本地/远程窗口);Web 模式浏览器自带窗口管理 */}
       {isTauri() && <TitleBar />}
+      {!isLocal && !secureWeb && accessStatus?.enabled && !httpAuthenticated && <div className="access-banner">
+        {accessStatus.scope === "all" ? "此设备的连接需要验证" : "部分连接需要验证"}
+        {canOpenHttps && <button className="btn" onClick={() => void openSecureAccess()}>打开 HTTPS 验证页面</button>}
+        {allowHttpVerification && <button className="btn" onClick={() => setWebAccessOpen(true)}>通过 HTTP 验证</button>}
+      </div>}
+      {secureWeb && accessError && <div className="access-banner" role="alert">
+        {accessError}<button className="btn" onClick={() => setAccessCheck((value) => value + 1)}>重试</button>
+      </div>}
+      {(secureWeb || allowHttpVerification) && accessStatus?.enabled && accessStatus.authenticated && <div className="access-banner">
+        {httpAuthenticated ? "已通过 HTTP 验证远程访问" : "已验证远程访问"}
+        <button className="btn" onClick={() => void logoutWebAccess(allowHttpVerification).then(() => {
+          setAccessStatus((status) => status && { ...status, authenticated: false });
+          setAccessCheck((value) => value + 1);
+        }).catch((error: Error) => libError(error.message))}>退出验证</button>
+      </div>}
       <div className="app__body">
         <WorkspaceSidebar
           panel={sidebarPanel}
@@ -2105,7 +2234,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           failed={{ macros: macroFailed, scripts: scriptFailed }}
           query={sidebarQuery}
           onQuery={setSidebarQuery}
-          onNew={() => sidebarPanel === "ports" ? setConnectionLauncherOpen(true) : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
+          onNew={() => sidebarPanel === "ports"
+            ? readOnlySsh ? setPortPaletteOpen(true) : setConnectionLauncherOpen(true)
+            : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
           onRemote={isTauri() ? () => setRemoteOpen(true) : undefined}
           onShare={() => setShareOpen(true)}
           width={sidebarWidth}
@@ -2161,6 +2292,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onCancelAlias={() => setAliasEdit(null)}
               onForceClose={forceClosePort}
               onReconnectRemote={reconnectRemote}
+              onVerifyRemote={isLocal ? setRemoteAccess : undefined}
               onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
               onRenameRemote={renameRemote}
@@ -2176,7 +2308,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 )
               }
               onSshAction={onSshAction}
+              readOnlySsh={readOnlySsh}
               onNewSshTerminal={(pid) => {
+                const row = portRowOf(pid);
+                if (row?.locked) { void openPortAccess(row); return; }
                 const target = sshTabTarget(portRowOf(pid), Boolean(sshHostOfPid(pid)));
                 if (target) void newShellSession(target.hostId, target.base);
               }}
@@ -2511,6 +2646,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onRetrySrv={loadSrvSettings}
           showServer={isTauri() && !isRemote}
           onConnChange={(c) => {
+            if (secureWeb && (c.host !== location.hostname || c.port !== Number(location.port || 443))) {
+              try { window.location.assign(accessOrigin(c.host, c.port, true)); }
+              catch { libError("服务地址无效"); }
+              return;
+            }
             saveConn(c);
             setConnConfig(c);
             // 不关页：反馈走页内「已应用」脉冲,连接结果走 toast(成功/超时失败,见 pendingConn effects)
@@ -2590,7 +2730,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         message={`剪贴板中发现设备分享链接：${sharedDevice.host}:${sharedDevice.port}。是否添加到远程设备列表？`}
         confirmText="添加设备"
         onConfirm={() => {
-          if (!addRemoteDevice(sharedDevice)) libNotify("此设备已在远程设备列表中");
+          const input = sharedDevice.secure ? { ...sharedDevice, securePort: sharedDevice.port } : sharedDevice;
+          if (!addRemoteDevice(input)) libNotify("此设备已在远程设备列表中");
           setSharedDevice(null);
         }}
         onCancel={() => setSharedDevice(null)}
@@ -2602,8 +2743,32 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConfirm={addRemote}
           onCancel={() => setRemoteOpen(false)}
           existing={remotes.map((r) => `${r.host}:${r.port}`)}
+          allowSecure={isLocal}
         />
       )}
+      {(webAccessRequired || showWebAccess) && <AccessDialog label={location.host} insecure={showWebAccess}
+        onCancel={showWebAccess ? () => setWebAccessOpen(false) : undefined} onVerify={async (code) => {
+        await verifyWebAccess(code, allowHttpVerification);
+        const status = await fetchAccessStatus(location.origin);
+        if (!status?.authenticated) throw new Error("无法建立验证会话，请检查浏览器是否允许本站 Cookie");
+        setAccessStatus(status);
+        setWebAccessOpen(false);
+        setAccessCheck((value) => value + 1);
+      }} />}
+      {remoteAccess && <AccessDialog key={remoteAccess.id} label={remoteAccess.nickname || remoteAccess.host} desktop={remoteAccess}
+        onCancel={() => setRemoteAccess(null)} onVerify={async (code, options) => {
+        const current = remotesRef.current.find((item) => item.id === remoteAccess.id);
+        if (!current) throw new Error("此远程设备已移除，请重新添加");
+        if (options?.securePort !== current.securePort || Boolean(options?.verifyHttp) !== Boolean(current.verifyHttp)) {
+          const updated = remotesRef.current.map((item) => item.id === current.id ? { ...item, ...options } : item);
+          await tauriInvoke("save_remotes", { remotes: updated });
+          remotesRef.current = updated;
+          setRemotes(updated);
+        }
+        await tauriInvoke("verify_remote_access", { devId: current.id, code });
+        setRemoteAccess(null);
+        libNotify("远程设备已验证，正在连接…");
+      }} />}
       {/* 通用设备详情(remote/SSH/本机):按 id 实时查找,设备被删 → info 为空 → 不渲染 */}
       {deviceDetail && (() => {
         let info: DeviceDetailInfo | null = null;
@@ -2743,7 +2908,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         };
         return <PortDetailDialog info={info} onClose={() => setPortDetail(null)} />;
       })()}
-      {sshManagerOpen && (
+      {sshManagerOpen && !readOnlySsh && (
         <SshManagerDialog
           hosts={sshHosts}
           testOf={(id) => sshTests.get(id)}

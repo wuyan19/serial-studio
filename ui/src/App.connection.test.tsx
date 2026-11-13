@@ -10,11 +10,13 @@ class Socket {
   static OPEN = 1;
   static CONNECTING = 0;
   static current: Socket;
+  static urls: string[] = [];
   readyState = Socket.CONNECTING;
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
   sent: { action: string; port?: string; config?: unknown }[] = [];
-  constructor() { Socket.current = this; }
+  constructor(url: string) { Socket.current = this; Socket.urls.push(url); }
+  close() { this.readyState = 3; }
   open() { this.readyState = Socket.OPEN; this.onopen?.(); }
   send(data: string) { this.sent.push(JSON.parse(data)); }
   receive(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
@@ -36,6 +38,7 @@ let socket: Socket;
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
   vi.useFakeTimers();
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -142,4 +145,110 @@ it("shows disconnect and reconnect feedback over the same SSH terminal", async (
   expect(container.querySelector(".tab")).toBe(tab);
   expect(tab?.hasAttribute("data-disconnected")).toBe(false);
   expect(pressEnter(document.body).defaultPrevented).toBe(false);
+});
+
+it("waits for a protected HTTPS session before opening a secure WebSocket", async () => {
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  Socket.urls = [];
+  vi.stubGlobal("location", new URL("https://lab.example:18702/"));
+  let authenticated = false;
+  const fetcher = vi.fn(async (input: string, options?: RequestInit) => {
+    if (input === "/api/access/verify") {
+      expect(options).toMatchObject({ method: "POST", credentials: "same-origin", redirect: "error" });
+      expect(JSON.parse(String(options?.body))).toEqual({ code: "01234567" });
+      authenticated = true;
+      return new Response("{}", { status: 200 });
+    }
+    expect(input).toBe("https://lab.example:18702/api/access/status");
+    return new Response(JSON.stringify({ enabled: true, scope: "selected", tls_port: 18702, authenticated }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(<App />));
+  expect(Socket.urls).toEqual([]);
+  const form = container.querySelector<HTMLFormElement>('[aria-label="远程访问验证"] form')!;
+  const input = form.querySelector("input")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "01234567");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(Socket.urls).toEqual(["wss://lab.example:18702/ws?access_ui=1"]);
+  expect(container.querySelector('[aria-label="远程访问验证"]')).toBeNull();
+});
+
+it("redirects only locked connections to the advertised HTTPS port", async () => {
+  const assign = vi.fn();
+  vi.stubGlobal("location", Object.assign(new URL("http://localhost:3000/"), { assign }));
+  await act(async () => socket.receive({ type: "ports", ports: [{ ...ssh, locked: true, access_tls_port: 24443 }, serial] }));
+  const locked = container.querySelector<HTMLButtonElement>(".port-item-row--ssh .port-item")!;
+  expect(locked.textContent).toContain("需验证");
+  await act(async () => locked.click());
+  expect(assign).toHaveBeenCalledWith("https://localhost:24443");
+  expect(socket.sent.filter((msg) => msg.action === "open")).toHaveLength(0);
+
+  const available = [...container.querySelectorAll<HTMLElement>(".port-item")].find((item) => item.textContent?.includes("COM5"))!;
+  await act(async () => available.click());
+  expect(container.querySelector(".dialog")?.textContent).toContain("波特率");
+  expect(assign).toHaveBeenCalledTimes(1);
+});
+
+it("keeps unprotected HTTP connections available and verifies a locked connection in place", async () => {
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  Socket.urls = [];
+  const assign = vi.fn();
+  vi.stubGlobal("location", Object.assign(new URL("http://lab.example:18700/"), { assign }));
+  let authenticated = false;
+  const fetcher = vi.fn(async (input: string, options?: RequestInit) => {
+    if (input === "/api/access/verify") {
+      expect(options).toMatchObject({ method: "POST", credentials: "same-origin", redirect: "error" });
+      expect(JSON.parse(String(options?.body))).toEqual({ code: "01234567" });
+      authenticated = true;
+      return new Response("{}", { status: 200 });
+    }
+    if (input === "/api/access/logout") {
+      authenticated = false;
+      return new Response(null, { status: 204 });
+    }
+    expect(input).toBe("http://lab.example:18700/api/access/status");
+    return new Response(JSON.stringify({ enabled: true, scope: "selected", tls_port: 18702, allow_http: true, https_available: false, authenticated }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(<App />));
+  expect(Socket.urls).toEqual(["ws://lab.example:18700/ws?access_ui=1"]);
+  expect(container.querySelector('[aria-label="远程访问验证"]')).toBeNull();
+  expect(container.querySelector(".access-banner")?.textContent).not.toContain("打开 HTTPS");
+  socket = Socket.current;
+  await act(async () => {
+    socket.open();
+    socket.receive({ type: "ports", ports: [{ ...ssh, locked: true }, serial] });
+  });
+  const available = [...container.querySelectorAll<HTMLElement>(".port-item")].find((item) => item.textContent?.includes("COM5"))!;
+  await act(async () => available.click());
+  expect(container.querySelector(".dialog")?.textContent).toContain("波特率");
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".dialog button")].find((button) => button.textContent?.trim() === "取消")!.click());
+
+  const locked = container.querySelector<HTMLButtonElement>(".port-item-row--ssh .port-item")!;
+  await act(async () => locked.click());
+  const form = container.querySelector<HTMLFormElement>('[aria-label="远程访问验证"] form')!;
+  expect(form.querySelector('[role="note"]')?.textContent).toContain("明文传输");
+  const input = form.querySelector("input")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "01234567");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(container.querySelector('[aria-label="远程访问验证"]')).toBeNull();
+  expect(container.querySelector(".access-banner")?.textContent).toContain("已通过 HTTP 验证");
+  expect(Socket.urls).toEqual(["ws://lab.example:18700/ws?access_ui=1", "ws://lab.example:18700/ws?access_ui=1"]);
+  expect(assign).not.toHaveBeenCalled();
+
+  await act(async () => container.querySelector<HTMLButtonElement>(".access-banner button")!.click());
+  expect(container.querySelector(".access-banner")?.textContent).toContain("通过 HTTP 验证");
+  expect(Socket.urls).toHaveLength(3);
 });

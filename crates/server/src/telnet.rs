@@ -83,7 +83,18 @@ pub async fn run_telnet(addr: String, state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result<()> {
+async fn handle_client(stream: TcpStream, state: AppState) -> anyhow::Result<()> {
+    let mut policy = state.access.subscribe();
+    let revision = *policy.borrow_and_update();
+    if state.access.blocked_all() { return Ok(()); }
+    tokio::select! {
+        biased;
+        _ = policy.wait_for(|r| *r != revision) => Ok(()),
+        result = handle_session(stream, &state) => result,
+    }
+}
+
+async fn handle_session(mut stream: TcpStream, state: &AppState) -> anyhow::Result<()> {
     // telnet 协议协商
     let _ = stream.write_all(HANDSHAKE).await;
 
@@ -98,6 +109,7 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
             .collect();
     let open: Vec<(String, Option<String>)> = open_keys
         .into_iter()
+        .filter(|k| !crate::access_http::restricted(state, k))
         .map(|k| {
             let alias = aliases.get(&k).cloned().flatten();
             (k, alias)
@@ -150,8 +162,9 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
                 // 名称路径:canon_key 后须为已开且未断开的口
                 let key = state.manager.canon_key(typed);
                 if !key.is_empty()
-                    && state.manager.is_open(&key).await
-                    && !state.manager.is_disconnected(&key).await
+                    && !crate::access_http::restricted(state, &key)
+                    && state.manager.is_open_canonical(&key).await
+                    && !state.manager.is_disconnected_canonical(&key).await
                 {
                     // 菜单构建后新开的口不在 open 里,别名取不到则回退键本身
                     Some(
@@ -183,7 +196,8 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
 
     // 选中后统一复查(两条路径汇合):菜单是快照,选择瞬间口可能已被关或设备
     // 断开——不复查则 event_fut 订阅到不存在的口,会话表现为连上但完全无响应
-    if !state.manager.is_open(&port).await || state.manager.is_disconnected(&port).await {
+    if crate::access_http::restricted(state, &port)
+        || !state.manager.is_open_canonical(&port).await || state.manager.is_disconnected_canonical(&port).await {
         farewell(
             &mut stream,
             &format!("Port {} is no longer open. Closing.\r\n", display),
@@ -215,7 +229,7 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
             let normalized = normalize_line_endings(&filtered, &mut pending_cr);
             if !normalized.is_empty() {
                 let _ = mgr
-                    .write(port_for_read.clone(), bytes::Bytes::from(normalized))
+                    .write_canonical(port_for_read.clone(), bytes::Bytes::from(normalized))
                     .await;
             }
         }
@@ -231,7 +245,7 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> anyhow::Result
                     let normalized = normalize_line_endings(&filtered, &mut pending_cr);
                     if !normalized.is_empty() {
                         let _ = mgr
-                            .write(port_for_read.clone(), bytes::Bytes::from(normalized))
+                            .write_canonical(port_for_read.clone(), bytes::Bytes::from(normalized))
                             .await;
                     }
                 }
