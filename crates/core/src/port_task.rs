@@ -182,6 +182,9 @@ pub async fn run(
         tokio::select! {
             cmd = command_rx.recv() => match cmd {
                 Some(PortCommand::Write(data, response_tx)) => {
+                    if response_tx.is_closed() {
+                        continue;
+                    }
                     let port = Arc::clone(&write_port);
                     let result = tokio::task::spawn_blocking(move || {
                         let mut guard = port.lock().unwrap();

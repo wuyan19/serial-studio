@@ -192,7 +192,12 @@ impl SerialManager {
         config: SerialConfig,
         session: SessionId,
     ) -> Result<AcquireResult, SerialError> {
-        let port = self.canon_key(&port);
+        self.acquire_canonical(self.canon_key(&port), config, session).await
+    }
+
+    pub async fn acquire_canonical(
+        &self, port: String, config: SerialConfig, session: SessionId,
+    ) -> Result<AcquireResult, SerialError> {
         self.maybe_spawn_drainer(); // 首次 acquire 启动 drainer(new() 不能 spawn:无 reactor 会 panic)
 
         // Concurrent opens of the same port can replace its underlying SSH channel.
@@ -396,8 +401,12 @@ impl SerialManager {
         port: &str,
         session: SessionId,
     ) -> Result<ReleaseOutcome, SerialError> {
-        let key = self.canon_key(port);
-        let port = key.as_str();
+        self.release_canonical(&self.canon_key(port), session).await
+    }
+
+    pub async fn release_canonical(
+        &self, port: &str, session: SessionId,
+    ) -> Result<ReleaseOutcome, SerialError> {
         // 锁内：判定效果；末位则取出 handle 以便锁外拆毁
         let (outcome, mut teardown_handle) = {
             let mut ports = self.ports.lock().await;
@@ -457,7 +466,7 @@ impl SerialManager {
         let mut results = Vec::with_capacity(held.len());
         for port in held {
             // release 仅在并发被拆时返回 NotOpen（端口已不在），忽略即可
-            if let Ok(outcome) = self.release(&port, session).await {
+            if let Ok(outcome) = self.release_canonical(&port, session).await {
                 results.push((port, outcome));
             }
         }
@@ -512,11 +521,14 @@ impl SerialManager {
 
     /// 端口的当前持有者数量（给 UI/status 用）。
     pub async fn holder_count(&self, port: &str) -> Option<usize> {
-        let key = self.canon_key(port);
+        self.holder_count_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn holder_count_canonical(&self, port: &str) -> Option<usize> {
         self.ports
             .lock()
             .await
-            .get(key.as_str())
+            .get(port)
             .map(|h| h.holders.len())
     }
 
@@ -538,7 +550,10 @@ impl SerialManager {
 
     /// 写入数据。
     pub async fn write(&self, port: String, data: Bytes) -> Result<usize, SerialError> {
-        let port = self.canon_key(&port);
+        self.write_canonical(self.canon_key(&port), data).await
+    }
+
+    pub async fn write_canonical(&self, port: String, data: Bytes) -> Result<usize, SerialError> {
         let command_tx = {
             let ports = self.ports.lock().await;
             let handle = ports
@@ -570,63 +585,72 @@ impl SerialManager {
 
     /// 端口是否已打开。
     pub async fn is_open(&self, port: &str) -> bool {
-        let key = self.canon_key(port);
-        self.ports.lock().await.contains_key(key.as_str())
+        self.is_open_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn is_open_canonical(&self, port: &str) -> bool {
+        self.ports.lock().await.contains_key(port)
     }
 
     /// 端口是否处于设备断开态(占有权在、物理层已释放,等 reopen)。
     pub async fn is_disconnected(&self, port: &str) -> bool {
-        let key = self.canon_key(port);
+        self.is_disconnected_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn is_disconnected_canonical(&self, port: &str) -> bool {
         self.ports
             .lock()
             .await
-            .get(key.as_str())
+            .get(port)
             .map(|h| h.disconnected)
             .unwrap_or(false)
     }
 
     // ===== 接收缓冲区方法（MCP / 宏用）=====
 
-    async fn get_rx_buffer(&self, port: &str) -> Result<Arc<RxBuffer>, SerialError> {
-        let key = self.canon_key(port);
+    async fn get_canonical_rx_buffer(&self, port: &str) -> Result<Arc<RxBuffer>, SerialError> {
         let ports = self.ports.lock().await;
         ports
-            .get(key.as_str())
+            .get(port)
             .map(|h| Arc::clone(&h.rx_buffer))
             .ok_or_else(|| SerialError::NotOpen(port.to_string()))
     }
 
     /// 返回端口配置（status 用）。
     pub async fn status(&self, port: &str) -> Option<SerialConfig> {
-        let key = self.canon_key(port);
+        self.status_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn status_canonical(&self, port: &str) -> Option<SerialConfig> {
         self.ports
             .lock()
             .await
-            .get(key.as_str())
+            .get(port)
             .map(|h| h.config.clone())
     }
 
     /// 端口的换行设置（send 用）。
     pub async fn port_line_ending(&self, port: &str) -> Option<crate::types::LineEnding> {
-        let key = self.canon_key(port);
+        self.port_line_ending_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn port_line_ending_canonical(&self, port: &str) -> Option<crate::types::LineEnding> {
         self.ports
             .lock()
             .await
-            .get(key.as_str())
+            .get(port)
             .map(|h| h.config.line_ending)
     }
 
     /// 高层发送：text/hex 编码 + 按端口 line_ending 追加换行 + write。
     /// 宏与 MCP 共用此入口，换行逻辑集中在此（透传的 WS/Telnet 不经过这里）。
-    pub async fn send(
-        &self,
-        port: &str,
-        data: &str,
-        format: &str,
-        auto_newline: bool,
-    ) -> Result<usize, SerialError> {
+    pub async fn send(&self, port: &str, data: &str, format: &str, auto_newline: bool) -> Result<usize, SerialError> {
+        self.send_canonical(&self.canon_key(port), data, format, auto_newline).await
+    }
+
+    pub async fn send_canonical(&self, port: &str, data: &str, format: &str, auto_newline: bool) -> Result<usize, SerialError> {
         let line_ending = self
-            .port_line_ending(port)
+            .port_line_ending_canonical(port)
             .await
             .ok_or_else(|| SerialError::NotOpen(port.to_string()))?;
         let bytes = crate::macros::encode_send(data, format, auto_newline, line_ending)
@@ -634,25 +658,28 @@ impl SerialManager {
         if bytes.is_empty() {
             return Ok(0);
         }
-        self.write(port.to_string(), Bytes::from(bytes)).await
+        self.write_canonical(port.to_string(), Bytes::from(bytes)).await
     }
 
     /// 破坏性读取缓冲区（空时按 timeout 等待）。
     pub async fn drain_buffer(&self, port: &str, timeout_ms: u64) -> Result<Vec<u8>, SerialError> {
-        let buf = self.get_rx_buffer(port).await?;
+        self.drain_buffer_canonical(&self.canon_key(port), timeout_ms).await
+    }
+
+    pub async fn drain_buffer_canonical(&self, port: &str, timeout_ms: u64) -> Result<Vec<u8>, SerialError> {
+        let buf = self.get_canonical_rx_buffer(port).await?;
         Ok(tokio::task::spawn_blocking(move || buf.drain(timeout_ms))
             .await
             .unwrap_or_default())
     }
 
     /// 破坏性读取缓冲区（带静默期，命令-响应场景用）。
-    pub async fn drain_buffer_quiet(
-        &self,
-        port: &str,
-        deadline_ms: u64,
-        idle_ms: u64,
-    ) -> Result<Vec<u8>, SerialError> {
-        let buf = self.get_rx_buffer(port).await?;
+    pub async fn drain_buffer_quiet(&self, port: &str, deadline_ms: u64, idle_ms: u64) -> Result<Vec<u8>, SerialError> {
+        self.drain_buffer_quiet_canonical(&self.canon_key(port), deadline_ms, idle_ms).await
+    }
+
+    pub async fn drain_buffer_quiet_canonical(&self, port: &str, deadline_ms: u64, idle_ms: u64) -> Result<Vec<u8>, SerialError> {
+        let buf = self.get_canonical_rx_buffer(port).await?;
         Ok(
             tokio::task::spawn_blocking(move || buf.drain_quiet(deadline_ms, idle_ms))
                 .await
@@ -662,21 +689,24 @@ impl SerialManager {
 
     /// 清空缓冲区。
     pub async fn clear_buffer(&self, port: &str) -> Result<(), SerialError> {
-        let buf = self.get_rx_buffer(port).await?;
+        self.clear_buffer_canonical(&self.canon_key(port)).await
+    }
+
+    pub async fn clear_buffer_canonical(&self, port: &str) -> Result<(), SerialError> {
+        let buf = self.get_canonical_rx_buffer(port).await?;
         let _ = tokio::task::spawn_blocking(move || buf.clear()).await;
         Ok(())
     }
 
     /// 正则匹配缓冲区文本行（非破坏）。
-    pub async fn grep_buffer(
-        &self,
-        port: &str,
-        pattern: &str,
-        timeout_ms: u64,
-    ) -> Result<Vec<String>, SerialError> {
+    pub async fn grep_buffer(&self, port: &str, pattern: &str, timeout_ms: u64) -> Result<Vec<String>, SerialError> {
+        self.grep_buffer_canonical(&self.canon_key(port), pattern, timeout_ms).await
+    }
+
+    pub async fn grep_buffer_canonical(&self, port: &str, pattern: &str, timeout_ms: u64) -> Result<Vec<String>, SerialError> {
         let re =
             regex::Regex::new(pattern).map_err(|e| SerialError::InvalidConfig(e.to_string()))?;
-        let buf = self.get_rx_buffer(port).await?;
+        let buf = self.get_canonical_rx_buffer(port).await?;
         Ok(
             tokio::task::spawn_blocking(move || buf.grep_text(&re, timeout_ms))
                 .await
@@ -685,13 +715,12 @@ impl SerialManager {
     }
 
     /// 字节序列匹配缓冲区（非破坏）。
-    pub async fn grep_buffer_bytes(
-        &self,
-        port: &str,
-        pattern: Vec<u8>,
-        timeout_ms: u64,
-    ) -> Result<Vec<(usize, Vec<u8>)>, SerialError> {
-        let buf = self.get_rx_buffer(port).await?;
+    pub async fn grep_buffer_bytes(&self, port: &str, pattern: Vec<u8>, timeout_ms: u64) -> Result<Vec<(usize, Vec<u8>)>, SerialError> {
+        self.grep_buffer_bytes_canonical(&self.canon_key(port), pattern, timeout_ms).await
+    }
+
+    pub async fn grep_buffer_bytes_canonical(&self, port: &str, pattern: Vec<u8>, timeout_ms: u64) -> Result<Vec<(usize, Vec<u8>)>, SerialError> {
+        let buf = self.get_canonical_rx_buffer(port).await?;
         Ok(
             tokio::task::spawn_blocking(move || buf.grep_bytes(&pattern, timeout_ms))
                 .await

@@ -255,6 +255,7 @@ export function saveConfig(config: SerialConfig) {
 
 const CONN_KEY = "serial-studio-conn";
 export function loadConn(): ConnConfig {
+  if (location.protocol === "https:") return { host: location.hostname, port: Number(location.port || 443), secure: true };
   try {
     const raw = localStorage.getItem(CONN_KEY);
     if (raw) return JSON.parse(raw);
@@ -274,6 +275,7 @@ export function saveConn(c: ConnConfig) {
 
 /** 远程窗口：URL ?remote=host:port 携带远程地址 */
 export function getRemoteFromUrl(): ConnConfig | null {
+  if (!isTauri() && location.protocol === "https:") return null;
   const remote = new URLSearchParams(location.search).get("remote");
   if (!remote) return null;
   const [host, portStr] = remote.split(":");

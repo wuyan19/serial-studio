@@ -211,9 +211,27 @@ pub struct RemoteDevice {
     pub id: String,
     pub host: String,
     pub port: u16,
+    #[serde(
+        default,
+        rename = "securePort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secure_port: Option<u16>,
+    #[serde(default, rename = "verifyHttp", skip_serializing_if = "is_false")]
+    pub verify_http: bool,
     /// 可选昵称；空则 UI 回退 host:port。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+}
+
+impl RemoteDevice {
+    pub fn requires_verification(&self) -> bool {
+        self.secure_port.is_some() || self.verify_http
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]

@@ -26,6 +26,8 @@ export interface PortInfo {
   alias?: string;
   /** 设备已断开(USB 拔出)但占有权保留、可重连(后端 PortInfo.disconnected)。 */
   disconnected?: boolean;
+  locked?: boolean;
+  access_tls_port?: number;
   /** 端点类别："serial"|"ssh"(字符串枚举,后端为 exec/tcp 留空间)。缺省 = 老
    *  server,消费方回退字符串推断(见 App 的 isNonSerialPid 等)。 */
   kind?: string;
@@ -149,6 +151,7 @@ export interface SerialConfig {
 export interface ConnConfig {
   host: string;
   port: number;
+  secure?: boolean;
 }
 
 /** 已知的远程设备（桌面端持久化于配置目录 remotes.json；Web/远程窗口由 connConfig 派生单设备，不持久化）。
@@ -160,6 +163,8 @@ export interface RemoteDevice {
   port: number;
   /** 可选昵称；空则 UI 回退 host:port。 */
   nickname?: string;
+  securePort?: number;
+  verifyHttp?: boolean;
 }
 
 /** SSH 设备认证方式。密码以明文随注册表保存；UI 永不回显已存密码（编辑留空 = 不变）。 */

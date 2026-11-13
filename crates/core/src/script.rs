@@ -403,6 +403,15 @@ pub async fn run_script_with_timeout(
     // 见 append_log_line:失败只 warn 不中断。
     log_file: Option<std::path::PathBuf>,
 ) -> Result<(), ScriptError> {
+    // Dropping the caller (for example after remote authorization is revoked)
+    // must stop the worker thread as well as the future waiting for its result.
+    struct AbortOnDrop(Arc<AtomicBool>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let _abort_on_drop = AbortOnDrop(abort.clone());
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), ScriptError>>();
     let port = port.to_string();
     let code = code.to_string();

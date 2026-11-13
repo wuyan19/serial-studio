@@ -344,6 +344,8 @@ mod tests {
         let (meta_tx, _) = broadcast::channel(16);
         let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
         devices.update_registry(&[ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "uuid-b".into(),
             host: "127.0.0.1".into(),
             port: 1,
@@ -444,6 +446,8 @@ mod tests {
         let (meta_tx, _) = broadcast::channel(16);
         let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
         devices.update_registry(&[ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "uuid-b".into(),
             host: "127.0.0.1".into(),
             port: 1,
@@ -476,6 +480,8 @@ mod tests {
         let (meta_tx, _) = broadcast::channel(16);
         let devices = Arc::new(DeviceClientManager::empty(meta_tx.clone(), "inst-self"));
         devices.update_registry(&[ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "uuid-b".into(),
             host: "127.0.0.1".into(),
             port: 1,

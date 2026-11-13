@@ -21,6 +21,12 @@ describe("device share URLs", () => {
     expect(parseDeviceShareUrl(createDeviceShareUrl({ host: "8.8.8.8", port: 65535 }))).toEqual({ host: "8.8.8.8", port: 65535 });
   });
 
+  it("preserves HTTPS in a protected service share link", () => {
+    const secure = { ...a, port: 18702, secure: true };
+    expect(createDeviceShareUrl(secure)).toBe(`https://${a.host}:18702/${SHARE_FRAGMENT}`);
+    expect(parseDeviceShareUrl(createDeviceShareUrl(secure))).toEqual(secure);
+  });
+
   it.each([
     "127.0.0.1", "127.1.2.3", "localhost", "0.0.0.0", "0.1.2.3", "169.254.1.1",
     "224.1.2.3", "255.255.255.255", "256.1.2.3", "192.168.1", "192.168.01.1",
@@ -39,7 +45,7 @@ describe("device share URLs", () => {
   it("ignores unmarked text, oversized clipboard content and altered destinations", () => {
     for (const text of [
       null, "", "ordinary text", "x".repeat(500000) + createDeviceShareUrl(a),
-      `http://${a.host}:18700/`, `https://${a.host}:18700/${SHARE_FRAGMENT}`,
+      `http://${a.host}:18700/`, `https://${a.host}:18700/?code=12345678${SHARE_FRAGMENT}`,
       `http://${a.host}:18700/path/${SHARE_FRAGMENT}`, `http://${a.host}:18700/?remote=10.0.0.1:80${SHARE_FRAGMENT}`,
       createDeviceShareUrl(a) + "&other=1", createDeviceShareUrl(a).replace("v1", "v2"),
       `http://${a.host}:18700/../${SHARE_FRAGMENT}`,

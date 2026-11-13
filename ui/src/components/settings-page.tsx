@@ -17,7 +17,8 @@ import {
   openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus,
 } from "../updater";
 import { overlayClose, useDialogA11y } from "./primitives";
-import { IconCheck, IconClose, IconGear, IconInfo, IconKeyboard, IconPlug, IconServer, IconShirt, IconWinMax, IconWinRestore } from "../icons";
+import { AccessSettings } from "./access-settings";
+import { IconCheck, IconClose, IconGear, IconInfo, IconKeyboard, IconLock, IconPlug, IconServer, IconShirt, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories, filterSettings,
   type FilteredCategory, type SettingItemDef, type SettingsCategoryId,
@@ -25,7 +26,7 @@ import {
 
 import "./settings-page.css";
 
-const CATEGORY_ICONS = { connection: <IconServer />, appearance: <IconShirt />, shortcuts: <IconKeyboard />, about: <IconInfo /> };
+const CATEGORY_ICONS = { connection: <IconServer />, "remote-access": <IconLock />, appearance: <IconShirt />, shortcuts: <IconKeyboard />, about: <IconInfo /> };
 
 export function SettingsPage({
   initialCategory,
@@ -254,7 +255,7 @@ export function SettingsPage({
                 {c.items
                   .filter((it) => it.control !== "about-block" && !it.control.startsWith("shortcut-"))
                   .map((item) => (
-                    <SettingRow key={item.id} item={item}>
+                    item.control === "srv-access" ? <AccessSettings key={item.id} /> : <SettingRow key={item.id} item={item}>
                       {renderControl(item)}
                     </SettingRow>
                   ))}

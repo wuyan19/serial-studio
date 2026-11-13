@@ -41,8 +41,146 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// 全无应答(手写桩/故障对端)超时后放弃学习,保持占位段名。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-type WsStream = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub(crate) trait DeviceSocket:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin
+{
+}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> DeviceSocket for T {}
+pub(crate) type WsStream = WebSocketStream<Box<dyn DeviceSocket>>;
 type WsSink = SplitSink<WsStream, Message>;
+const HTTP_PAIR_PROTOCOL: &str = "serial-studio.access.v1";
+
+pub(crate) async fn connect_device(
+    dev: &RemoteDevice,
+    token: Option<&str>,
+    verify: bool,
+) -> Result<WsStream, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{
+        header::SEC_WEBSOCKET_PROTOCOL, HeaderValue, StatusCode,
+    };
+    let port = dev.secure_port.unwrap_or(dev.port);
+    let host = dev.host.trim_start_matches('[').trim_end_matches(']');
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let secure = dev.secure_port.is_some();
+    let requires_verification = dev.requires_verification();
+    if requires_verification && token.is_none() && !verify {
+        return Err("远程设备需要验证码".into());
+    }
+    if verify && !requires_verification {
+        return Err("请先为远程设备配置 HTTPS 或 HTTP 验证".into());
+    }
+    let scheme = if secure { "wss" } else { "ws" };
+    let path = if verify { "/ws?access_pair=1" } else { "/ws" };
+    let mut request = format!("{scheme}://{authority}{path}")
+        .into_client_request()
+        .map_err(|e| e.to_string())?;
+    let http_pair = verify && !secure;
+    if http_pair {
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(HTTP_PAIR_PROTOCOL),
+        );
+    }
+    if let Some(token) = token.filter(|_| requires_verification) {
+        let value = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| "远程授权凭证无效")?;
+        request.headers_mut().insert("Authorization", value);
+    }
+    let tcp = tokio::net::TcpStream::connect((host, port))
+        .await
+        .map_err(|e| e.to_string())?;
+    let stream: Box<dyn DeviceSocket> = if secure {
+        let config = tls_client_config()?;
+        let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_owned())
+            .map_err(|_| "HTTPS 主机名无效")?;
+        Box::new(
+            tokio_rustls::TlsConnector::from(config)
+                .connect(name, tcp)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        Box::new(tcp)
+    };
+    let (socket, response) = tokio_tungstenite::client_async(request, stream)
+        .await
+        .map_err(|e| {
+            if http_pair
+                && matches!(&e, tokio_tungstenite::tungstenite::Error::Http(response)
+            if [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND].contains(&response.status()))
+            {
+                return "远程设备未开启 HTTP 访问验证或版本不支持".into();
+            }
+            e.to_string()
+        })?;
+    if http_pair
+        && response
+            .headers()
+            .get(SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|header| header.to_str().ok())
+            != Some(HTTP_PAIR_PROTOCOL)
+    {
+        return Err("远程设备未开启 HTTP 访问验证或版本不支持".into());
+    }
+    Ok(socket)
+}
+
+fn tls_client_config() -> Result<Arc<tokio_rustls::rustls::ClientConfig>, String> {
+    use tokio_rustls::rustls::{crypto::ring, ClientConfig, RootCertStore};
+    static CONFIG: std::sync::OnceLock<Arc<ClientConfig>> = std::sync::OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let certs = rustls_native_certs::load_native_certs();
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(certs.certs);
+    if roots.is_empty() {
+        return Err("系统没有可用于验证 HTTPS 的受信证书".into());
+    }
+    let config = Arc::new(
+        ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    Ok(CONFIG.get_or_init(|| config).clone())
+}
+
+pub(super) async fn verify_access(dev: &RemoteDevice, code: &str) -> Result<String, String> {
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let mut socket = connect_device(dev, None, true).await?;
+        socket
+            .send(Message::Text(serde_json::json!({"code": code}).to_string()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(Ok(Message::Text(text))) = socket.next().await else {
+            return Err("远程设备没有返回验证结果".into());
+        };
+        let reply: serde_json::Value =
+            serde_json::from_str(&text).map_err(|_| "远程设备不支持此验证协议")?;
+        reply
+            .get("token")
+            .and_then(|v| v.as_str())
+            .filter(|v| v.len() == 64 && v.bytes().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                reply
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("远程设备验证失败")
+                    .to_owned()
+            })
+    })
+    .await
+    .map_err(|_| "远程设备验证超时".to_string())?
+}
 
 /// 在途回执(open/set_alias 的 Result、write 的 io 结果)。路由两级:
 /// - 新↔新(回执带 req):按 `req` 精确配对——同端口 close/write 的 Ok 不会
@@ -332,11 +470,18 @@ impl DeviceClient {
             if self.inner.stopped.load(Ordering::Relaxed) {
                 return;
             }
-            let url = format!("ws://{}:{}/ws", self.inner.dev.host, self.inner.dev.port);
-            let connected =
-                tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await;
+            let token = self
+                .inner
+                .owner
+                .upgrade()
+                .and_then(|owner| owner.credential(&self.inner.dev));
+            let connected = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                connect_device(&self.inner.dev, token.as_deref(), false),
+            )
+            .await;
             match connected {
-                Ok(Ok((ws, _resp))) => {
+                Ok(Ok(ws)) => {
                     tracing::info!("设备 {}({}) 已连接", self.inner.dev.id, self.inner.dev.host);
                     backoff = Duration::from_secs(1);
                     self.session(ws, Arc::clone(&cmd_rx)).await;
@@ -373,7 +518,7 @@ impl DeviceClient {
     /// 单次连接会话:reader + writer + watchdog。命令通道经 Arc 共享给本会话 writer。
     async fn session(
         &self,
-        ws: WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ws: WsStream,
         cmd_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<DeviceCommand>>>,
     ) {
         let (sink, mut stream) = ws.split();

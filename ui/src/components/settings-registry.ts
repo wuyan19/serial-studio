@@ -6,7 +6,7 @@ import type { ActionId } from "../types";
 import { ACTION_LABELS } from "../shortcuts";
 import { isTauri } from "../lib";
 
-export type SettingsCategoryId = "appearance" | "connection" | "shortcuts" | "about";
+export type SettingsCategoryId = "appearance" | "connection" | "remote-access" | "shortcuts" | "about";
 
 export interface SettingItemDef {
   id: string;
@@ -92,6 +92,14 @@ export function buildSettingsCategories(showServer: boolean, desktop = isTauri()
       keywords: ["connection", "server", "服务器", "端口", "串口服务", "服务", "连接"],
       items: connectionItems,
     },
+    ...(showServer ? [{
+      id: "remote-access" as const,
+      label: "远程访问验证",
+      description: "管理其他设备和浏览器访问本机连接时的验证。",
+      items: [
+        { id: "srv.access", label: "远程访问验证", keywords: ["二次认证", "验证码", "刷新时间", "安全", "保护范围", "TLS", "HTTPS", "撤销授权"], control: "srv-access" },
+      ],
+    }] : []),
     {
       id: "appearance",
       label: "外观",

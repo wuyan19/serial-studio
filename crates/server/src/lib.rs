@@ -3,6 +3,8 @@
 //! 抽成 lib 是为了让 Tauri app（GUI 模式）和独立 ss-server bin（headless 模式）
 //! 共用同一套路由——方案 B 的核心：一份后端，两种宿主。
 
+pub mod access;
+mod access_http;
 pub mod address;
 pub mod config;
 pub mod device;
@@ -68,6 +70,7 @@ pub enum ScriptKind {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub access: Arc<access::AccessControl>,
     pub port_groups: Arc<port_groups::PortGroupsStore>,
     pub manager: Arc<SerialManager>,
     pub event_bus: Arc<EventBus>,
@@ -141,6 +144,7 @@ pub fn create_state() -> AppState {
         settings::load().enable_scripting,
     ));
     AppState {
+        access: Arc::new(access::AccessControl::load()),
         port_groups: Arc::new(port_groups::PortGroupsStore::from_config(&instance_id)),
         manager,
         event_bus,
@@ -193,6 +197,10 @@ pub struct PortView {
     /// 属主设备(原始属主，非连接桶；远端桶经改写规则维持绝对属主)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_tls_port: Option<u16>,
 }
 
 /// 本机设备视图(本地串口行的 device)。
@@ -322,6 +330,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 .get(bare_name_of(&info.name))
                 .and_then(|m| m.alias.clone());
             PortView {
+                locked: None,
+                access_tls_port: None,
                 info,
                 alias,
                 kind: Some("serial".into()),
@@ -371,6 +381,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 rewrite_remote_device(&mut device, direct);
             }
             views.push(PortView {
+                locked: None,
+                access_tls_port: None,
                 info: ss_core::PortInfo { name, ..pv.info },
                 alias: pv.alias,
                 kind: pv.kind,
@@ -389,6 +401,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         let device = ssh_device_view(rec);
         for ep in &rec.endpoints {
             views.push(PortView {
+                locked: None,
+                access_tls_port: None,
                 info: ss_core::PortInfo {
                     name: ss_core::compose_port_key(&rec.id, &ep.name),
                     opened: false,
@@ -428,6 +442,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 // 刻意不覆盖 holders(远端桶权威在远端 hub),SSH 行的权威恰是本地快照
                 Some(existing) => existing.info.holders = info.holders,
                 None => views.push(PortView {
+                    locked: None,
+                    access_tls_port: None,
                     info: info.clone(),
                     alias: state.ssh.instance_alias_of(name),
                     kind: Some(kind),
@@ -553,14 +569,29 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/ports", get(list_ports))
-        .route("/mcp", post(mcp::mcp_handler))
+        .route("/api/access/status", get(access_http::status))
+        .route("/api/access/verify", post(access_http::verify))
+        .route("/api/access/logout", post(access_http::logout))
+        .route("/mcp", post(access_http::mcp))
         .fallback(serve_web)
         .with_state(state)
 }
 
+pub(crate) fn create_secure_router(state: AppState) -> Router {
+    create_router(state).layer(axum::Extension(access_http::SecureTransport))
+}
+
 /// REST: 列出端口（带别名）。WS 客户端也可通过 `{"action":"list"}` 获取。
-async fn list_ports(State(state): State<AppState>) -> Json<Vec<PortView>> {
-    Json(list_ports_with_meta(&state).await)
+async fn list_ports(
+    State(state): State<AppState>,
+    secure: Option<axum::Extension<access_http::SecureTransport>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let grant = access_http::Grant::new(&state, secure.is_some(), &headers);
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(access_http::visible_ports(&state, &grant, false).await),
+    )
 }
 
 #[cfg(test)]
@@ -591,6 +622,8 @@ mod tests {
     #[test]
     fn port_view_flattens_to_flat_wire() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "COM7".into(),
                 opened: true,
@@ -621,6 +654,8 @@ mod tests {
     #[test]
     fn port_view_carries_structured_meta() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "ssh-uuid::shell@2".into(),
                 opened: true,
@@ -751,6 +786,8 @@ mod tests {
     #[test]
     fn local_override_keeps_remote_holders() {
         let mut views = vec![PortView {
+            locked: None,
+            access_tls_port: None,
             // 远端桶条目:hub 上报 opened/holders=3(PC1 窗口 + PC2 web + PC3 设备连接)
             info: ss_core::PortInfo {
                 name: "uuid-pc1::COM3".into(),
@@ -780,6 +817,8 @@ mod tests {
 
         // 断连兜底仍生效:本地 drainer 红标覆盖远端缓存里的 disconnected=false
         let mut views2 = vec![PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "uuid-pc1::COM3".into(),
                 opened: true,
@@ -812,6 +851,8 @@ mod tests {
     #[test]
     fn port_view_skips_none_alias() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "COM3".into(),
                 opened: false,

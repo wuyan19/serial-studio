@@ -1,10 +1,47 @@
 import type { PortGroupView } from "./components/sidebar";
+import { parsePortId } from "./lib";
 import type { PortRow } from "./types";
 import { getGroupMemberships, type PortGrouping } from "./port-groups";
 
 export type ConnectionListRow =
   | { kind: "serial"; group: PortGroupView; port: PortRow }
   | { kind: "ssh"; group: PortGroupView; ports: PortRow[] };
+
+export function defaultConnectionSections(groups: PortGroupView[], remoteIds: ReadonlySet<string>) {
+  const childrenByRemote = new Map<string, PortGroupView[]>();
+  const topLevel: PortGroupView[] = [];
+  for (const group of groups) {
+    if (group.kind !== "ssh" || !group.ports.length) {
+      topLevel.push(group);
+      continue;
+    }
+    // The route identifies the relay; device metadata identifies the SSH host.
+    const portsByRelay = new Map<string, PortRow[]>();
+    const direct: PortRow[] = [];
+    for (const port of group.ports) {
+      const { devId, name } = parsePortId(port.pid);
+      if (remoteIds.has(devId) && name.includes("::")) {
+        const ports = portsByRelay.get(devId) ?? [];
+        ports.push(port);
+        portsByRelay.set(devId, ports);
+      } else {
+        direct.push(port);
+      }
+    }
+    for (const [relay, ports] of portsByRelay) {
+      const children = childrenByRemote.get(relay) ?? [];
+      children.push({
+        ...group,
+        ports,
+        external: group.external || ports[0].name === ports[0].pid,
+        meta: ports[0].device ?? group.meta,
+      });
+      childrenByRemote.set(relay, children);
+    }
+    if (direct.length) topLevel.push({ ...group, ports: direct });
+  }
+  return topLevel.map((group) => ({ group, sshChildren: childrenByRemote.get(group.devId) ?? [] }));
+}
 
 export function connectionRows(
   groups: PortGroupView[],

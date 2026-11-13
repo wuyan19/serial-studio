@@ -30,6 +30,10 @@ chrono = { workspace = true }
 uuid = { version = "1.24", features = ["v4"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.21"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 rust-embed = "8"
 mime_guess = "2"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }

@@ -65,6 +65,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        access: Default::default(),
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
@@ -375,6 +376,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         addresses.key_resolver_fn(),
     ));
     let state = AppState {
+        access: Default::default(),
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),

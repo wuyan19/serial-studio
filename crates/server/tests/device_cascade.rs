@@ -10,7 +10,10 @@
 use futures_util::{SinkExt, StreamExt};
 use ss_core::{EventBus, PortIo, PortOpener, SerialConfig, SerialError, SerialManager, SessionId};
 use ss_server::device::{CompositeOpener, DeviceClientManager};
-use ss_server::{create_router, AppState};
+use ss_server::{
+    access::{AccessConfig, AccessControl},
+    create_router, AppState,
+};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +74,7 @@ struct Instance {
     addr: String,
     manager: Arc<SerialManager>,
     devices: Arc<DeviceClientManager>,
+    access: Arc<AccessControl>,
     /// 本实例身份(握手自报;学习断言用)。
     instance_id: &'static str,
 }
@@ -102,7 +106,9 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
         Arc::new(CompositeOpener::new(Arc::clone(&devices), Arc::clone(&ssh)))
     };
     let manager = Arc::new(SerialManager::new(event_bus.clone(), opener));
+    let access = Arc::new(AccessControl::default());
     let state = AppState {
+        access: Arc::clone(&access),
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
@@ -128,14 +134,93 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
     Instance {
         addr: addr.to_string(),
         manager,
         devices,
+        access,
         instance_id: inst,
     }
+}
+
+#[tokio::test]
+async fn explicit_http_verification_is_local_only_and_requires_server_opt_in() {
+    let a = boot_as(false, "inst-a-auth-http").await;
+    let b = boot_as(true, "inst-b-auth-http").await;
+    let addr: std::net::SocketAddr = b.addr.parse().unwrap();
+    let remote = ss_core::RemoteDevice {
+        id: b.instance_id.into(),
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        secure_port: None,
+        verify_http: true,
+        nickname: None,
+    };
+    a.devices.update_registry(&[remote.clone()]);
+    a.devices.start();
+    let rejected = a
+        .devices
+        .verify_remote_access(&remote.id, "12345678")
+        .await
+        .unwrap_err();
+    assert!(rejected.contains("未开启 HTTP 访问验证"));
+    assert!(a.devices.device_states().iter().all(|d| !d.online));
+
+    b.access
+        .configure(AccessConfig {
+            enabled: true,
+            allow_http: true,
+            ..AccessConfig::default()
+        })
+        .unwrap();
+    let code = b.access.status().code.unwrap();
+    a.devices
+        .verify_remote_access(&remote.id, &code)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if a.devices
+                .device_states()
+                .iter()
+                .any(|d| d.id == remote.id && d.online)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(a.url()).await.unwrap();
+    let devices = recv_until(&mut ws, "\"type\":\"devices\"").await;
+    assert!(!devices.contains(&remote.id));
+
+    a.devices.update_registry(&[ss_core::RemoteDevice {
+        verify_http: false,
+        ..remote.clone()
+    }]);
+    a.devices.update_registry(&[remote.clone()]);
+    assert!(a.devices.device_states().iter().all(|d| !d.online));
+    let mut events = a.devices.subscribe();
+    let reconnected = timeout(Duration::from_millis(300), async {
+        while let Ok(event) = events.recv().await {
+            if matches!(event, ss_server::device::DeviceEvent::Online { dev_id } if dev_id == remote.id) {
+                return;
+            }
+        }
+    }).await;
+    assert!(
+        reconnected.is_err(),
+        "switching verification mode retained a stale credential"
+    );
 }
 
 async fn recv_until(ws: &mut Ws, needle: &str) -> String {
@@ -168,6 +253,8 @@ async fn cascade_open_write_echo() {
 
     // A 注册 B 并启动设备连接池
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -265,6 +352,8 @@ async fn cascade_device_offline_keeps_holders() {
     let key = format!("{}::COM7", b.instance_id);
 
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: port_num,
@@ -330,6 +419,8 @@ async fn self_connection_mirror_no_echo() {
     let self_seg = a.instance_id; // 自连学习后段名 = 自身实例 id
 
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-me".into(),
         host: "127.0.0.1".into(),
         port: port_num,
@@ -407,6 +498,8 @@ async fn self_connection_no_meta_storm() {
     let a = boot(false).await;
     let port_num = a.addr.parse::<std::net::SocketAddr>().unwrap().port();
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-me".into(),
         host: "127.0.0.1".into(),
         port: port_num,
@@ -448,6 +541,8 @@ async fn disconnect_releases_remote_ownership() {
     let b = boot(true).await;
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -497,6 +592,8 @@ async fn cascade_set_alias_routes_reply() {
     let b = boot(true).await;
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -659,6 +756,8 @@ async fn legacy_peer_local_prefixed_wire_names() {
 
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: addr.port(),
@@ -818,6 +917,8 @@ async fn alias_suffix_open_registers_resolved_name() {
 
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: addr.port(),
@@ -959,6 +1060,8 @@ async fn mutual_registration_list_no_proliferation() {
 
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: addr.port(),
@@ -1121,6 +1224,8 @@ async fn cascade_three_level_real_hub_list_and_open() {
     // B:真实实例,注册桩 C
     let b = boot(false).await;
     b.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-c".into(),
         host: "127.0.0.1".into(),
         port: c_port,
@@ -1131,6 +1236,8 @@ async fn cascade_three_level_real_hub_list_and_open() {
     // A:真实实例,注册真实 B
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -1219,6 +1326,8 @@ async fn cascade_disconnected_propagates_per_port() {
 
     let b = boot(false).await;
     b.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-c".into(),
         host: "127.0.0.1".into(),
         port: c_port,
@@ -1228,6 +1337,8 @@ async fn cascade_disconnected_propagates_per_port() {
 
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -1386,6 +1497,8 @@ async fn three_level_cascade_routes_end_to_end() {
     // A 注册 B 并等在线
     let a = boot(false).await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b_addr.port(),
@@ -1454,6 +1567,8 @@ async fn learned_id_adopts_placeholder() {
     let b = boot_as(/*echo*/ true, "inst-b").await;
     let a = boot_as(false, "inst-a").await;
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "ph-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -1521,12 +1636,16 @@ async fn mutual_registration_no_ghost_with_identity() {
 
     // 互注册(占位 id,学习后各自替换为对方实例 id)
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "ph-b".into(),
         host: "127.0.0.1".into(),
         port: b_port,
         nickname: None,
     }]);
     b.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "ph-a".into(),
         host: "127.0.0.1".into(),
         port: a_port,
@@ -1596,12 +1715,16 @@ async fn duplicate_device_conflict_keeps_placeholder() {
     // 同地址两条记录(不同占位 id)
     a.devices.update_registry(&[
         ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "ph1".into(),
             host: "127.0.0.1".into(),
             port: b_port,
             nickname: None,
         },
         ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "ph2".into(),
             host: "127.0.0.1".into(),
             port: b_port,
@@ -1647,6 +1770,8 @@ async fn runtime_add_connects_without_manual_reconnect() {
     // GUI 常态:数据面已启动,此时才添加远程设备(save_remotes → update_registry)
     a.devices.start();
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-b".into(),
         host: "127.0.0.1".into(),
         port: b.addr.parse::<std::net::SocketAddr>().unwrap().port(),
@@ -1684,6 +1809,8 @@ async fn first_connect_failure_announces_then_self_heals() {
     let mut dev_rx = a.devices.subscribe();
     a.devices.start();
     a.devices.update_registry(&[ss_core::RemoteDevice {
+        secure_port: None,
+        verify_http: false,
         id: "dev-late".into(),
         host: "127.0.0.1".into(),
         port: addr.port(),

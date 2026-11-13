@@ -6,6 +6,7 @@ import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from
 import { IconAlert, IconCode, IconCopy, IconExport, IconGlobe, IconPlug, IconSsh } from "../icons";
 import { ConfigRow, overlayClose, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 import { marked } from "marked";
+import { DEFAULT_ACCESS_PORT, HTTP_ACCESS_WARNING, validAccessPort, type DesktopAccessMode } from "../access";
 
 // ===== marked 安全配置(脚本指南 Markdown 预览) =====
 // SKILL 文本并非始终可信:local 模式来自二进制内嵌文档,但远程窗口/Web 模式下
@@ -403,17 +404,19 @@ export function ScriptSkillDialog({
   );
 }
 
-export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }: {
-  input: { host: string; port: number; nickname: string };
-  onChange: (v: { host: string; port: number; nickname: string }) => void;
+export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing, allowSecure = false }: {
+  input: { host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean };
+  onChange: (v: { host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean }) => void;
   onConfirm: () => void;
   onCancel: () => void;
   /** 已存在设备地址列表（"host:port"），用于重复拦截 */
   existing: string[];
+  allowSecure?: boolean;
 }) {
   const host = input.host.trim();
+  const mode: DesktopAccessMode = input.securePort !== undefined ? "https" : input.verifyHttp ? "http" : "legacy";
   const dup = host !== "" && existing.includes(`${host}:${input.port}`);
-  const invalid = host === "" || dup;
+  const invalid = host === "" || dup || !validAccessPort(input.port) || (input.securePort !== undefined && !validAccessPort(input.securePort));
   // Enter 是 window 级监听,不看按钮 disabled——主操作必须自带校验,否则键盘路径绕过拦截
   useDialogKeys({ onClose: onCancel, onEnter: () => { if (!invalid) onConfirm(); } });
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -429,8 +432,24 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }:
           <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="端口">
-          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+          <input type="number" min={1} max={65535} value={input.port || ""} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
+        {allowSecure && <>
+          <ConfigRow label="访问验证">
+            <select className="field-select" aria-label="访问验证" value={mode} onChange={(e) => {
+              const value = e.target.value;
+              onChange({ ...input, securePort: value === "https" ? DEFAULT_ACCESS_PORT : undefined, verifyHttp: value === "http" || undefined });
+            }}>
+              <option value="legacy">不验证（旧版兼容）</option>
+              <option value="https">HTTPS 验证（推荐）</option>
+              <option value="http">HTTP 验证</option>
+            </select>
+          </ConfigRow>
+          {mode === "http" && <p className="dialog__hint" role="note">{HTTP_ACCESS_WARNING}</p>}
+          {input.securePort !== undefined && <ConfigRow label="HTTPS 端口">
+            <input type="number" min={1} max={65535} value={input.securePort || ""} onChange={(e) => onChange({ ...input, securePort: Number(e.target.value) })} className="field" />
+          </ConfigRow>}
+        </>}
         <ConfigRow label="昵称">
           <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
