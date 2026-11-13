@@ -64,6 +64,8 @@ import { sharedLibrarySource } from "./shared-library";
 import type { DeviceShareAddress } from "./device-share";
 import { useShareClipboard } from "./use-share-clipboard";
 import { DeviceShareDialog } from "./components/device-share";
+import { ConnectionColorsDialog } from "./components/connection-colors-dialog";
+import { connectionColorKey, loadConnectionColors, saveConnectionColors, type ConnectionColors } from "./connection-colors";
 import { AccessDialog } from "./components/access-dialog";
 import { accessOrigin, DEFAULT_ACCESS_PORT, fetchAccessStatus, logoutWebAccess, verifyWebAccess, type PublicAccessStatus } from "./access";
 import {
@@ -113,7 +115,7 @@ import {
   IconPower,
   IconTrash,
 } from "./icons";
-import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
+import { getTheme, subscribe, themeDefOf, toggleTheme, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
@@ -535,6 +537,9 @@ export default function App() {
    *  两处会各挂一个 InlineAliasInput 互抢焦点、随即互触 blur 全部关闭（表现为进不去编辑态）。
    *  where 把编辑态钉在触发处，杜绝两个 input 并存。 */
   const [aliasEdit, setAliasEdit] = useState<{ port: string; where: "list" | "tab" } | null>(null);
+  const [connectionColors, setConnectionColors] = useState(() => isLocal ? loadConnectionColors() : new Map<string, ConnectionColors>());
+  const [colorEdit, setColorEdit] = useState<{ key: string; label: string; draft: ConnectionColors } | null>(null);
+  const [colorError, setColorError] = useState("");
   const [tabMenu, setTabMenu] = useState<{ port: PortId; groupId: string; x: number; y: number } | null>(null);
   useEffect(() => {
     if (tabMenu && !openPorts.includes(tabMenu.port)) setTabMenu(null);
@@ -615,6 +620,40 @@ export default function App() {
    *  与 issue 弹窗共用——web 形态 pid 首段是连接桶，回退查不中。 */
   const sshHostOfPid = (pid: PortId): SshHost | undefined =>
     sshHosts.find((h) => h.id === (portRowOf(pid)?.device?.id ?? parsePortId(pid).devId));
+
+  const colorKeyOf = (pid: PortId) => {
+    const row = portRowOf(pid);
+    const base = row ? undefined : portRowOf(pid.replace(/@\d+$/, ""));
+    return connectionColorKey(pid, row ?? (base?.kind === "ssh" ? base : undefined), sshHostOfPid(pid)?.id);
+  };
+  const colorsOf = (pid: PortId) => {
+    if (!isLocal || (!colorEdit && !connectionColors.size)) return undefined;
+    const key = colorKeyOf(pid);
+    return colorEdit?.key === key ? colorEdit.draft : connectionColors.get(key);
+  };
+  const editColors = (pid: PortId) => {
+    const key = colorKeyOf(pid);
+    const row = portRowOf(pid);
+    const label = key.startsWith("ssh:")
+      ? row?.device?.label ?? devLabelOf(pid) ?? displayPortName(pid)
+      : row?.alias || displayPortName(pid);
+    setColorError("");
+    setColorEdit({ key, label, draft: connectionColors.get(key) ?? {} });
+  };
+  const saveColors = () => {
+    if (!colorEdit) return;
+    const { key, draft } = colorEdit;
+    const next = new Map(connectionColors);
+    if (draft.tab || draft.cursor) next.set(key, draft);
+    else next.delete(key);
+    try {
+      saveConnectionColors(next);
+      setConnectionColors(next);
+      setColorEdit(null);
+    } catch {
+      setColorError("无法保存连接配色，请重试。");
+    }
+  };
 
   const openingPortsRef = useRef(new Map<PortId, {
     transport: Transport; config: SerialConfig; alias?: string; dismissed: boolean; releasing: boolean;
@@ -1476,6 +1515,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             focused={isFocused}
             aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
             aliasOf={aliasOf}
+            tabColorOf={(pid) => colorsOf(pid)?.tab}
             sourceLabelOf={(pid) => {
               // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
               // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
@@ -2104,6 +2144,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     showWebAccess ||
     pendingPort ||
     aliasEdit ||
+    colorEdit ||
     exportMacrosOpen ||
     confirmState ||
     editing ||
@@ -2186,6 +2227,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const duplicateTarget = tabMenu ? sshTabTarget(portRowOf(tabMenu.port), Boolean(sshHostOfPid(tabMenu.port))) : undefined;
   const tabMenuItems: ContextMenuItem[] = tabMenu ? [
     { label: "重命名 tab", onSelect: () => setAliasEdit({ port: tabMenu.port, where: "tab" }) },
+    ...(isLocal ? [{ label: "连接配色…", onSelect: () => editColors(tabMenu.port) }] : []),
     { label: "清空屏幕", onSelect: () => terminalsRef.current.get(tabMenu.port)?.term.clear() },
     { sep: true },
     {
@@ -2524,6 +2566,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               <TermView
                 key={port}
                 port={port}
+                cursorColor={colorsOf(port)?.cursor}
                 targetContainer={gid ? groupContainers.get(gid) ?? null : null}
                 visible={!!g && g.activePort === port && !portAttempts.has(port)}
                 focused={!!g && gid === focusedGroupId && g.activePort === port && !portAttempts.has(port)}
@@ -2568,6 +2611,19 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       {tabMenu && <ContextMenu
         x={tabMenu.x} y={tabMenu.y} items={tabMenuItems}
         onClose={(reason) => { setTabMenu(null); if (reason === "escape" || reason === "item") activeTerm?.term.focus(); }}
+      />}
+
+      {colorEdit && <ConnectionColorsDialog
+        label={colorEdit.label}
+        colors={colorEdit.draft}
+        defaults={{
+          tab: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#6a75d8",
+          cursor: themeDefOf(theme).term.cursor ?? "#e0e0e0",
+        }}
+        error={colorError}
+        onChange={(draft) => { setColorEdit({ ...colorEdit, draft }); setColorError(""); }}
+        onSave={saveColors}
+        onCancel={() => setColorEdit(null)}
       />}
 
       {connectionLauncherOpen && <ConnectionLauncher

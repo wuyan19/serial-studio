@@ -2,7 +2,9 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GroupView } from "./term";
+import { GroupView, TermView } from "./term";
+import { getTheme, setTheme, themeDefOf } from "../theme";
+import type { TermInstance } from "../types";
 
 describe("tab drag insertion", () => {
   let container: HTMLDivElement;
@@ -52,6 +54,38 @@ describe("tab drag insertion", () => {
     await drag("drop", 310, undefined, JSON.stringify({ port: "COM4", src: "g2" }));
     expect(props.onDropOnTabs).toHaveBeenCalledWith("COM4", "g2", "g1", 3);
   });
+  it("sets the same tab accent for matching sessions", async () => {
+    await act(async () => root.render(<GroupView {...props}
+      group={{ id: "g1", ports: ["host::shell", "host::shell@2", "COM3"], activePort: "host::shell" }}
+      tabColorOf={(port) => port.startsWith("host::") ? "#aa1133" : undefined}
+    />));
+    const accents = [...container.querySelectorAll<HTMLElement>(".tab")].map((tab) => tab.style.getPropertyValue("--tab-accent"));
+    expect(accents).toEqual(["#aa1133", "#aa1133", ""]);
+  });
+
+  it("updates cursor color and preserves it through theme changes without recreating the terminal", async () => {
+    const originalTheme = getTheme();
+    const onReady = vi.fn<(instance: TermInstance | null) => void>();
+    const renderTerm = async (cursorColor?: string) => {
+      await act(async () => root.render(<TermView port="host::shell" visible={false} focused={false}
+        targetContainer={null} cursorColor={cursorColor} onWrite={vi.fn()} onReady={onReady} />));
+    };
+    try {
+      await renderTerm("#aa1133");
+      const term = onReady.mock.calls[0][0]!.term;
+      expect(term.options.theme?.cursor).toBe("#aa1133");
+      await renderTerm("#55cc99");
+      await act(async () => setTheme(originalTheme === "codex" ? "codex-light" : "codex"));
+      expect(term.options.theme?.cursor).toBe("#55cc99");
+      expect(term.options.theme?.background).toBe(themeDefOf(getTheme()).term.background);
+      await renderTerm();
+      expect(term.options.theme?.cursor).toBe(themeDefOf(getTheme()).term.cursor);
+      expect(onReady).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => setTheme(originalTheme));
+    }
+  });
+
   it("retains native terminal splitting and ignores malformed tab payloads", async () => {
     const term = container.querySelector(".group__term")!;
     vi.spyOn(term, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 400, height: 400 } as DOMRect);
