@@ -5,14 +5,20 @@ import { buildSettingsCategories, filterSettings } from "./settings-registry";
 const CATS = buildSettingsCategories(true, true); // 服务器模式（条目最多的分支）；desktop 显式传真，绕开 isTauri 的 window 依赖
 
 describe("buildSettingsCategories", () => {
-  it("四个分类齐全且 id 唯一", () => {
-    expect(CATS.map((c) => c.id)).toEqual(["connection", "appearance", "shortcuts", "about"]);
+  it("本机设置分类齐全且 id 唯一", () => {
+    expect(CATS.map((c) => c.id)).toEqual(["connection", "remote-access", "appearance", "shortcuts", "about"]);
   });
   it("服务器模式连接分类是监听条目，客户端模式是主机/端口", () => {
     const serverIds = CATS.find((c) => c.id === "connection")!.items.map((i) => i.id);
     expect(serverIds).toContain("srv.ws_port");
     const clientIds = buildSettingsCategories(false, true).find((c) => c.id === "connection")!.items.map((i) => i.id);
     expect(clientIds).toEqual(["conn.host", "conn.port"]);
+  });
+  it("远程访问验证仅在本机设置中独立显示，并支持搜索", () => {
+    expect(CATS.find((c) => c.id === "connection")?.items.some((item) => item.id === "srv.access")).toBe(false);
+    expect(filterSettings("保护范围", CATS).map((c) => c.id)).toEqual(["remote-access"]);
+    expect(buildSettingsCategories(false, true).some((c) => c.id === "remote-access")).toBe(false);
+    expect(buildSettingsCategories(false, false).some((c) => c.id === "remote-access")).toBe(false);
   });
   it("快捷键条目与分组一一对应", () => {
     const shortcuts = CATS.find((c) => c.id === "shortcuts")!;

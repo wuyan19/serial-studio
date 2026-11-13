@@ -129,6 +129,45 @@ async fn get_settings() -> Result<Settings, String> {
     Ok(ss_server::settings::load())
 }
 
+fn require_access_admin(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" { Ok(()) } else { Err("请在本机主窗口管理远程访问验证".into()) }
+}
+
+#[tauri::command]
+async fn get_access_status(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<ss_server::access::AccessStatus, String> {
+    require_access_admin(&window)?;
+    Ok(state.access.status())
+}
+
+#[tauri::command]
+async fn save_access_config(
+    window: tauri::WebviewWindow,
+    config: ss_server::access::AccessConfig,
+    supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
+) -> Result<(), String> {
+    require_access_admin(&window)?;
+    supervisor.configure_access(config, &ss_server::settings::load()).await
+}
+
+#[tauri::command]
+async fn rotate_access_code(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<ss_server::access::AccessStatus, String> {
+    require_access_admin(&window)?;
+    Ok(state.access.rotate_code())
+}
+
+#[tauri::command]
+async fn revoke_access_sessions(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    require_access_admin(&window)?;
+    state.access.revoke_all();
+    Ok(())
+}
+
+#[tauri::command]
+async fn verify_remote_access(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, dev_id: String, code: String) -> Result<(), String> {
+    require_access_admin(&window)?;
+    state.devices.verify_remote_access(&dev_id, code.trim()).await
+}
+
 #[tauri::command]
 async fn save_settings(
     state: tauri::State<'_, AppState>,
@@ -1255,6 +1294,11 @@ fn run_gui() {
             update_port_groups,
             get_settings,
             save_settings,
+            get_access_status,
+            save_access_config,
+            rotate_access_code,
+            revoke_access_sessions,
+            verify_remote_access,
             apply_settings,
             open_script_log_dir,
             service_status,

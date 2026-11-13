@@ -254,6 +254,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   readonly devId: string; // = ownerId(接口注释见 Transport.devId)
   private host: string;
   private portNum: number;
+  private secure: boolean;
   /** 本 transport 所属的远程设备 id(${ownerId}:: 前缀的口属于远端 ss 本机,线上
    *  剥此前缀;其它首段(如 SSH 设备键 sshUuid::shell)是远端 server 内部键,整键
    *  透传——此前无条件剥首段,web 形态的 SSH 端口 open 会打到裸名上查无此口)。 */
@@ -285,10 +286,11 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(host: string, port: number, ownerId: string) {
+  constructor(host: string, port: number, ownerId: string, secure = false) {
     super();
     this.host = host;
     this.portNum = port;
+    this.secure = secure;
     this.ownerId = ownerId;
     this.devId = ownerId;
     this.connect();
@@ -297,7 +299,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   /** 建立 WS + 绑事件。构造与每次重连都走这里；openPromise 在此重建供 send() 等待新一轮 open。 */
   private connect() {
     if (this.closed) return; // dispose 后漏过 clearTimers 的退避回调不再新建连接
-    const ws = new WebSocket(`ws://${this.host}:${this.portNum}/ws`);
+    const host = this.host.includes(":") && !this.host.startsWith("[") ? `[${this.host}]` : this.host;
+    const ws = new WebSocket(`${this.secure ? "wss" : "ws"}://${host}:${this.portNum}/ws?access_ui=1`);
     ws.binaryType = "arraybuffer"; // 数据帧 Binary，控制帧 Text
     this.ws = ws;
     this.openPromise = new Promise<void>((resolve) => { this.openResolve = resolve; });
@@ -980,6 +983,6 @@ export class LocalTransport extends TransportEventBase implements Transport {
 /** 按运行形态创建 Transport：本地 → IPC；远程窗口/Web → WS。形态判定唯一入口 getMode()。 */
 export function createTransport(): Transport {
   if (getMode() === "local") return new LocalTransport();
-  const { host, port } = getRemoteFromUrl() ?? loadConn();
-  return new RemoteTransport(host, port, "remote");
+  const { host, port, secure } = getRemoteFromUrl() ?? loadConn();
+  return new RemoteTransport(host, port, "remote", secure);
 }

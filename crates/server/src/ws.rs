@@ -6,14 +6,16 @@
 //! 断连时 release_all 释放本会话持有的全部端口（末位口才拆毁），杜绝泄漏。
 //! 数据流：client 命令 → SerialManager；EventBus 事件 → 推给 client。
 
+use crate::access_http::{self, Grant, SecureTransport};
 use crate::protocol::{data_frame, to_json, ClientMsg, OutFrame, ServerMsg};
 use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, Extension, Query, State,
     },
-    response::Response,
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use ss_core::{AcquireResult, ReleaseOutcome, SerialEvent, SessionId};
@@ -21,11 +23,67 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(serde::Deserialize)]
+pub(crate) struct AccessQuery {
+    access_ui: Option<u8>,
+    access_pair: Option<u8>,
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    secure: Option<Extension<SecureTransport>>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
+    Query(query): Query<AccessQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let secure = secure.is_some();
+    let same_origin = access_http::origin_allowed(&headers, secure);
+    if secure && !same_origin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if query.access_pair == Some(1) {
+        let Some(ConnectInfo(peer)) = peer.filter(|_| state.access.config().allows_verification(secure) && !headers.contains_key(header::ORIGIN)) else {
+            return StatusCode::FORBIDDEN.into_response();
+        };
+        let ws = if secure {
+            ws
+        } else {
+            const PAIR_PROTOCOL: &str = "serial-studio.access.v1";
+            let offered = headers.get(header::SEC_WEBSOCKET_PROTOCOL).and_then(|value| value.to_str().ok());
+            if !offered.is_some_and(|value| value.split(',').any(|protocol| protocol.trim() == PAIR_PROTOCOL)) {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            ws.protocols([PAIR_PROTOCOL])
+        };
+        return ws.max_message_size(256).max_frame_size(256)
+            .on_upgrade(move |socket| pair(socket, state, peer.ip(), secure));
+    }
+    let grant = Grant::new(&state, secure, &headers);
+    if !same_origin && grant.token.is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if headers.contains_key(header::AUTHORIZATION) && !grant.authenticated(&state, false) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let show_locked = query.access_ui == Some(1) && same_origin;
+    ws.on_upgrade(move |socket| handle_socket(socket, state, grant, show_locked))
+}
+
+async fn pair(mut socket: WebSocket, state: AppState, peer: std::net::IpAddr, secure: bool) {
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
+    let Ok(Some(Ok(Message::Text(text)))) = request else { return };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let reply = match state.access.verify(value.get("code").and_then(|v| v.as_str()).unwrap_or("").trim(), peer, secure) {
+        Ok(token) => serde_json::json!({"token": token}),
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    };
+    let _ = socket.send(Message::Text(reply.to_string())).await;
+}
+
+async fn handle_socket(socket: WebSocket, state: AppState, grant: Grant, show_locked: bool) {
+    let mut access_changes = state.access.subscribe();
+    if !grant.current(&state) { return; }
     // TODO(心跳对称): 客户端→服务端方向已由前端应用层 ping/pong 探活；反向（服务端探客户端死活）
     // 当前只靠 ws_rx.next() 返回 None/Err，TCP half-open 下可能数分钟才感知。如需更快回收 session，
     // 可在此起定时器，空闲超时则主动关闭连接。
@@ -48,21 +106,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // 推送初始端口列表与设备在线快照
     {
-        let ports = crate::list_ports_with_meta(&state).await;
+        let ports = access_http::visible_ports(&state, &grant, show_locked).await;
         let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
-        let devices = state.devices.device_states();
+        let devices = public_devices(&state);
         let _ = out_tx.send(to_json(ServerMsg::Devices { devices })).await;
     }
 
     // 设备上下线 → 重推 Devices 快照(连接存活期间设备增删/断连可见)
     let mut device_rx = state.devices.subscribe();
     let out_tx_dev = out_tx.clone();
-    let devices_mgr = state.devices.clone();
+    let device_state = state.clone();
     let device_task = tokio::spawn(async move {
         loop {
             match device_rx.recv().await {
                 Ok(_) => {
-                    let devices = devices_mgr.device_states();
+                    let devices = public_devices(&device_state);
                     if out_tx_dev
                         .send(to_json(ServerMsg::Devices { devices }))
                         .await
@@ -74,7 +132,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 // Lagged = 积压丢事件:若丢的是最后一个(如最终 Offline),裸 continue 会
                 // 让该连接的设备状态永久陈旧——重推一次快照自愈
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let devices = devices_mgr.device_states();
+                    let devices = public_devices(&device_state);
                     if out_tx_dev
                         .send(to_json(ServerMsg::Devices { devices }))
                         .await
@@ -90,10 +148,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // event → out channel（独立任务）
     let out_tx_evt = out_tx.clone();
+    let event_state = state.clone();
+    let event_grant = grant.clone();
     let event_task = tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
                 Ok(event) => {
+                    if !event_visible(&event, &event_state, &event_grant, session) { continue; }
                     if let Some(msg) = event_to_msg(&event) {
                         if out_tx_evt.send(msg).await.is_err() {
                             break;
@@ -170,11 +231,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut groups_rx = state.port_groups.subscribe();
     let groups_store = state.port_groups.clone();
     let groups_out = out_tx.clone();
+    let groups_state = state.clone();
+    let groups_grant = grant.clone();
     let groups_task = tokio::spawn(async move {
         loop {
             match groups_rx.recv().await {
                 Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     if let Ok(snapshot) = groups_store.get() {
+                        let snapshot = visible_groups(snapshot, &groups_state, &groups_grant);
                         if groups_out
                             .send(to_json(ServerMsg::PortGroupsChanged { snapshot }))
                             .await
@@ -190,8 +254,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     });
 
     // 主循环：client 命令 + 输出发送
+    let mut commands = tokio::task::JoinSet::new();
+    let mut expiry = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
+        if !grant.current(&state) { break; }
         tokio::select! {
+            _ = access_changes.changed() => {},
+            _ = expiry.tick() => {},
+            _ = commands.join_next(), if !commands.is_empty() => {},
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -199,8 +269,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // 否则 out channel 积压 → event_task 阻塞 → EventBus lagged 丢回显（快速输入吞字）
                         let state = state.clone();
                         let out_tx = out_tx.clone();
-                        tokio::spawn(async move {
-                            handle_client_msg(&text, &state, &out_tx, session).await;
+                        let grant = grant.clone();
+                        if commands.len() >= 64 { break; }
+                        commands.spawn(async move {
+                            handle_client_msg(&text, &state, &out_tx, session, &grant, show_locked).await;
                         });
                     }
                     Some(Ok(Message::Binary(_))) => {
@@ -213,11 +285,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             Some(out) = out_rx.recv() => {
+                if !grant.current(&state) { break; }
                 let msg = match out {
                     OutFrame::Text(s) => Message::Text(s),
                     OutFrame::Binary(v) => Message::Binary(v),
                 };
-                if ws_tx.send(msg).await.is_err() {
+                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), ws_tx.send(msg)).await, Ok(Ok(()))) {
                     break;
                 }
             }
@@ -234,6 +307,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     out_rx.close();
+    commands.shutdown().await;
     // 先停本连接的事件转发，再释放占有份额；末位口才拆毁，事件广播给其它仍在的客户端
     groups_task.abort();
     event_task.abort();
@@ -263,6 +337,45 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         );
     }
     tracing::info!("WS 客户端断开 (session={:?})", session);
+}
+
+fn public_devices(state: &AppState) -> Vec<crate::protocol::DeviceStateView> {
+    state.devices.device_states().into_iter().filter(|d| {
+        !state.access.blocked_all() && !state.devices.is_private(&d.id)
+    }).collect()
+}
+
+fn event_visible(event: &SerialEvent, state: &AppState, grant: &Grant, session: SessionId) -> bool {
+    let port = match event {
+        SerialEvent::DataReceived { port, .. }
+        | SerialEvent::PortOpened { port }
+        | SerialEvent::PortClosed { port }
+        | SerialEvent::PortDisconnected { port }
+        | SerialEvent::HoldersChanged { port, .. }
+        | SerialEvent::Error { port, .. } => port,
+        SerialEvent::ScriptLog { run_id, .. } => return state.script_runs.lock().unwrap().get(run_id)
+            .is_some_and(|run| matches!(run.owner, crate::ScriptOwner::Session(owner) if owner == session)),
+    };
+    !access_http::local_only(state, port)
+        && (!state.access.protects(port) || grant.authenticated(state, false))
+}
+
+fn host_blocked(state: &AppState, grant: &Grant, host: &str) -> bool {
+    let route = ss_core::compose_port_key(host, "shell");
+    access_http::local_only(state, &route) || (state.access.protects(&route) && !grant.authenticated(state, false))
+}
+
+fn visible_groups(
+    mut snapshot: crate::port_groups::Snapshot,
+    state: &AppState,
+    grant: &Grant,
+) -> crate::port_groups::Snapshot {
+    snapshot.data.assignments.retain(|port, _| {
+        !access_http::local_only(state, port)
+            && (!state.access.protects(port) || grant.authenticated(state, false))
+    });
+    snapshot.data.ssh_assignments.retain(|host, _| !host_blocked(state, grant, host));
+    snapshot
 }
 
 fn event_to_msg(event: &SerialEvent) -> Option<OutFrame> {
@@ -318,7 +431,10 @@ async fn handle_client_msg(
     state: &AppState,
     out_tx: &mpsc::Sender<OutFrame>,
     session: SessionId,
+    grant: &Grant,
+    show_locked: bool,
 ) {
+    if !grant.current(state) { return; }
     let msg: ClientMsg = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
@@ -334,6 +450,27 @@ async fn handle_client_msg(
         }
     };
 
+    let port_request = match &msg {
+        ClientMsg::Open { port, req, .. } | ClientMsg::Close { port, req }
+        | ClientMsg::Write { port, req, .. } | ClientMsg::SetAlias { port, req, .. } => Some((port, *req)),
+        ClientMsg::Resize { port, .. } | ClientMsg::RunMacro { port, .. } => Some((port, None)),
+        _ => None,
+    };
+    let canonical = port_request.map(|(port, _)| state.manager.canon_key(port));
+    if let Some(((port, req), canonical)) = port_request.zip(canonical.as_deref()) {
+        if access_http::blocked_port(state, grant, canonical) {
+            let _ = out_tx.send(to_json(ServerMsg::Error {
+                message: "此连接需要授权，或仅允许在本机使用".into(),
+                port: Some(port.clone()), req, ssh: None,
+            })).await;
+            return;
+        }
+    }
+    if !matches!(msg, ClientMsg::Ping | ClientMsg::Version { .. } | ClientMsg::List) {
+        grant.authenticated(state, true);
+    }
+    let protected = state.access.config().enabled;
+    let script_restricted = protected || state.devices.has_private_devices();
     match msg {
         ClientMsg::SshFiles {
             request_id,
@@ -341,7 +478,11 @@ async fn handle_client_msg(
             operation,
         } => {
             let owner = format!("ws:{session:?}");
-            let response = crate::ssh::files::execute(state, &owner, &host_id, operation).await;
+            let response = if host_blocked(state, grant, &host_id) {
+                Err("此连接需要授权，或仅允许在本机使用".into())
+            } else {
+                crate::ssh::files::execute(state, &owner, &host_id, operation).await
+            };
             let (result, error) = match response {
                 Ok(value) => (Some(value), None),
                 Err(error) => (None, Some(error)),
@@ -359,9 +500,14 @@ async fn handle_client_msg(
             }
         }
         ClientMsg::LibraryGet { request_id, kind } => {
+            let result = if state.access.blocked_all() && !grant.authenticated(state, false) {
+                Err("此操作需要授权".into())
+            } else {
+                crate::libraries::get(kind, &state.instance_id)
+            };
             send_library_result(
                 request_id,
-                crate::libraries::get(kind, &state.instance_id),
+                result,
                 state,
                 out_tx,
             )
@@ -372,14 +518,22 @@ async fn handle_client_msg(
             kind,
             changes,
         } => {
-            let result = crate::libraries::patch(kind, &changes, &state.instance_id);
+            let result = if script_restricted {
+                Err("保护模式下请在本机编辑共享库".into())
+            } else {
+                crate::libraries::patch(kind, &changes, &state.instance_id)
+            };
             if result.is_ok() && !changes.is_empty() {
                 let _ = state.script_bus.send(());
             }
             send_library_result(request_id, result, state, out_tx).await;
         }
         ClientMsg::PortGroupsGet { request_id } => {
-            let result = state.port_groups.get();
+            let result = if state.access.blocked_all() && !grant.authenticated(state, false) {
+                Err("此操作需要授权".into())
+            } else {
+                state.port_groups.get().map(|s| visible_groups(s, state, grant))
+            };
             let (snapshot, error) = match result {
                 Ok(value) => (Some(value), None),
                 Err(error) => (None, Some(error)),
@@ -396,7 +550,11 @@ async fn handle_client_msg(
             request_id,
             operation,
         } => {
-            let result = state.port_groups.update(operation);
+            let result = if script_restricted {
+                Err("保护模式下请在本机编辑连接分组".into())
+            } else {
+                state.port_groups.update(operation)
+            };
             let (snapshot, error) = match result {
                 Ok(value) => (Some(value), None),
                 Err(error) => (None, Some(error)),
@@ -410,7 +568,7 @@ async fn handle_client_msg(
                 .await;
         }
         ClientMsg::List => {
-            let ports = crate::list_ports_with_meta(state).await;
+            let ports = access_http::visible_ports(state, grant, show_locked).await;
             let _ = out_tx.send(to_json(ServerMsg::Ports { ports })).await;
         }
         ClientMsg::Open { port, config, req } => {
@@ -418,7 +576,7 @@ async fn handle_client_msg(
             // 回执口径与实际 map 键恒一致。设备客户端以真名登记 IO,
             // 数据帧(map 键口径)才与登记键一致——别名后缀寻址(如 test::GPS)的 RX 通路。
             // req 原样回带:设备客户端按请求精确配对回执(旧客户端不带,回 None)。
-            match state.manager.acquire(port.clone(), config, session).await {
+            match state.manager.acquire_canonical(canonical.unwrap_or_else(|| port.clone()), config, session).await {
                 Ok(AcquireResult::Opened {
                     config,
                     holders,
@@ -471,7 +629,7 @@ async fn handle_client_msg(
                 }
             }
         }
-        ClientMsg::Close { port, req } => match state.manager.release(&port, session).await {
+        ClientMsg::Close { port, req } => match state.manager.release_canonical(canonical.as_deref().unwrap_or(&port), session).await {
             Ok(ReleaseOutcome::Closed) => {
                 let _ = out_tx
                     .send(to_json(ServerMsg::Ok {
@@ -558,9 +716,8 @@ async fn handle_client_msg(
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
             let port_for_err = port.clone();
-            tokio::spawn(async move {
                 if let Err(e) = manager
-                    .write(port_for_err.clone(), bytes::Bytes::from(bytes))
+                    .write_canonical(canonical.unwrap_or_else(|| port_for_err.clone()), bytes::Bytes::from(bytes))
                     .await
                 {
                     tracing::warn!("端口 {} 异步写失败: {}", port_for_err, e);
@@ -573,7 +730,6 @@ async fn handle_client_msg(
                         }))
                         .await;
                 }
-            });
         }
         ClientMsg::RunMacro {
             name,
@@ -581,13 +737,19 @@ async fn handle_client_msg(
             r#macro: mac,
             run_id,
         } => {
+            let port = canonical.unwrap_or(port);
             // 宏定义由前端持有（本地存储），服务端无状态，只负责在指定端口执行
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
             // 注册停止信号(复用 script_runs 表):StopMacro 时 set flag,宏经 Delay 分段/Expect select! 退出。
             // paused 为占位 flag:宏不感知暂停(Pause/Resume 对宏 run_id 是 no-op,kind 区分后 warn)。
             let abort = Arc::new(AtomicBool::new(false));
-            state.script_runs.lock().unwrap().insert(
+            {
+                let mut runs = state.script_runs.lock().unwrap();
+                if runs.contains_key(&run_id) {
+                    return;
+                }
+                runs.insert(
                 run_id.clone(),
                 crate::ScriptRun {
                     abort: abort.clone(),
@@ -596,6 +758,7 @@ async fn handle_client_msg(
                     kind: crate::ScriptKind::Macro,
                 },
             );
+            }
             let script_runs = state.script_runs.clone();
             let run_id_for_cleanup = run_id.clone();
             let _ = out_tx
@@ -606,7 +769,7 @@ async fn handle_client_msg(
                 }))
                 .await;
             tokio::spawn(async move {
-                let result = ss_core::run_macro(&port, &mac, &manager, abort).await;
+                let result = ss_core::run_macro_canonical(&port, &mac, &manager, abort).await;
                 script_runs.lock().unwrap().remove(&run_id_for_cleanup);
                 let msg = match result {
                     Ok(()) => ServerMsg::MacroResult {
@@ -633,7 +796,7 @@ async fn handle_client_msg(
             run_id,
         } => {
             // 远程路径强制闸门:服务器默认 0.0.0.0 无认证,脚本执行须显式开启
-            if !state
+            if script_restricted || !state
                 .enable_scripting
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -669,7 +832,12 @@ async fn handle_client_msg(
             // 注册停止/暂停信号:StopScript 时 set abort;PauseScript/ResumeScript set/clear paused。
             let abort = Arc::new(AtomicBool::new(false));
             let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            state.script_runs.lock().unwrap().insert(
+            {
+                let mut runs = state.script_runs.lock().unwrap();
+                if runs.contains_key(&run_id) {
+                    return;
+                }
+                runs.insert(
                 run_id.clone(),
                 crate::ScriptRun {
                     abort: abort.clone(),
@@ -678,6 +846,7 @@ async fn handle_client_msg(
                     kind: crate::ScriptKind::Script,
                 },
             );
+            }
             let manager = state.manager.clone();
             let out_tx2 = out_tx.clone();
             let script_runs = state.script_runs.clone();
@@ -878,7 +1047,7 @@ async fn handle_client_msg(
             // 勿占 runtime worker 线程。回执带 port+req:设备客户端精确配对在途回执
             // (漏带会等满 10s 超时假报错)。
             let st = state.clone();
-            let p = port.clone();
+            let p = canonical.unwrap_or_else(|| port.clone());
             let result =
                 tokio::task::spawn_blocking(move || crate::set_alias_and_notify(&st, &p, alias))
                     .await
@@ -915,7 +1084,7 @@ async fn handle_client_msg(
             // 浏览器/扫描器等不带 id 的探针拿不到——instance_id 是跨重启永久
             // 身份,不对未认证连接无条件暴露指纹。旧版客户端形态(无字段)→
             // None → 应答同样无此字段(线格式与旧行为零差异)。
-            let enable_scripting = state
+            let enable_scripting = !script_restricted && state
                 .enable_scripting
                 .load(std::sync::atomic::Ordering::Relaxed);
             let _ = out_tx
@@ -938,13 +1107,28 @@ async fn handle_client_msg(
             let _ = out_tx.send(to_json(ServerMsg::Pong)).await;
         }
         ClientMsg::SshList => {
+            let hosts = state.ssh.registry_snapshot().into_iter().filter_map(|mut host| {
+                if host_blocked(state, grant, &host.id) { return None; }
+                if protected {
+                    match &mut host.auth {
+                        crate::ssh::SshAuthRecord::Password { password } => password.clear(),
+                        crate::ssh::SshAuthRecord::Key { key_path } => key_path.clear(),
+                        crate::ssh::SshAuthRecord::Agent => {}
+                    }
+                }
+                Some(host)
+            }).collect();
             let _ = out_tx
                 .send(to_json(ServerMsg::SshHosts {
-                    hosts: state.ssh.registry_snapshot(),
+                    hosts,
                 }))
                 .await;
         }
         ClientMsg::SshSave { hosts } => {
+            if protected {
+                reject_local_only(out_tx).await;
+                return;
+            }
             // 全量覆盖:先落盘(失败即不动内存)再同步会话池,成功后广播列表刷新
             match crate::ssh::store::save(&hosts).map(|()| {
                 state.ssh.update_registry(hosts);
@@ -970,6 +1154,12 @@ async fn handle_client_msg(
             }
         }
         ClientMsg::SshTest { host_id } => {
+            if host_blocked(state, grant, &host_id) {
+                let _ = out_tx.send(to_json(ServerMsg::SshTestResult {
+                    host_id, ok: false, message: "此连接需要授权".into(), ssh: None,
+                })).await;
+                return;
+            }
             // 直连探测(建连+认证+即拆),不经过会话池;结果带具体失败原因。
             let rec = state
                 .ssh
@@ -1006,6 +1196,10 @@ async fn handle_client_msg(
             }
         }
         ClientMsg::SshNextInstance { host_id, base } => {
+            if host_blocked(state, grant, &host_id) {
+                let _ = out_tx.send(to_json(ServerMsg::SshInstance { host_id, name: String::new() })).await;
+                return;
+            }
             // 以 manager 占有权快照为"已占用"依据:已开实例都在 manager map 里
             let occupied: Vec<String> = state
                 .manager
@@ -1020,6 +1214,10 @@ async fn handle_client_msg(
                 .await;
         }
         ClientMsg::SshTrustHost { host_id } => {
+            if protected || host_blocked(state, grant, &host_id) {
+                reject_local_only(out_tx).await;
+                return;
+            }
             // 直连记录指纹(spawn_blocking:block_on + 网络等待,勿占 worker)
             let st = state.clone();
             let result =
@@ -1051,7 +1249,7 @@ async fn handle_client_msg(
         }
         ClientMsg::Resize { port, cols, rows } => {
             // 仅 SSH 实例消费(PTY window_change);串口端口无尺寸概念,静默成功
-            let (dev, rest) = ss_core::split_port_key(&port);
+            let (dev, rest) = ss_core::split_port_key(canonical.as_deref().unwrap_or(&port));
             if dev != ss_core::LOCAL_DEVICE_ID && state.ssh.has_host(dev) {
                 state.ssh.resize_blocking(dev, rest, cols, rows);
             }
@@ -1091,4 +1289,11 @@ mod tests {
             OutFrame::Binary(_) => panic!("ScriptLog 应是 Text(JSON),非 Binary"),
         }
     }
+}
+
+async fn reject_local_only(out_tx: &mpsc::Sender<OutFrame>) {
+    let _ = out_tx.send(to_json(ServerMsg::Error {
+        message: "此操作需要在目标设备本机完成".into(),
+        port: None, req: None, ssh: None,
+    })).await;
 }

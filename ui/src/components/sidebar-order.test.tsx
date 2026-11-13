@@ -89,6 +89,37 @@ describe("connection list drag ordering", () => {
     expect(props.onTriggerPort).not.toHaveBeenCalled(); expect(props.onSshAction).not.toHaveBeenCalled();
   });
 
+  it("shows each relayed SSH under the device that provides its route", async () => {
+    const remoteA = { id: "a", host: "192.168.20.42", port: 18718 };
+    const remoteB = { id: "b", host: "192.0.2.4", port: 18700 };
+    const first = row("a::relayed::shell");
+    const second = row("b::relayed::shell");
+    const relayed: PortGroupView = {
+      devId: "relayed", label: "root@192.168.20.175", kind: "ssh", external: true,
+      ports: [first, row("a::relayed::shell@2"), second],
+    };
+    await render({ portGroups: [...groups, relayed], remotes: [remoteA, remoteB], activePort: second.pid });
+    const relayId = JSON.stringify(["ssh", "relayed"]);
+    expect(ids("devices")).toEqual(["a", "ssh", "b"]);
+    expect(ids(deviceScope("a"))).toContain(relayId);
+    expect(ids(deviceScope("b"))).toContain(relayId);
+    expect(item(deviceScope("a"), relayId).dataset.active).toBe("false");
+    expect(item(deviceScope("b"), relayId).dataset.active).toBe("true");
+    await act(async () => item(deviceScope("a"), relayId).querySelector("button")!.click());
+    expect(props.onTriggerPort).toHaveBeenCalledWith(first.pid);
+
+    await render({ portCollapsed: new Set(["a"]) });
+    expect(ids(deviceScope("a"))).toEqual([]);
+    await render({ query: "20.175" });
+    expect(ids(deviceScope("a"))).toEqual([relayId]);
+    expect(ids(deviceScope("b"))).toEqual([relayId]);
+    await render({
+      query: "", listView: "groups",
+      grouping: { ...props.grouping, sshAssignments: { relayed: ["Work"] } },
+    });
+    expect(ids(groupScope("Work")).filter((id) => id === relayId)).toEqual([relayId]);
+  });
+
   it("orders serial children only inside their device and rejects child-to-header drops", async () => {
     await render();
     await drag(item(deviceScope("a"), serialId("a::COM3")), item(deviceScope("a"), serialId("a::COM1")));

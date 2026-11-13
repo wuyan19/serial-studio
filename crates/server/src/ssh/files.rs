@@ -19,8 +19,7 @@ mod shell;
 const CHUNK: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE: Duration = Duration::from_secs(300);
-type Relay =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Relay = crate::device::client::WsStream;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -287,13 +286,7 @@ async fn execute_inner(
             }
         } else {
             let (device, rest) = host_id.split_once("::").ok_or("未知 SSH 设备")?;
-            let remote = state.devices.file_remote(device).ok_or("远程设备未注册")?;
-            let (mut socket, _) = tokio_tungstenite::connect_async(format!(
-                "ws://{}:{}/ws",
-                remote.host, remote.port
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
+            let mut socket = state.devices.connect_files(device).await?;
             match relay_request(&mut socket, rest, FileOperation::Open).await? {
                 FileResult::Opened { session, path } => (
                     Connection::Relay {
@@ -1091,6 +1084,7 @@ mod tests {
         ));
         let ssh = Arc::new(super::super::SshManager::empty());
         AppState {
+            access: Default::default(),
             port_groups: Arc::new(crate::port_groups::PortGroupsStore::memory("files-test")),
             manager,
             event_bus,
@@ -1121,6 +1115,8 @@ mod tests {
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         state.devices.update_registry(&[ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "hub".into(),
             host: "127.0.0.1".into(),
             port: listener.local_addr().unwrap().port(),
@@ -1265,6 +1261,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         state.devices.update_registry(&[ss_core::RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: "hub".into(),
             host: "127.0.0.1".into(),
             port,
