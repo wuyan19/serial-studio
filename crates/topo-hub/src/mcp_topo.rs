@@ -857,7 +857,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "acquire_lease",
-                "description": "申请设备租约（设备级排他写权，all-or-nothing）：topology / devices / endpoints（可并用取并集）至少一项。冲突整体拒绝并返回各设备当前持有者与到期时间；给 wait_timeout_ms 则服务端排队等待。默认 30 分钟，到期自动释放，长任务用 renew_lease 顺延。租约即写权：拿到后 exec_command / open_session 直接可用，无需打开端口。",
+                "description": "申请设备租约（设备级排他写权，all-or-nothing）：topology / devices / endpoints（可并用取并集）至少一项。冲突整体拒绝并返回各设备当前持有者与到期时间；给 wait_timeout_ms 则服务端排队等待。默认 30 分钟，到期自动释放，长任务用 renew_lease 顺延。租约即写权：拿到后 exec_command / open_session 直接可用，无需手动建立连接。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -956,7 +956,7 @@ impl McpExtension for TopoTools {
             }),
             json!({
                 "name": "close_session",
-                "description": "关闭持久终端会话（退出端口持有；末位持有者才真正关物理连接）。不释放租约；租约用 release_lease。device+channel 须与 open_session 一致。",
+                "description": "关闭持久终端会话（释放该通道的连接持有；末位持有者才真正断开连接）。不释放租约；租约用 release_lease。device+channel 须与 open_session 一致。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
