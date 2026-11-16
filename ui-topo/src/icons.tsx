@@ -247,6 +247,17 @@ export function IconBell({ className }: IconProps) {
 }
 
 /** 主题 —— 短袖 T 恤(换主题=换衣服)。 */
+export function IconServer({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="2.5" y="3" width="19" height="7.5" rx="2" />
+      <rect x="2.5" y="13.5" width="19" height="7.5" rx="2" />
+      <path d="M6.5 6.75h.01" />
+      <path d="M6.5 17.25h.01" />
+    </Svg>
+  );
+}
+
 export function IconShirt({ className }: IconProps) {
   return (
     <Svg className={className}>

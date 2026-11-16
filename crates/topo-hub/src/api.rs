@@ -9,7 +9,7 @@ use crate::lease;
 use crate::topology::{self, LinkInput, MemberInput, Topology};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde::Serialize;
@@ -130,6 +130,12 @@ pub fn routes() -> Router<TopoState> {
         .route("/api/leases/:id", axum::routing::delete(lease_force_delete))
         .route("/api/remotes", get(remotes_list).put(remotes_save))
         .route("/api/settings", get(settings_get).put(settings_put))
+        // 访问验证管理面（底座 AccessManager 的 REST 投影；serial-studio 桌面端
+        // 走 Tauri invoke，topo-hub 无壳故自给管理端点。返回体含验证码明文——
+        // 管理面与底座同前提：可信内网）
+        .route("/api/access/config", get(access_config_get).put(access_config_put))
+        .route("/api/access/code", post(access_code_rotate))
+        .route("/api/access/sessions", post(access_sessions_revoke))
         .route("/api/events", get(crate::events::sse))
 }
 
@@ -443,4 +449,35 @@ async fn devices_delete(
     })?;
     let _ = state.topo_bus.send(());
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ===== 访问验证管理面 =====
+// 说明：配置立即生效于闸与验证逻辑；TLS 监听的生命周期管理（supervisor 重绑
+// HTTPS/Telnet）是 serial-studio 桌面壳的能力，topo-hub 进程暂未接入——启用
+// 验证时走「允许 HTTP 验证」路径（配置校验允许无证书 + allow_http）。
+
+async fn access_config_get(State(state): State<TopoState>) -> Json<ss_server::access::AccessStatus> {
+    Json(state.base.access.status())
+}
+
+async fn access_config_put(
+    State(state): State<TopoState>,
+    Json(config): Json<ss_server::access::AccessConfig>,
+) -> Result<Json<ss_server::access::AccessStatus>, ApiError> {
+    // 校验+应用一体；拒绝时保原配置，错误文案回前端
+    state
+        .base
+        .access
+        .configure(config)
+        .map(|()| Json(state.base.access.status()))
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))
+}
+
+async fn access_code_rotate(State(state): State<TopoState>) -> Json<ss_server::access::AccessStatus> {
+    Json(state.base.access.rotate_code())
+}
+
+async fn access_sessions_revoke(State(state): State<TopoState>) -> StatusCode {
+    state.base.access.revoke_all();
+    StatusCode::NO_CONTENT
 }

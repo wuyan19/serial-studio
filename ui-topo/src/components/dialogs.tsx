@@ -2,22 +2,14 @@
  * 串口配置、设置面板（服务器+租约）、关于、添加远程设备、设备/端口详情、
  * SSH 管理/编辑/认证闭环/指纹确认、通用确认。 */
 import { useEffect, useRef, useState } from "react";
-import {
-  IconAlert,
-  IconCopy,
-  IconGear,
-  IconGlobe,
-  IconInfo,
-  IconPlug,
-  IconSsh,
-} from "../icons";
+import { IconAlert, IconCopy, IconGlobe, IconInfo, IconPlug, IconSsh } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "../primitives";
 import { BAUD_RATES, copyText, REPO_URL } from "../lib";
-import type { SerialConfig, SrvSettings, SshHost, SshOpenError } from "../types";
+import type { SerialConfig, SshHost, SshOpenError } from "../types";
 import type { PortView } from "../api";
 
 /** 遮罩点击关闭：mousedown 起点必须是遮罩本身（防框内选字拖出误关）。 */
-function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
+export function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
   if (e.target !== e.currentTarget) return;
   if (guard?.()) return;
   onClose();
@@ -151,110 +143,6 @@ export function SerialConfigDialog({
             打开
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ===== 设置面板（服务器 + 租约）=====
-
-export function SettingsPanel({
-  settings,
-  onSave,
-  onClose,
-}: {
-  settings: SrvSettings | null;
-  onSave: (s: SrvSettings) => void;
-  onClose: () => void;
-}) {
-  const [srv, setSrv] = useState<SrvSettings | null>(settings);
-  const [saved, setSaved] = useState(false);
-  useEffect(() => setSrv(settings), [settings]);
-
-  const apply = () => {
-    if (srv) {
-      onSave(srv);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    }
-  };
-  useDialogKeys({ onClose, onEnter: apply });
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
-
-  return (
-    <div className="dialog-overlay">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
-        <h3 className="dialog__title">
-          <IconGear /> 设置
-        </h3>
-        {srv ? (
-          <>
-            <div className="dialog__group-label">服务器监听（重启进程生效）</div>
-            <ConfigRow label="监听地址">
-              <input autoFocus value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="WS 端口">
-              <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="Telnet 端口">
-              <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="远程脚本">
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-                <input
-                  type="checkbox"
-                  checked={srv.enable_scripting}
-                  onChange={(e) => setSrv({ ...srv, enable_scripting: e.target.checked })}
-                />
-                <span>允许远程执行 JS 脚本</span>
-                <span title="服务器无认证，开启后任何已连接的客户端都可执行脚本（可读写本机文件）。" style={{ cursor: "help" }}>
-                  ⚠
-                </span>
-              </label>
-            </ConfigRow>
-            <ConfigRow label="脚本日志">
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-                <input
-                  type="checkbox"
-                  checked={srv.script_log_to_disk}
-                  onChange={(e) => setSrv({ ...srv, script_log_to_disk: e.target.checked })}
-                />
-                <span>log 输出自动落盘</span>
-              </label>
-            </ConfigRow>
-
-            <div className="dialog__group-label">租约（重启进程生效）</div>
-            <ConfigRow label="默认 TTL">
-              <input type="number" value={srv.lease.ttl_minutes} onChange={(e) => setSrv({ ...srv, lease: { ...srv.lease, ttl_minutes: Number(e.target.value) } })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="TTL 上限">
-              <input type="number" value={srv.lease.max_ttl_minutes} onChange={(e) => setSrv({ ...srv, lease: { ...srv.lease, max_ttl_minutes: Number(e.target.value) } })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="写闸">
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-                <input
-                  type="checkbox"
-                  checked={srv.lease.enable_gate}
-                  onChange={(e) => setSrv({ ...srv, lease: { ...srv.lease, enable_gate: e.target.checked } })}
-                />
-                <span>MCP 写操作须持租约</span>
-              </label>
-            </ConfigRow>
-
-            <div className="btn-row">
-              {saved && <span className="btn--save-pulse">已应用</span>}
-              <button className="btn btn--ghost" onClick={onClose}>
-                关闭
-              </button>
-              <button className="btn btn--primary" onClick={apply}>
-                应用
-              </button>
-            </div>
-          </>
-        ) : (
-          <div style={{ color: "var(--ink-faint)" }}>加载中…</div>
-        )}
       </div>
     </div>
   );

@@ -200,6 +200,15 @@ export const api = {
   saveRemotes: (devices: RemoteDeviceT[]) =>
     req<RemoteDeviceT[]>("/api/remotes", { method: "PUT", body: JSON.stringify({ devices }) }),
   settings: () => req<ServerSettings>("/api/settings"),
+  accessConfig: () => req<import("./access").AccessStatus>("/api/access/config"),
+  saveAccessConfig: (config: import("./access").AccessConfig) =>
+    req<import("./access").AccessStatus>("/api/access/config", {
+      method: "PUT",
+      body: JSON.stringify(config),
+    }),
+  rotateAccessCode: () =>
+    req<import("./access").AccessStatus>("/api/access/code", { method: "POST" }),
+  revokeAccessSessions: () => req<void>("/api/access/sessions", { method: "POST" }),
   saveSettings: (s: ServerSettings) =>
     req<ServerSettings>("/api/settings", { method: "PUT", body: JSON.stringify(s) }),
 };

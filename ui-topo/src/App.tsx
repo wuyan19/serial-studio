@@ -6,7 +6,8 @@ import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
 import { getTheme, setTheme, subscribe, THEMES, type Theme } from "./theme";
-import { AboutDialog, RemoteDialog, SettingsPanel } from "./components/dialogs";
+import { AboutDialog, RemoteDialog } from "./components/dialogs";
+import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
 import { IconGear, IconGlobe, IconInfo, IconLock, IconPlug, IconTopology } from "./icons";
 import type { SshHost } from "./types";
@@ -84,6 +85,7 @@ export default function App() {
       value={{ openDialog, sshHosts, openTerminal, toggleTermPanel }}
     >
       <div className="shell">
+        <div className="shell-row">
         <aside className="sidebar">
           <div
             className="brand"
@@ -128,23 +130,24 @@ export default function App() {
             </select>
           </div>
         </aside>
-        <main className="content">
-          <Outlet />
-        </main>
-        <TermPanel ref={termPanel} sshHosts={sshHosts} />
+          <main className="content">
+            <Outlet />
+          </main>
+          <TermPanel ref={termPanel} sshHosts={sshHosts} />
+        </div>
+        <footer className="statusbar">
+          <span className={`statusbar__conn${connUp ? "" : " statusbar__conn--off"}`}>
+            <span className={`dot${connUp ? " on" : ""}`} />
+            {connUp ? "已连接" : "重连中…"}
+          </span>
+          <span className="statusbar__msg">
+            topo-hub{version ? ` · ${version}` : ""}
+          </span>
+        </footer>
       </div>
 
       {dialog === "settings" && (
-        <SettingsPanel
-          settings={settings}
-          onClose={() => setDialog(null)}
-          onSave={(s) => {
-            api
-              .saveSettings(s)
-              .then(setSettings)
-              .catch(() => {});
-          }}
-        />
+        <SettingsPage version={version} settings={settings} onClose={() => setDialog(null)} />
       )}
       {dialog === "about" && <AboutDialog version={version} onClose={() => setDialog(null)} />}
       {dialog === "remote" && (

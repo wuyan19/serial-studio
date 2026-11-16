@@ -23,6 +23,13 @@
   --term-bg: #060708;
   --hairline: #23262c;
   --hairline-soft: #1d1f24;
+  --workspace-rail-bg: color-mix(in srgb, var(--surface) 45%, var(--bg));
+  --workspace-shell-border: var(--hairline);
+  --workspace-shell-shadow: none;
+  --workspace-tab-inset: 3px;
+  --workspace-shell-radius: 12px;
+  --workspace-shell-border-width: 1px;
+  --workspace-tab-radius: calc(var(--workspace-shell-radius) - var(--workspace-shell-border-width) - var(--workspace-tab-inset));
 
   /* Ink — Linear 实测(#f7f8f8 族) */
   --ink: #f7f8f8;
@@ -53,7 +60,10 @@
   --fs-lg: 16px;
   --fs-xl: 22px;
 
-  /* Shape / motion —— Linear 圆角语言:按钮/输入 8px、卡片 12px、小件 4px */
+  /* 状态栏高度：字号联动（与 main 同式） */
+  --workspace-status-height: calc(var(--fs-sm) * 1.45 + 12px);
+
+/* Shape / motion —— Linear 圆角语言:按钮/输入 8px、卡片 12px、小件 4px */
   --r-sm: 4px;
   --r-md: 10px;
   --r-pill: 999px;
@@ -3418,8 +3428,10 @@ button {
   width: 176px;
   flex-shrink: 0;
   padding: 14px 10px;
-  border-right: 1px solid var(--hairline);
   background: var(--surface);
+  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
+  border-radius: var(--workspace-shell-radius);
+  box-shadow: var(--workspace-shell-shadow);
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -3533,8 +3545,12 @@ button {
 .content {
   flex: 1;
   min-width: 0;
-  padding: 22px 30px;
+  padding: 20px 28px;
   overflow: auto;
+  background: var(--surface);
+  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
+  border-radius: var(--workspace-shell-radius);
+  box-shadow: var(--workspace-shell-shadow);
 }
 
 .page {
@@ -4366,8 +4382,11 @@ table tbody tr:hover td {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  border-left: 1px solid var(--hairline);
   background: var(--surface);
+  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
+  border-radius: var(--workspace-shell-radius);
+  box-shadow: var(--workspace-shell-shadow);
+  overflow: hidden;
   min-height: 0;
 }
 
