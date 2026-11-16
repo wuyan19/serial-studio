@@ -14,6 +14,25 @@ use ss_core::SerialConfig;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
+    SshFilesResult {
+        request_id: String,
+        result: Option<crate::ssh::files::FileResult>,
+        error: Option<String>,
+    },
+    LibraryResult {
+        request_id: String,
+        items: Option<serde_json::Value>,
+        error: Option<String>,
+        server_id: String,
+    },
+    PortGroupsResult {
+        request_id: String,
+        snapshot: Option<crate::port_groups::Snapshot>,
+        error: Option<String>,
+    },
+    PortGroupsChanged {
+        snapshot: crate::port_groups::Snapshot,
+    },
     Ports {
         ports: Vec<crate::PortView>,
     },
@@ -122,6 +141,8 @@ pub enum ServerMsg {
         host_id: String,
         ok: bool,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ssh: Option<crate::ssh::SshOpenError>,
     },
     /// ssh_next_instance 的直接回复:name = 分配的实例裸名(shell / shell@N)。
     SshInstance {
@@ -151,6 +172,27 @@ pub struct DeviceStateView {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMsg {
+    SshFiles {
+        request_id: String,
+        host_id: String,
+        operation: crate::ssh::files::FileOperation,
+    },
+    LibraryGet {
+        request_id: String,
+        kind: crate::libraries::Kind,
+    },
+    LibraryPatch {
+        request_id: String,
+        kind: crate::libraries::Kind,
+        changes: crate::libraries::Changes,
+    },
+    PortGroupsGet {
+        request_id: String,
+    },
+    PortGroupsUpdate {
+        request_id: String,
+        operation: crate::port_groups::Operation,
+    },
     List,
     Open {
         port: String,

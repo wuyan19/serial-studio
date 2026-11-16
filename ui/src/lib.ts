@@ -1,4 +1,5 @@
-import type { ConnConfig, Macro, PortId, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
+import type { ConnConfig, Macro, PortId, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig } from "./types";
+import { parseDeviceShareUrl } from "./device-share";
 
 // ===== 环境检测 / Tauri 调用 =====
 
@@ -175,6 +176,15 @@ export function displayPortName(pid: PortId): string {
   return idx < 0 ? pid : pid.slice(idx + 2);
 }
 
+/** Preserve the server-side route when allocating a sibling SSH endpoint. */
+export function sshTabTarget(row: Pick<PortInfo, "name" | "kind"> | undefined, legacySsh = false): { hostId: string; base: string } | undefined {
+  if (!row || (row.kind === undefined ? !legacySsh : row.kind !== "ssh")) return undefined;
+  const index = row.name.lastIndexOf("::");
+  if (index <= 0) return undefined;
+  const base = row.name.slice(index + 2).split("@")[0];
+  return base ? { hostId: row.name.slice(0, index), base } : undefined;
+}
+
 // ===== 终端记录文件名 =====
 
 /** 文件名消毒:Windows/Mac/Linux 通吃——非法字符与控制符替换为 _,空串回落占位。
@@ -245,6 +255,7 @@ export function saveConfig(config: SerialConfig) {
 
 const CONN_KEY = "serial-studio-conn";
 export function loadConn(): ConnConfig {
+  if (location.protocol === "https:") return { host: location.hostname, port: Number(location.port || 443), secure: true };
   try {
     const raw = localStorage.getItem(CONN_KEY);
     if (raw) return JSON.parse(raw);
@@ -264,6 +275,7 @@ export function saveConn(c: ConnConfig) {
 
 /** 远程窗口：URL ?remote=host:port 携带远程地址 */
 export function getRemoteFromUrl(): ConnConfig | null {
+  if (!isTauri() && location.protocol === "https:") return null;
   const remote = new URLSearchParams(location.search).get("remote");
   if (!remote) return null;
   const [host, portStr] = remote.split(":");
@@ -279,7 +291,7 @@ export function initConn(): ConnConfig {
     case "local":
       return { host: "127.0.0.1", port: 18700 };
     default:
-      return loadConn();
+      return parseDeviceShareUrl(location.href) ?? loadConn();
   }
 }
 

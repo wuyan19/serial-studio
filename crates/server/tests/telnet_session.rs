@@ -70,6 +70,10 @@ async fn boot() -> (
     ));
     devices.bind(Arc::downgrade(&devices));
     let state = AppState {
+        access: Default::default(),
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus: event_bus.clone(),

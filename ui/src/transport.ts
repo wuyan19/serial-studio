@@ -1,6 +1,15 @@
 import type { Macro, PortInfo, Script, SerialConfig, SshHost, SshOpenError } from "./types";
 import { Channel } from "@tauri-apps/api/core";
 import { getMode, getRemoteFromUrl, loadConn, tauriInvoke } from "./lib";
+import type { PortGroupsOperation, PortGroupsSnapshot } from "./port-groups";
+import type { LibraryChanges, LibraryKind, LibrarySnapshot } from "./library-protocol";
+import type { SshFileOperation, SshFileResult } from "./ssh-files";
+
+export interface SshTestResult {
+  ok: boolean;
+  message: string;
+  ssh?: SshOpenError;
+}
 
 /** acquire 结果：区分首开与附加（附加时 config 为端口实际配置，请求的配置被忽略）。 */
 export interface AcquiredResult {
@@ -63,6 +72,11 @@ export interface Transport {
   onMetaChanged(cb: () => void): () => void;
   /** 脚本库(scripts.json)变更——重新 load_scripts(MCP/Tauri 写入后及时同步,不必重启)。 */
   onScriptsChanged(cb: () => void): () => void;
+  getLibrary(kind: LibraryKind): Promise<LibrarySnapshot>;
+  patchLibrary(kind: LibraryKind, changes: LibraryChanges): Promise<LibrarySnapshot>;
+  getPortGroups(): Promise<PortGroupsSnapshot>;
+  updatePortGroups(operation: PortGroupsOperation): Promise<PortGroupsSnapshot>;
+  onPortGroups(cb: (snapshot: PortGroupsSnapshot) => void): () => void;
   onError(cb: (msg: string) => void): () => void;
   onMacroResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
   onScriptResult(cb: (runId: string | undefined, name: string, success: boolean, msg: string) => void): () => void;
@@ -83,7 +97,8 @@ export interface Transport {
   /** 全量覆盖注册表（内存权威；后端先落盘再同步会话池）。 */
   sshSave(hosts: SshHost[]): Promise<void>;
   /** 测试连接（建连+认证+即拆）；结果也经 onSshTestResult 推送。 */
-  sshTest(hostId: string): Promise<{ ok: boolean; message: string }>;
+  sshTest(hostId: string): Promise<SshTestResult>;
+  sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult>;
   /** 分配下一个空闲实例名（shell / shell@N，最小空闲）。 */
   sshNextInstance(hostId: string, base: string): Promise<string>;
   /** 信任 SSH 服务器指纹(确认弹窗的"信任并连接"):直连记录即断。返回记录的指纹。 */
@@ -127,6 +142,7 @@ export interface TransportEventsMap {
   holders: (port: string, holders: number) => void;
   metaChanged: () => void;
   scriptsChanged: () => void;
+  portGroups: (snapshot: PortGroupsSnapshot) => void;
   error: (msg: string) => void;
   macroResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
   scriptResult: (runId: string | undefined, name: string, success: boolean, msg: string) => void;
@@ -151,6 +167,7 @@ abstract class TransportEventBase {
     holders: new Set(),
     metaChanged: new Set(),
     scriptsChanged: new Set(),
+    portGroups: new Set(),
     error: new Set(),
     macroResult: new Set(),
     scriptResult: new Set(),
@@ -201,6 +218,10 @@ abstract class TransportEventBase {
     this.handlers.scriptsChanged.add(cb);
     return () => { this.handlers.scriptsChanged.delete(cb); };
   }
+  onPortGroups(cb: TransportEventsMap["portGroups"]) {
+    this.handlers.portGroups.add(cb);
+    return () => { this.handlers.portGroups.delete(cb); };
+  }
   onMacroResult(cb: TransportEventsMap["macroResult"]) {
     this.handlers.macroResult.add(cb);
     return () => { this.handlers.macroResult.delete(cb); };
@@ -233,6 +254,7 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   readonly devId: string; // = ownerId(接口注释见 Transport.devId)
   private host: string;
   private portNum: number;
+  private secure: boolean;
   /** 本 transport 所属的远程设备 id(${ownerId}:: 前缀的口属于远端 ss 本机,线上
    *  剥此前缀;其它首段(如 SSH 设备键 sshUuid::shell)是远端 server 内部键,整键
    *  透传——此前无条件剥首段,web 形态的 SSH 端口 open 会打到裸名上查无此口)。 */
@@ -245,8 +267,14 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private scriptSkillController: Controller<string> | null = null;
   /** SSH 管理面在途请求：ssh_list 单槽（快照语义）；test/next 按 host_id 路由（可并发）。 */
   private sshListController: Controller<void> | null = null;
-  private sshTestControllers = new Map<string, Controller<{ ok: boolean; message: string }>>();
+  private sshTestControllers = new Map<string, Controller<SshTestResult>>();
   private sshInstanceControllers = new Map<string, Controller<string>>();
+  private portGroupsRequests = new Map<string, Controller<PortGroupsSnapshot> & { timer: ReturnType<typeof setTimeout> }>();
+  private portGroupsRequestId = 0;
+  private libraryRequests = new Map<string, Controller<LibrarySnapshot> & { timer: ReturnType<typeof setTimeout> }>();
+  private libraryRequestId = 0;
+  private fileRequests = new Map<string, Controller<SshFileResult> & { timer: ReturnType<typeof setTimeout> }>();
+  private fileRequestId = 0;
   /** WS 就绪 promise：send() 据此等待 open，避免 CONNECTING 态 send 抛 InvalidStateError。每次重连重建。 */
   private openPromise!: Promise<void>;
   private openResolve: () => void = () => {};
@@ -258,10 +286,11 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(host: string, port: number, ownerId: string) {
+  constructor(host: string, port: number, ownerId: string, secure = false) {
     super();
     this.host = host;
     this.portNum = port;
+    this.secure = secure;
     this.ownerId = ownerId;
     this.devId = ownerId;
     this.connect();
@@ -270,7 +299,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   /** 建立 WS + 绑事件。构造与每次重连都走这里；openPromise 在此重建供 send() 等待新一轮 open。 */
   private connect() {
     if (this.closed) return; // dispose 后漏过 clearTimers 的退避回调不再新建连接
-    const ws = new WebSocket(`ws://${this.host}:${this.portNum}/ws`);
+    const host = this.host.includes(":") && !this.host.startsWith("[") ? `[${this.host}]` : this.host;
+    const ws = new WebSocket(`${this.secure ? "wss" : "ws"}://${host}:${this.portNum}/ws?access_ui=1`);
     ws.binaryType = "arraybuffer"; // 数据帧 Binary，控制帧 Text
     this.ws = ws;
     this.openPromise = new Promise<void>((resolve) => { this.openResolve = resolve; });
@@ -313,6 +343,32 @@ export class RemoteTransport extends TransportEventBase implements Transport {
       }
       const msg = JSON.parse(e.data);
       switch (msg.type) {
+        case "library_result": {
+          const request = this.libraryRequests.get(msg.request_id);
+          if (request) {
+            clearTimeout(request.timer);
+            this.libraryRequests.delete(msg.request_id);
+            if (msg.error) request.reject(new Error(String(msg.error)));
+            else if (msg.items && typeof msg.items === "object" && !Array.isArray(msg.items) && typeof msg.server_id === "string") {
+              request.resolve({ items: msg.items, serverId: msg.server_id });
+            } else request.reject(new Error("宏 / 脚本库返回了无效响应"));
+          }
+          break;
+        }
+        case "port_groups_changed":
+          this.handlers.portGroups.forEach((cb) => cb(msg.snapshot as PortGroupsSnapshot));
+          break;
+        case "port_groups_result": {
+          const request = this.portGroupsRequests.get(msg.request_id);
+          if (request) {
+            clearTimeout(request.timer);
+            this.portGroupsRequests.delete(msg.request_id);
+            if (msg.error) request.reject(new Error(String(msg.error)));
+            else if (msg.snapshot) request.resolve(msg.snapshot as PortGroupsSnapshot);
+            else request.reject(new Error("分组服务返回了无效响应"));
+          }
+          break;
+        }
         case "ports":
           // 推送模型：每个 ports 消息都推给所有订阅者（后到覆盖先到，避免 resolver 丢回复）
           this.handlers.ports.forEach((cb) => cb(msg.ports as PortInfo[]));
@@ -353,13 +409,14 @@ export class RemoteTransport extends TransportEventBase implements Transport {
             message: msg.message as string,
             ssh: msg.ssh as SshOpenError | undefined,
           };
-          this.handlers.error.forEach((cb) => cb(msg.message));
           // 在途 open 的失败回执(port 匹配 wire name)→ reject 该 open(此前 Promise
           // 永悬,认证失败只 toast 不闭环)
           const wire = typeof msg.port === "string" ? msg.port : null;
           if (wire && this.openResolvers.has(wire)) {
             this.openResolvers.get(wire)!.reject(Object.assign(new Error(openErr.message), openErr));
             this.openResolvers.delete(wire);
+          } else {
+            this.handlers.error.forEach((cb) => cb(msg.message));
           }
           break;
         }
@@ -397,7 +454,8 @@ export class RemoteTransport extends TransportEventBase implements Transport {
           }
           break;
         case "ssh_test_result": {
-          const r = { ok: !!msg.ok, message: (msg.message as string) ?? "" };
+          const r: SshTestResult = { ok: !!msg.ok, message: (msg.message as string) ?? "" };
+          if (msg.ssh) r.ssh = msg.ssh as SshOpenError;
           this.handlers.sshTestResult.forEach((cb) => cb(msg.host_id, r.ok, r.message));
           this.sshTestControllers.get(msg.host_id)?.resolve(r);
           this.sshTestControllers.delete(msg.host_id);
@@ -406,6 +464,15 @@ export class RemoteTransport extends TransportEventBase implements Transport {
         case "ssh_instance": {
           this.sshInstanceControllers.get(msg.host_id)?.resolve(msg.name as string);
           this.sshInstanceControllers.delete(msg.host_id);
+          break;
+        }
+        case "ssh_files_result": {
+          const pending = this.fileRequests.get(msg.request_id);
+          if (!pending) break;
+          clearTimeout(pending.timer);
+          this.fileRequests.delete(msg.request_id);
+          if (msg.error || !msg.result) pending.reject(new Error(msg.error || "文件服务返回了无效结果"));
+          else pending.resolve(msg.result as SshFileResult);
           break;
         }
       }
@@ -455,6 +522,12 @@ export class RemoteTransport extends TransportEventBase implements Transport {
 
   /** reject 所有在途请求（断连 / dispose），防 getVersion/getScriptSkill/open 的 Promise 永悬。 */
   private rejectPending(err: Error) {
+    this.fileRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.fileRequests.clear();
+    this.libraryRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.libraryRequests.clear();
+    this.portGroupsRequests.forEach((request) => { clearTimeout(request.timer); request.reject(err); });
+    this.portGroupsRequests.clear();
     this.openResolvers.forEach((c) => c.reject(err));
     this.openResolvers.clear();
     this.versionController?.reject(err);
@@ -486,6 +559,50 @@ export class RemoteTransport extends TransportEventBase implements Transport {
   async list() {
     await this.send(JSON.stringify({ action: "list" }));
   }
+  private async requestPortGroups(operation?: PortGroupsOperation): Promise<PortGroupsSnapshot> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `groups-${++this.portGroupsRequestId}`;
+    return new Promise<PortGroupsSnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.portGroupsRequests.delete(request_id);
+        reject(new Error("分组请求超时，请刷新确认保存结果"));
+      }, 10_000);
+      this.portGroupsRequests.set(request_id, { resolve, reject, timer });
+      try {
+        this.ws.send(JSON.stringify(operation
+          ? { action: "port_groups_update", request_id, operation }
+          : { action: "port_groups_get", request_id }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.portGroupsRequests.delete(request_id);
+        reject(error);
+      }
+    });
+  }
+  getPortGroups() { return this.requestPortGroups(); }
+  updatePortGroups(operation: PortGroupsOperation) { return this.requestPortGroups(operation); }
+  private async requestLibrary(kind: LibraryKind, changes?: LibraryChanges): Promise<LibrarySnapshot> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `library-${++this.libraryRequestId}`;
+    return new Promise<LibrarySnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.libraryRequests.delete(request_id);
+        reject(new Error("宏 / 脚本库请求超时，请刷新确认保存结果"));
+      }, 10_000);
+      this.libraryRequests.set(request_id, { resolve, reject, timer });
+      try {
+        this.ws.send(JSON.stringify(changes
+          ? { action: "library_patch", request_id, kind, changes }
+          : { action: "library_get", request_id, kind }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.libraryRequests.delete(request_id);
+        reject(error);
+      }
+    });
+  }
+  getLibrary(kind: LibraryKind) { return this.requestLibrary(kind); }
+  patchLibrary(kind: LibraryKind, changes: LibraryChanges) { return this.requestLibrary(kind, changes); }
   /** 远程形态无需主动拉:服务端 WS 打开即推 Devices 快照(ws.rs 会话入口),设备
    *  上下线再增量推送。此处空实现仅为满足接口——调用方订阅后统一触发一次。 */
   async listDevices() {}
@@ -494,13 +611,19 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     return () => { this.handlers.ports.delete(cb); };
   }
   async open(port: string, config: SerialConfig) {
+    const state = this.ws.readyState;
+    if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) throw new Error("连接已断开");
     const wire = this.wireName(port);
-    // 先挂 controller 再发：确保 "acquired" 回复到达时 controller 已就位（不靠微任务时序）。
-    const result = new Promise<AcquiredResult>((resolve, reject) => {
-      this.openResolvers.set(wire, { resolve, reject });
+    return new Promise<AcquiredResult>((resolve, reject) => {
+      const request = { resolve, reject };
+      this.openResolvers.set(wire, request);
+      // A disconnect can reject the request before send finishes waiting for the handshake.
+      void this.send(JSON.stringify({ action: "open", port: wire, config })).catch((error) => {
+        if (this.openResolvers.get(wire) !== request) return;
+        this.openResolvers.delete(wire);
+        reject(error);
+      });
     });
-    await this.send(JSON.stringify({ action: "open", port: wire, config }));
-    return result;
   }
   async close(port: string) {
     await this.send(JSON.stringify({ action: "close", port: this.wireName(port) }));
@@ -560,11 +683,28 @@ export class RemoteTransport extends TransportEventBase implements Transport {
     // 此处不再等回执——save 后 UI 状态由前端持有,推送仅同步其它客户端。
   }
   async sshTest(hostId: string) {
-    const result = new Promise<{ ok: boolean; message: string }>((resolve, reject) => {
+    const result = new Promise<SshTestResult>((resolve, reject) => {
       this.sshTestControllers.set(hostId, { resolve, reject });
     });
     await this.send(JSON.stringify({ action: "ssh_test", host_id: hostId }));
     return result;
+  }
+  async sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult> {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new Error("服务尚未连接");
+    const request_id = `files-${++this.fileRequestId}`;
+    return new Promise<SshFileResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.fileRequests.delete(request_id);
+        reject(new Error("SSH 文件请求超时，请重新打开文件面板"));
+      }, 45_000);
+      this.fileRequests.set(request_id, { resolve, reject, timer });
+      try { this.ws.send(JSON.stringify({ action: "ssh_files", request_id, host_id: hostId, operation })); }
+      catch (error) {
+        clearTimeout(timer);
+        this.fileRequests.delete(request_id);
+        reject(error);
+      }
+    });
   }
   async sshNextInstance(hostId: string, base: string) {
     const result = new Promise<string>((resolve, reject) => {
@@ -610,6 +750,7 @@ export class LocalTransport extends TransportEventBase implements Transport {
   private disposed = false;
   /** per-port 字节流通道。Channel 无需 unlisten，关闭走 close_port_stream 摘除。 */
   private streamChannels = new Map<string, Channel<ArrayBuffer>>();
+  private configurationEventsReady: Promise<void>;
 
   /** 登记注销函数;实例已销毁则注册即撤销。 */
   private track(un: () => void) {
@@ -620,6 +761,13 @@ export class LocalTransport extends TransportEventBase implements Transport {
   constructor() {
     super();
     this.setupEvents();
+    this.configurationEventsReady = import("@tauri-apps/api/event").then(async ({ listen }) => {
+      this.track(await listen("scripts-changed", () => this.handlers.scriptsChanged.forEach((cb) => cb())));
+      if (this.disposed) return;
+      this.track(await listen<PortGroupsSnapshot>("port-groups-changed", (event) =>
+        this.handlers.portGroups.forEach((cb) => cb(event.payload))));
+    });
+    void this.configurationEventsReady.catch(() => {});
   }
 
   private setupEvents() {
@@ -674,10 +822,6 @@ export class LocalTransport extends TransportEventBase implements Transport {
           this.handlers.metaChanged.forEach((cb) => cb()))
       );
       this.track(
-        await listen("scripts-changed", () =>
-          this.handlers.scriptsChanged.forEach((cb) => cb()))
-      );
-      this.track(
         await listen("devices-changed", () => { void this.listDevices(); })
       );
     };
@@ -687,6 +831,26 @@ export class LocalTransport extends TransportEventBase implements Transport {
   async list() {
     const ports = await tauriInvoke<PortInfo[]>("list_ports");
     this.handlers.ports.forEach((cb) => cb(ports));
+  }
+  async getPortGroups() {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<PortGroupsSnapshot>("get_port_groups");
+  }
+  async getLibrary(kind: LibraryKind) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<LibrarySnapshot>("library_get", { kind });
+  }
+  async patchLibrary(kind: LibraryKind, changes: LibraryChanges) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<LibrarySnapshot>("library_patch", { kind, changes });
+  }
+  async updatePortGroups(operation: PortGroupsOperation) {
+    await this.configurationEventsReady;
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<PortGroupsSnapshot>("update_port_groups", { operation });
   }
   /** 主动拉设备在线快照(事件只触发拉取,状态以后端为唯一真相)。 */
   async listDevices() {
@@ -783,12 +947,16 @@ export class LocalTransport extends TransportEventBase implements Transport {
     this.handlers.sshHosts.forEach((cb) => cb(hosts)); // 成功回推新表(本地权威即所发)
   }
   async sshTest(hostId: string) {
-    const [ok, message] = await tauriInvoke<[boolean, string]>("ssh_test", { hostId });
+    const [ok, message, ssh] = await tauriInvoke<[boolean, string, SshOpenError?]>("ssh_test", { hostId });
     this.handlers.sshTestResult.forEach((cb) => cb(hostId, ok, message));
-    return { ok, message };
+    return ssh ? { ok, message, ssh } : { ok, message };
   }
   async sshNextInstance(hostId: string, base: string) {
     return tauriInvoke<string>("ssh_next_instance", { hostId, base });
+  }
+  async sshFiles(hostId: string, operation: SshFileOperation): Promise<SshFileResult> {
+    if (this.disposed) throw new Error("transport disposed");
+    return tauriInvoke<SshFileResult>("ssh_files", { hostId, operation });
   }
   async sshTrustHost(hostId: string) {
     return tauriInvoke<string>("ssh_trust_host", { hostId });
@@ -815,6 +983,6 @@ export class LocalTransport extends TransportEventBase implements Transport {
 /** 按运行形态创建 Transport：本地 → IPC；远程窗口/Web → WS。形态判定唯一入口 getMode()。 */
 export function createTransport(): Transport {
   if (getMode() === "local") return new LocalTransport();
-  const { host, port } = getRemoteFromUrl() ?? loadConn();
-  return new RemoteTransport(host, port, "remote");
+  const { host, port, secure } = getRemoteFromUrl() ?? loadConn();
+  return new RemoteTransport(host, port, "remote", secure);
 }

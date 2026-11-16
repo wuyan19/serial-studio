@@ -10,9 +10,6 @@
 
 use crate::address::AliasMatch;
 use crate::AppState;
-use axum::extract::State;
-use axum::response::IntoResponse;
-use axum::Json;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
@@ -43,37 +40,6 @@ pub fn mcp_session_of(token: &str) -> Option<ss_core::SessionId> {
         .get(token)
         .copied()
 }
-
-/// axum POST /mcp 入口。读入站 `Mcp-Session-Id` 头（principal 来源之一）；
-/// initialize 时回签同各头（标准 Streamable HTTP 约定），结果体同带一份
-/// `session_token` 供不读头的客户端显式传工具 token 参数。
-pub async fn mcp_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    body: String,
-) -> axum::response::Response {
-    let incoming = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let resp = handle_request_with(incoming.as_deref(), &body, &state).await;
-    let is_init = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
-        .as_deref()
-        == Some("initialize");
-    let token = is_init
-        .then(|| resp["result"]["session_token"].as_str().map(str::to_string))
-        .flatten();
-    let mut out = Json(resp).into_response();
-    if let Some(token) = token {
-        if let Ok(hv) = axum::http::HeaderValue::from_str(&token) {
-            out.headers_mut().insert("mcp-session-id", hv);
-        }
-    }
-    out
-}
-
 pub async fn handle_request(body: &str, state: &AppState) -> Value {
     handle_request_with(None, body, state).await
 }
@@ -352,7 +318,11 @@ async fn handle_tools_call(params: &Value, session: Option<&str>, state: &AppSta
         "serial_script" | "serial_debug_script" | "serial_run_script" => {
             tool_serial_script(arguments, principal, state).await
         }
+        "serial_save_script" if state.access.config().enabled || state.devices.has_private_devices() =>
+            error_text("保护模式下请在本机编辑脚本".into()),
         "serial_save_script" => tool_serial_save_script(arguments, &state.script_bus).await,
+        "serial_delete_script" if state.access.config().enabled || state.devices.has_private_devices() =>
+            error_text("保护模式下请在本机编辑脚本".into()),
         "serial_delete_script" => tool_serial_delete_script(arguments, &state.script_bus).await,
         "serial_get_script" | "serial_list_scripts" => tool_serial_get_script(arguments).await,
         "port_open" => tool_port_open(arguments, principal, state).await,
@@ -384,19 +354,23 @@ async fn resolve_port(args: &Value, state: &AppState) -> Result<String, String> 
     let manager = &state.manager;
     if let Some(p) = args.get("port").and_then(|v| v.as_str()) {
         let key = manager.canon_key(p);
+        if crate::access_http::restricted(state, &key) {
+            return Err("此连接不允许通过 MCP 访问".into());
+        }
         // 输入是裸名且未被解析改写 → 查索引区分"无此别名"与"歧义"
         let norm = ss_core::normalize_port_key(p);
         if norm == key && !norm.contains(ss_core::PORT_KEY_SEP) {
             if let AliasMatch::Ambiguous(cands) = state.addresses.lookup_port(&norm) {
                 return Err(format!(
                     "端口别名「{}」匹配多个端口 {:?},请使用完整键或设备昵称作用域(如 设备昵称::端口)",
-                    norm, cands
+                    norm, cands.into_iter().filter(|key| !crate::access_http::restricted(state, key)).collect::<Vec<_>>()
                 ));
             }
         }
         return Ok(key);
     }
-    let open = manager.list_open_ports().await;
+    let open: Vec<_> = manager.list_open_ports().await.into_iter()
+        .filter(|key| !crate::access_http::restricted(state, key)).collect();
     match open.len() {
         1 => Ok(open[0].clone()),
         0 => Err("未打开任何串口，请先在 UI 打开或通过 WS 的 open 命令".into()),
@@ -486,7 +460,8 @@ async fn tool_serial_list(args: Value, state: &AppState) -> Value {
     }
     // 合并视图(本地 + 远端设备桶 + 别名 + 本地占有权覆盖)——与 UI/REST/WS 同一数据源,
     // 远程设备的端口对 MCP 可见且带远端别名(下沉后 MCP 免费获得远程能力的落点)
-    let views = crate::list_ports_with_meta(state).await;
+    let mut views = crate::list_ports_with_meta(state).await;
+    views.retain(|v| !crate::access_http::restricted(state, &v.info.name));
     if views.is_empty() {
         return ok_text("未发现任何串口".into());
     }
@@ -549,7 +524,7 @@ async fn tool_serial_send(args: Value, state: &AppState) -> Value {
         .unwrap_or(true);
 
     // 换行由端口 line_ending 决定（open 时配），这里只声明是否追加
-    match manager.send(&port, data_str, format, auto_newline).await {
+    match manager.send_canonical(&port, data_str, format, auto_newline).await {
         Ok(0) => error_text("No data to send".into()),
         Ok(n) => {
             let timeout_ms = args.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(0);
@@ -559,7 +534,7 @@ async fn tool_serial_send(args: Value, state: &AppState) -> Value {
                 // 静默期 250ms：交互式 CLI「立即回显→执行停顿→输出」两段式间隔常大于
                 // 40ms；代价是每次调用尾延约 +210ms,换完整响应值得
                 let resp = manager
-                    .drain_buffer_quiet(&port, timeout_ms, 250)
+                    .drain_buffer_quiet_canonical(&port, timeout_ms, 250)
                     .await
                     .unwrap_or_default();
                 if resp.is_empty() {
@@ -590,7 +565,7 @@ async fn tool_serial_read(args: Value, state: &AppState) -> Value {
         .and_then(|f| f.as_str())
         .unwrap_or("text");
 
-    let data = match manager.drain_buffer(&port, timeout_ms).await {
+    let data = match manager.drain_buffer_canonical(&port, timeout_ms).await {
         Ok(d) => d,
         Err(e) => return error_text(e.to_string()),
     };
@@ -611,9 +586,9 @@ async fn tool_serial_status(args: Value, state: &AppState) -> Value {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
-    match manager.status(&port).await {
+    match manager.status_canonical(&port).await {
         Some(cfg) => {
-            let holders = manager.holder_count(&port).await.unwrap_or(0);
+            let holders = manager.holder_count_canonical(&port).await.unwrap_or(0);
             // 别名从合并视图取(本地 ports.json + 远端缓存透传),远端口的别名也能展示
             let alias = crate::list_ports_with_meta(state)
                 .await
@@ -684,7 +659,7 @@ async fn tool_serial_grep(args: Value, state: &AppState) -> Value {
         if pat.is_empty() {
             return error_text("Pattern is empty".into());
         }
-        let matches = match manager.grep_buffer_bytes(&port, pat, timeout_ms).await {
+        let matches = match manager.grep_buffer_bytes_canonical(&port, pat, timeout_ms).await {
             Ok(m) => m,
             Err(e) => return error_text(e.to_string()),
         };
@@ -704,7 +679,7 @@ async fn tool_serial_grep(args: Value, state: &AppState) -> Value {
             .collect();
         ok_text(out.join("\n"))
     } else {
-        match manager.grep_buffer(&port, pattern, timeout_ms).await {
+        match manager.grep_buffer_canonical(&port, pattern, timeout_ms).await {
             Ok(lines) => {
                 if lines.is_empty() {
                     ok_text("No match found (timeout)".into())
@@ -723,7 +698,7 @@ async fn tool_serial_clear(args: Value, state: &AppState) -> Value {
         Ok(p) => p,
         Err(e) => return error_text(e),
     };
-    match manager.clear_buffer(&port).await {
+    match manager.clear_buffer_canonical(&port).await {
         Ok(()) => ok_text("Buffer cleared".into()),
         Err(e) => error_text(e.to_string()),
     }
@@ -788,6 +763,9 @@ async fn execute_script(
     script_name: Option<&str>,
 ) -> Value {
     let manager = &state.manager;
+    if state.access.config().enabled || state.devices.has_private_devices() {
+        return error_text("保护模式下请在本机执行脚本".into());
+    }
     // 远程 MCP 路径强制闸门:服务器无认证,脚本执行须显式开启
     if !state
         .enable_scripting
@@ -800,7 +778,7 @@ async fn execute_script(
         Err(e) => return error_text(e),
     };
     // 端口预检:未打开则脚本内 send 静默失败却显示"完成",误导。
-    if !manager.is_open(&port).await || manager.is_disconnected(&port).await {
+    if !manager.is_open_canonical(&port).await || manager.is_disconnected_canonical(&port).await {
         return error_text(format!("端口 {} 未打开或已断开", port));
     }
     // 并发上限(同 WS):防 DoS。permit 借用 semaphore,持到 run_script 完成(函数返回即释放)。
@@ -1126,6 +1104,8 @@ mod tests {
             "inst-mcp-test",
         ));
         AppState {
+            access: Default::default(),
+            port_groups: Arc::new(crate::port_groups::PortGroupsStore::memory("inst-mcp-test")),
             manager: Arc::new(SerialManager::new(
                 event_bus.clone(),
                 Arc::new(RealPortOpener),

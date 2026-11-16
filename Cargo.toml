@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/device", "crates/server", "crates/tauri-app", "crates/topo-hub"]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.21.0"
 edition = "2021"
 license = "MIT"
 

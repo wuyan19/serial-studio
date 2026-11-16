@@ -1,6 +1,7 @@
 /** 底层原语：布局行、通用 hook、端口名标签、别名 inline 输入、分组头、活动栏图标。
 各对话框/编辑器/终端视图共用，不依赖其它组件模块。 */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconChevronRight } from "../icons";
 
 // ===== 通用 =====
 
@@ -11,6 +12,15 @@ export function ConfigRow({ label, children }: { label: string; children: React.
       {children}
     </div>
   );
+}
+
+/** 遮罩点击关闭的统一判定:必须 mousedown 起点就是遮罩本身。
+ *  不能用 onClick——框内选字拖到遮罩上松手时,click 会派发到公共祖先(恰是遮罩),
+ *  target 判断防不住,误关丢选区。mousedown 判定是标准方案(react-modal 同款)。 */
+export function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
+  if (e.target !== e.currentTarget) return; // 按下点在对话框内
+  if (guard?.()) return; // 上下文不允许关(如下载进行中)
+  onClose();
 }
 
 /** 模块级对话框栈:嵌套对话框(编辑器上叠确认框、确认框上再叠帮助浮层)的按键归属仲裁——
@@ -253,6 +263,7 @@ export function GroupHead({
   renamePlaceholder = "分组名",
   title,
   badge,
+  dragProps,
 }: {
   name: string;
   count: number;
@@ -277,6 +288,7 @@ export function GroupHead({
   title?: string;
   /** 组名尾随徽标（SSH 设备卡的 "SSH" 标记——与远程 ss 设备卡的视觉区分）。 */
   badge?: string;
+  dragProps?: React.HTMLAttributes<HTMLDivElement>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -303,6 +315,8 @@ export function GroupHead({
 
   return (
     <div
+      {...dragProps}
+      draggable={renaming ? false : dragProps?.draggable}
       className="macro-group__head"
       ref={headRef}
       title={title}
@@ -335,9 +349,8 @@ export function GroupHead({
       }}
     >
       {leading}
-      {/* 单字形 + 旋转:▼/▶ 两个字形在各平台字体里字号不一致(收起态偏大),
-          同一 ▶ 旋转 90° 保证两种状态视觉同大,顺带平滑过渡 */}
-      <span className={`macro-group__caret${collapsed ? "" : " macro-group__caret--open"}`}>▶</span>
+      {/* ">" 单线雪佛龙 + 旋转(90° 朝下):展开/收起两态同一字形,平滑过渡 */}
+      <IconChevronRight className={`macro-group__caret${collapsed ? "" : " macro-group__caret--open"}`} />
       {renaming ? (
         <InlineAliasInput
           initial={renameInitial ?? name}

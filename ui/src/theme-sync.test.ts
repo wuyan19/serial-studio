@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -14,6 +15,52 @@ const themeTs = readFileSync(new URL("theme.ts", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const stylesCss = readFileSync(new URL("styles.css", import.meta.url), "utf8");
 
+function initialTheme(saved: string | null, light: boolean, unavailable = false) {
+  const attributes: Record<string, string> = {};
+  const values = new Map<string, string>();
+  if (saved !== null) values.set("serial-studio-theme", saved);
+  const script = indexHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  if (!script) throw new Error("Missing startup theme script");
+  runInNewContext(script, {
+    document: { documentElement: { setAttribute: (key: string, value: string) => { attributes[key] = value; } } },
+    localStorage: {
+      getItem: (key: string) => {
+        if (unavailable) throw new Error("Storage unavailable");
+        return values.get(key) ?? null;
+      },
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    },
+    window: { matchMedia: () => ({ matches: light }) },
+  });
+  return { attributes, values };
+}
+
+describe("startup theme selection", () => {
+  it("uses the Codex system variant for new users", () => {
+    expect(initialTheme(null, true).attributes).toMatchObject({ "data-theme": "codex-light", "data-lum": "light" });
+    expect(initialTheme(null, false).attributes).toMatchObject({ "data-theme": "codex", "data-lum": "dark" });
+  });
+
+  it("migrates saved themes to the corresponding dark or light choice", () => {
+    for (const { id, lum } of themes) {
+      const result = initialTheme(id, lum !== "light");
+      const expected = lum === "light" ? "codex-light" : "codex";
+      expect(result.attributes).toMatchObject({ "data-theme": expected, "data-lum": lum });
+      expect(result.values.get("serial-studio-theme")).toBe(expected);
+    }
+  });
+
+  it("preserves the legacy theme migration", () => {
+    const result = initialTheme("light", false);
+    expect(result.attributes["data-theme"]).toBe("codex-light");
+    expect(result.values.get("serial-studio-theme")).toBe("codex-light");
+  });
+
+  it("provides a readable fallback without browser storage", () => {
+    expect(initialTheme(null, true, true).attributes).toMatchObject({ "data-theme": "codex", "data-lum": "dark" });
+  });
+});
+
 /** 从 theme.ts 源码按序提取 (id, lum) 对——只认对象字面量里的带引号值,
  *  ThemeDef 接口的 `id: string` / `lum: "dark" | "light"` 声明不会命中前者的 id,
  *  且接口块位于全部条目之前,顺序扫描安全。 */
@@ -21,7 +68,8 @@ function extractThemes(): { id: string; lum: string }[] {
   const out: { id: string; lum: string }[] = [];
   const re = /id: "([a-z0-9-]+)"[\s\S]*?lum: "(dark|light)"/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(themeTs))) out.push({ id: m[1], lum: m[2] });
+  const registry = themeTs.split("export const THEMES = [")[1].split("] as const satisfies readonly ThemeDef[];")[0];
+  while ((m = re.exec(registry))) out.push({ id: m[1], lum: m[2] });
   return out;
 }
 

@@ -2,6 +2,7 @@
  *  关闭:点击菜单外(捕获)/ Escape / 滚轮 / 窗口 resize。纯视图组件,无业务依赖。 */
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { IconCheck } from "../icons";
 
 export interface ContextMenuItem {
   /** 分隔线项:只渲染 hr,其余字段忽略。 */
@@ -9,6 +10,7 @@ export interface ContextMenuItem {
   label?: string;
   /** 右侧弱化提示文字(快捷键等)。 */
   hint?: string;
+  checked?: boolean;
   disabled?: boolean;
   onSelect?: () => void;
 }
@@ -39,6 +41,7 @@ export function ContextMenu({
     el.style.left = `${flipX ? Math.max(8, x - r.width) : x}px`;
     el.style.top = `${flipY ? Math.max(8, y - r.height) : y}px`;
     el.style.visibility = "visible";
+    el.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')?.focus({ preventScroll: true });
   }, [x, y]);
 
   // 全局关闭监听:mousedown 用捕获阶段——抢在任何 onClick 处理前收场,避免
@@ -74,6 +77,16 @@ export function ContextMenu({
       className="ctx-menu"
       role="menu"
       style={{ left: x, top: y, visibility: "hidden" }}
+      onKeyDown={(e) => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+        const options = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? []);
+        if (!options.length) return;
+        e.preventDefault();
+        const current = options.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === "Home" ? 0 : e.key === "End" ? options.length - 1
+          : (current + (e.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+        options[next].focus();
+      }}
       onContextMenu={(e) => {
         // 菜单自身上再右键:不弹原生菜单也不重开,仅关闭(防套娃)。
         // 必须 stopPropagation:portal 合成事件沿 fiber 树冒泡,会打到 TermView 根的
@@ -90,7 +103,8 @@ export function ContextMenu({
           <button
             key={i}
             className="ctx-menu__item"
-            role="menuitem"
+            role={it.checked === undefined ? "menuitem" : "menuitemradio"}
+            aria-checked={it.checked}
             data-disabled={it.disabled ? "true" : undefined}
             aria-disabled={it.disabled || undefined}
             // mousedown 不改焦点(标准菜单行为):点菜单项不把焦点从终端挪走,
@@ -104,6 +118,7 @@ export function ContextMenu({
           >
             <span>{it.label}</span>
             {it.hint && <span className="ctx-menu__hint">{it.hint}</span>}
+            {it.checked !== undefined && <span className="ctx-menu__check" aria-hidden="true">{it.checked && <IconCheck />}</span>}
           </button>
         ),
       )}

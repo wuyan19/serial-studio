@@ -14,6 +14,8 @@
 //! 热重启：改监听配置 → invoke apply_settings → Supervisor.stop()+start()，
 //! 不重启程序，串口连接/宏保留（AppState 共享，只换 listener）。
 
+mod share;
+mod ssh_local_files;
 mod tray;
 
 use clap::Parser;
@@ -108,8 +110,62 @@ fn show_system_menu(window: tauri::WebviewWindow) {
 fn show_system_menu() {}
 
 #[tauri::command]
+async fn get_port_groups(
+    state: tauri::State<'_, AppState>,
+) -> Result<ss_server::port_groups::Snapshot, String> {
+    state.port_groups.get()
+}
+
+#[tauri::command]
+async fn update_port_groups(
+    state: tauri::State<'_, AppState>,
+    operation: ss_server::port_groups::Operation,
+) -> Result<ss_server::port_groups::Snapshot, String> {
+    state.port_groups.update(operation)
+}
+
+#[tauri::command]
 async fn get_settings() -> Result<Settings, String> {
     Ok(ss_server::settings::load())
+}
+
+fn require_access_admin(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" { Ok(()) } else { Err("请在本机主窗口管理远程访问验证".into()) }
+}
+
+#[tauri::command]
+async fn get_access_status(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<ss_server::access::AccessStatus, String> {
+    require_access_admin(&window)?;
+    Ok(state.access.status())
+}
+
+#[tauri::command]
+async fn save_access_config(
+    window: tauri::WebviewWindow,
+    config: ss_server::access::AccessConfig,
+    supervisor: tauri::State<'_, Arc<ServiceSupervisor>>,
+) -> Result<(), String> {
+    require_access_admin(&window)?;
+    supervisor.configure_access(config, &ss_server::settings::load()).await
+}
+
+#[tauri::command]
+async fn rotate_access_code(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<ss_server::access::AccessStatus, String> {
+    require_access_admin(&window)?;
+    Ok(state.access.rotate_code())
+}
+
+#[tauri::command]
+async fn revoke_access_sessions(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    require_access_admin(&window)?;
+    state.access.revoke_all();
+    Ok(())
+}
+
+#[tauri::command]
+async fn verify_remote_access(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, dev_id: String, code: String) -> Result<(), String> {
+    require_access_admin(&window)?;
+    state.devices.verify_remote_access(&dev_id, code.trim()).await
 }
 
 #[tauri::command]
@@ -178,9 +234,33 @@ async fn load_macros() -> Result<std::collections::BTreeMap<String, ss_core::Mac
 /// 保存用户宏到 macros.json。
 #[tauri::command]
 async fn save_macros(
+    state: tauri::State<'_, AppState>,
     macros: std::collections::BTreeMap<String, ss_core::Macro>,
 ) -> Result<(), String> {
-    ss_server::macros_store::save(&macros)
+    ss_server::macros_store::save(&macros)?;
+    let _ = state.script_bus.send(());
+    Ok(())
+}
+
+#[tauri::command]
+async fn library_get(
+    state: tauri::State<'_, AppState>,
+    kind: ss_server::libraries::Kind,
+) -> Result<ss_server::libraries::Snapshot, String> {
+    ss_server::libraries::get(kind, &state.instance_id)
+}
+
+#[tauri::command]
+async fn library_patch(
+    state: tauri::State<'_, AppState>,
+    kind: ss_server::libraries::Kind,
+    changes: ss_server::libraries::Changes,
+) -> Result<ss_server::libraries::Snapshot, String> {
+    let result = ss_server::libraries::patch(kind, &changes, &state.instance_id)?;
+    if !changes.is_empty() {
+        let _ = state.script_bus.send(());
+    }
+    Ok(result)
 }
 
 /// 加载远程设备列表（配置目录 remotes.json）。桌面端持久化，跟着机器走。
@@ -470,12 +550,12 @@ async fn ssh_save(
     Ok(())
 }
 
-/// SSH 设备测试连接（建连+认证+即拆，不进会话池）。结果 (ok, 失败原因)。
+/// Test without creating a terminal; keep classified errors for confirmation dialogs.
 #[tauri::command]
 async fn ssh_test(
     state: tauri::State<'_, AppState>,
     host_id: String,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<ss_server::ssh::SshOpenError>), String> {
     let rec = state
         .ssh
         .registry_snapshot()
@@ -483,9 +563,26 @@ async fn ssh_test(
         .find(|r| r.id == host_id)
         .ok_or_else(|| format!("未知 SSH 设备: {host_id}"))?;
     match ss_server::ssh::session::test_connection(rec).await {
-        Ok(()) => Ok((true, String::new())),
-        Err(e) => Ok((false, e.message())),
+        Ok(()) => Ok((true, String::new(), None)),
+        Err(e) => Ok((false, e.message(), Some(e))),
     }
+}
+
+/// File sessions belong to the invoking window, independently of terminal ownership.
+#[tauri::command]
+async fn ssh_files(
+    state: tauri::State<'_, AppState>,
+    window: tauri::Window,
+    host_id: String,
+    operation: ss_server::ssh::files::FileOperation,
+) -> Result<ss_server::ssh::files::FileResult, String> {
+    let owner = format!("window:{}", window.label());
+    let result = ss_server::ssh::files::execute(&state.ssh, &state.devices, &owner, &host_id, operation).await;
+    if window.app_handle().get_webview_window(window.label()).is_none() {
+        ss_server::ssh::files::release_owner(&state.ssh, &owner).await;
+        return Err("窗口已关闭".into());
+    }
+    result
 }
 
 /// 分配下一个空闲 SSH 实例名（shell / shell@N，最小空闲；以 manager 占有权快照为唯一依据）。
@@ -903,7 +1000,22 @@ fn spawn_event_emitter(
     meta_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
     script_bus: std::sync::Arc<tokio::sync::broadcast::Sender<()>>,
     devices: std::sync::Arc<ss_server::device::DeviceClientManager>,
+    port_groups: std::sync::Arc<ss_server::port_groups::PortGroupsStore>,
 ) {
+    let app_groups = app.clone();
+    let mut groups_rx = port_groups.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match groups_rx.recv().await {
+                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(snapshot) = port_groups.get() {
+                        let _ = app_groups.emit("port-groups-changed", snapshot);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     let app_meta = app.clone(); // 第二个 spawn 用；下面的 async move 会 move 掉 app
     let app_script = app.clone(); // 第三个 spawn（script_bus）用
     let app_dev = app.clone(); // 第四个 spawn（device_bus）用
@@ -1062,6 +1174,16 @@ fn run_gui() {
                 if let Some(channels) = app.try_state::<PortChannels>() {
                     channels.remove_window(&label);
                 }
+                if let Some(files) = app.try_state::<ssh_local_files::LocalFiles>() {
+                    files.release_window(&label);
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    let state = state.inner().clone();
+                    let owner = format!("window:{label}");
+                    tauri::async_runtime::spawn(async move {
+                        ss_server::ssh::files::release_owner(&state.ssh, &owner).await;
+                    });
+                }
                 let mgr = app.try_state::<AppState>().map(|s| s.manager.clone());
                 let session = app
                     .try_state::<SessionRegistry>()
@@ -1131,7 +1253,7 @@ fn run_gui() {
             tray::setup(app.handle());
 
             // 本地模式数据流：原始事件 → per-(window,port) channel 字节直传（A/B：跳过合批测延迟）
-            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone());
+            spawn_event_emitter(app.handle().clone(), state.event_bus.clone(), state.meta_bus.clone(), state.script_bus.clone(), state.devices.clone(), state.port_groups.clone());
 
             // 启动初始服务（异步，不阻塞 setup）。成功/失败都 emit 给前端，
             // 失败时（端口被占用等）界面出持久横幅，避免“服务没起来用户不知道”。
@@ -1155,11 +1277,29 @@ fn run_gui() {
             app.manage(state);
             app.manage(supervisor);
             app.manage(CaptureFiles::default()); // 终端记录会话(GUI 侧独立状态,非应用日志)
+            app.manage(ssh_local_files::LocalFiles::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ssh_local_files::ssh_local_pick_upload,
+            ssh_local_files::ssh_local_read,
+            ssh_local_files::ssh_local_pick_download,
+            ssh_local_files::ssh_local_write,
+            ssh_local_files::ssh_local_mkdir,
+            ssh_local_files::ssh_local_release,
+            share::get_share_addresses,
+            share::get_local_share_hosts,
+            library_get,
+            library_patch,
+            get_port_groups,
+            update_port_groups,
             get_settings,
             save_settings,
+            get_access_status,
+            save_access_config,
+            rotate_access_code,
+            revoke_access_sessions,
+            verify_remote_access,
             apply_settings,
             open_script_log_dir,
             service_status,
@@ -1181,6 +1321,7 @@ fn run_gui() {
             ssh_list,
             ssh_save,
             ssh_test,
+            ssh_files,
             ssh_trust_host,
             ssh_next_instance,
             resize_port,

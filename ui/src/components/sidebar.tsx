@@ -1,22 +1,31 @@
-/**
- * 次侧栏三个活动面板：端口列表 / 宏库 / 脚本库。
- * 纯展示 + 回调上行——数据与操作全部由 App 注入，面板自身无状态（折叠态也由 App 持有持久化）。
- */
-import { useState, type RefObject } from "react";
+/** Sidebar panels keep display preferences separate from application operations. */
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { DeviceView, PortId, PortInfo, PortRow, RemoteDevice } from "../types";
 import { displayPortName, getMode, groupBy } from "../lib";
+import { connectionRows, defaultConnectionSections, selectSshPort, type ConnectionListRow } from "../connection-list";
+import { useListOrder } from "../use-list-order";
+import {
+  getGroupMemberships, type PortGrouping, type PortGroupsOperation,
+} from "../port-groups";
 import {
   IconClose,
   IconEdit,
   IconExport,
   IconImport,
-  IconPlus,
   IconPower,
-  IconRefresh,
   IconTrash,
 } from "../icons";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
 import { GroupHead, InlineAliasInput, PortLabel } from "./primitives";
+
+/** 列表视图状态上提到 App(面板 ··· 菜单切换),持久化键与加载器由此导出。 */
+export const PORT_LIST_VIEW_KEY = "serial-studio-port-list-view";
+export type PortListView = "default" | "groups";
+
+export function loadPortListView(): PortListView {
+  try { return localStorage.getItem(PORT_LIST_VIEW_KEY) === "groups" ? "groups" : "default"; }
+  catch { return "default"; }
+}
 
 /** 端口分组卡（App 派生：本地卡 + 远程设备卡 + SSH 设备卡 + 补充卡）。 */
 export interface PortGroupView {
@@ -25,8 +34,7 @@ export interface PortGroupView {
   online?: boolean;
   /** 桶内行带 ingest 定型的 pid（与事件回流键同源）。 */
   ports: PortRow[];
-  /** SSH 设备卡：带 "SSH" 徽标、无在线点（lazy 连接，状态在 shell 行）、
-   *  隐藏强关按钮（终端关闭用实例行 ✕），右键菜单为 SSH 动作。 */
+  /** SSH devices are presented as one row while retaining their endpoint identities. */
   kind?: "ssh";
   /** 组头悬停提示（SSH 卡兜底显示 user@host:port——设了昵称后地址无处可看）。 */
   detail?: string;
@@ -52,6 +60,7 @@ export function PortsPanel({
   portCollapsed,
   onTogglePortGroup,
   activePort,
+  openPorts,
   aliasEditPort,
   onSetAliasEdit,
   onTriggerPort,
@@ -59,21 +68,42 @@ export function PortsPanel({
   onCancelAlias,
   onForceClose,
   onReconnectRemote,
+  onVerifyRemote,
   onDisconnectRemote,
   onRemoveRemote,
   onRenameRemote,
   onShowDeviceDetail,
   onSshAction,
+  readOnlySsh = false,
+  onNewSshTerminal,
   onClosePort,
   onCopyPortKey,
   onShowPortDetail,
   onRefresh,
+  listView,
+  query = "",
+  visible = true,
+  grouping,
+  groupsReady,
+  groupsError,
+  onUpdateGroups,
+  onToggleCustomGroup,
+  orderScope = "local",
 }: {
+  orderScope?: string;
+  grouping: PortGrouping;
+  groupsReady: boolean;
+  groupsError: string;
+  onUpdateGroups: (operation: PortGroupsOperation) => Promise<void>;
+  onToggleCustomGroup: (name: string) => void;
+  query?: string;
+  visible?: boolean;
   portGroups: PortGroupView[];
   remotes: RemoteDevice[];
   portCollapsed: Set<string>;
   onTogglePortGroup: (devId: string) => void;
   activePort: PortId;
+  openPorts: PortId[];
   /** 正在编辑别名的端口复合键（list 处触发），null = 未编辑。 */
   aliasEditPort: PortId | null;
   onSetAliasEdit: (pid: PortId) => void;
@@ -82,6 +112,7 @@ export function PortsPanel({
   onCancelAlias: () => void;
   onForceClose: (pid: PortId) => void;
   onReconnectRemote: (dev: RemoteDevice) => void;
+  onVerifyRemote?: (dev: RemoteDevice) => void;
   onDisconnectRemote: (dev: RemoteDevice) => void;
   onRemoveRemote: (dev: RemoteDevice) => void;
   /** 设备卡改名(空串=清除昵称,标题回退 host:port)。仅本地桌面形态传入。 */
@@ -90,6 +121,8 @@ export function PortsPanel({
   onShowDeviceDetail: (target: DeviceDetailTarget) => void;
   /** SSH 设备卡菜单动作（connect=新建终端 / edit=打开管理弹窗编辑 / delete=删除）。 */
   onSshAction: (devId: string, action: "connect" | "edit" | "delete") => void;
+  readOnlySsh?: boolean;
+  onNewSshTerminal: (pid: PortId) => void;
   /** SSH 实例行 ✕:关闭该终端(本地 release;多人共享时他人不受影响)。 */
   onClosePort: (pid: PortId) => void;
   /** 右键「复制端口键」:复制服务端侧键(row.name——脚本/MCP 的寻址值,web 形态
@@ -98,194 +131,283 @@ export function PortsPanel({
   /** 右键「端口详情」:打开该端点的只读详情弹窗(端口键/属主设备/状态等)。 */
   onShowPortDetail: (pid: PortId) => void;
   onRefresh: () => void;
+  /** 列表视图(default/groups)已上提到 App(··· 菜单切换),此处只消费。 */
+  listView: PortListView;
 }) {
-  /** 端口行右键菜单锚点(一次一个;编辑别名进行中放行原生右键)。 */
-  const [keyMenu, setKeyMenu] = useState<{ x: number; y: number; row: PortRow } | null>(null);
-  const keyMenuItems: ContextMenuItem[] = keyMenu
-    ? [
-        { label: "端口详情", onSelect: () => onShowPortDetail(keyMenu.row.pid) },
-        { label: "复制端口键", onSelect: () => onCopyPortKey(keyMenu.row) },
-      ]
-    : [];
-  return (
-    <>
-      <div className="section-head">
-        <h4 className="section-head__title">PORTS</h4>
-        <button className="icon-btn" onClick={onRefresh} title="刷新" aria-label="刷新端口列表">
-          <IconRefresh />
-        </button>
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [groupName, setGroupName] = useState("");
+  const [groupError, setGroupError] = useState("");
+  const [groupSaving, setGroupSaving] = useState(false);
+  const order = useListOrder(orderScope);
+  const devices = order.sort("devices", portGroups, group => group.devId);
+  const customNames = order.sort("groups", grouping.names, name => name);
+  const memberScope = (name: string) => JSON.stringify(["group", name]);
+  const deviceScope = (id: string) => JSON.stringify(["device", id]);
+  const rowKey = (row: ConnectionListRow) => JSON.stringify(row.kind === "ssh" ? ["ssh", row.group.devId] : ["serial", row.port.pid]);
+  const search = query.trim().toLocaleLowerCase();
+  const buckets = (listView === "groups" ? customNames : []).map((name) => {
+    const matches = connectionRows(devices, grouping, name, query);
+    const visibleIds = new Set(matches.map(rowKey));
+    return { name, rows: order.sort(memberScope(name), connectionRows(devices, grouping, name, ""), rowKey)
+      .filter(row => visibleIds.has(rowKey(row))) };
+  });
+  const updateGroups = async (operation: PortGroupsOperation): Promise<boolean> => {
+    setGroupError("");
+    try { await onUpdateGroups(operation); return true; }
+    catch (error) { setGroupError(String(error instanceof Error ? error.message : error)); return false; }
+  };
+  const createGroup = async () => {
+    if (groupSaving) return;
+    const name = groupName.trim();
+    if (!name) { setGroupError("请输入分组名称"); return; }
+    if (grouping.names.includes(name)) { setGroupError("分组名称已存在"); return; }
+    setGroupSaving(true);
+    if (await updateGroups({ type: "create", name })) {
+      setCreatingGroup(false);
+      setGroupName("");
+    }
+    setGroupSaving(false);
+  };
+  type SshRow = Extract<ConnectionListRow, { kind: "ssh" }>;
+  const [keyMenu, setKeyMenu] = useState<({ x: number; y: number } & (
+    { kind: "serial"; port: PortRow } | { kind: "ssh"; row: SshRow }
+  )) | null>(null);
+  useEffect(() => {
+    if (!visible) {
+      setKeyMenu(null);
+    }
+  }, [visible]);
+
+  const portMembershipItems = (port: PortRow): ContextMenuItem[] => [
+    ...grouping.names.map((name) => ({
+      label: `添加到分组：${name}`,
+      disabled: !groupsReady || getGroupMemberships(grouping.assignments, port.pid).includes(name),
+      onSelect: () => { void updateGroups({ type: "membership", kind: "port", id: port.name, name, included: true }); },
+    })),
+    ...getGroupMemberships(grouping.assignments, port.pid).map((name) => ({
+      label: `从分组移出：${name}`,
+      disabled: !groupsReady,
+      onSelect: () => { void updateGroups({ type: "membership", kind: "port", id: port.name, name, included: false }); },
+    })),
+  ];
+  const sshMembershipItems = (group: PortGroupView): ContextMenuItem[] => grouping.names.map((name) => {
+    const included = getGroupMemberships(grouping.sshAssignments, group.devId).includes(name) ||
+      group.ports.some((port) => getGroupMemberships(grouping.assignments, port.pid).includes(name));
+    return {
+      label: `${included ? "从分组移出" : "添加到分组"}：${name}`,
+      disabled: !groupsReady,
+      onSelect: () => {
+        void (async () => {
+          if (!await updateGroups({ type: "membership", kind: "ssh", id: group.devId, name, included: !included })) return;
+          if (included) {
+            for (const port of group.ports) {
+              if (getGroupMemberships(grouping.assignments, port.pid).includes(name) &&
+                !await updateGroups({ type: "membership", kind: "port", id: port.name, name, included: false })) break;
+            }
+          }
+        })();
+      },
+    };
+  });
+  const portMenuItems = (port: PortRow): ContextMenuItem[] => [
+    { label: "端口详情", onSelect: () => onShowPortDetail(port.pid) },
+    { label: "复制端口键", onSelect: () => onCopyPortKey(port) },
+  ];
+  const sshMenuItems = ({ group, ports }: SshRow): ContextMenuItem[] => {
+    const selected = selectSshPort(ports, activePort);
+    const ownSessions = ports.filter((port) => openPorts.includes(port.pid));
+    const labelOf = (port: PortRow) => port.alias?.trim() || displayPortName(port.name);
+    return [
+      {
+        label: "新建终端",
+        disabled: !selected && group.external,
+        onSelect: () => selected ? onNewSshTerminal(selected.pid) : onSshAction(group.devId, "connect"),
+      },
+      ...ownSessions.map((port) => ({ label: `切换终端：${labelOf(port)}`, onSelect: () => onTriggerPort(port.pid) })),
+      ...ownSessions.map((port) => ({ label: `关闭终端：${labelOf(port)}`, onSelect: () => onClosePort(port.pid) })),
+      { sep: true },
+      { label: "设备详情", onSelect: () => onShowDeviceDetail(group.external && group.meta ? { kind: "meta", device: group.meta } : { kind: "ssh", devId: group.devId }) },
+      ...(!group.external && !readOnlySsh ? [
+        { label: "编辑设备", onSelect: () => onSshAction(group.devId, "edit") },
+        { label: "删除设备", onSelect: () => onSshAction(group.devId, "delete") },
+      ] : []),
+      ...(selected ? portMenuItems(selected) : []),
+      ...(grouping.names.length ? [{ sep: true }, ...sshMembershipItems(devices.find((device) => device.devId === group.devId) ?? group)] : []),
+    ];
+  };
+  const keyMenuItems: ContextMenuItem[] = !keyMenu ? [] : keyMenu.kind === "ssh" ? sshMenuItems(keyMenu.row) : [
+    ...portMenuItems(keyMenu.port),
+    ...(grouping.names.length ? [{ sep: true }, ...portMembershipItems(keyMenu.port)] : []),
+  ];
+
+  const renderSerial = (group: PortGroupView, port: PortRow, showSource: boolean, scope: string, ids: string[]) => {
+    const pid = port.pid;
+    const shown = displayPortName(port.name);
+    const editing = aliasEditPort === pid;
+    const canForce = !port.locked && getMode() === "local" && port.opened;
+    return <div
+      {...order.bind(scope, rowKey({ kind: "serial", group, port }), ids)}
+      draggable={!editing}
+      key={`serial:${pid}`} className="port-item-row port-item-row--single"
+      data-active={pid === activePort} data-opened={port.opened || undefined}
+      data-force={canForce || undefined} data-editing={editing || undefined}
+      title={`${port.alias?.trim() ? `${port.alias} · ` : ""}${port.name} · ${group.detail ?? group.label}${port.locked ? " · 需要验证" : ""}`}
+      onContextMenu={(event) => {
+        if (editing || port.locked) return;
+        event.preventDefault();
+        setKeyMenu({ x: event.clientX, y: event.clientY, kind: "serial", port });
+      }}
+    >
+      <div className="port-item" role="button" tabIndex={0}
+        onClick={() => { if (!editing) onTriggerPort(pid); }}
+        onKeyDown={(event) => {
+          if (!editing && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            onTriggerPort(pid);
+          }
+        }}
+      >
+        <span className={`port-item__dot${port.opened ? " open" : ""}`} />
+        <span className="port-item__name">
+          {editing ? <InlineAliasInput initial={port.alias ?? ""} placeholder={`为 ${shown} 设置别名`} onCommit={(alias) => onCommitAlias(pid, alias)} onCancel={onCancelAlias} /> : <>
+            <PortLabel name={shown} alias={port.alias} />
+            {showSource && <span className="port-item__source"> · {group.label}</span>}
+          </>}
+        </span>
+        {port.locked ? <span className="port-item__kind access-locked">需验证</span> : port.opened && port.holders > 0 && <span className="port-item__holders">{port.holders}</span>}
       </div>
-      {portGroups.map((grp) => {
-        const isSsh = grp.kind === "ssh";
-        // 级联补充卡:本机无注册表条目,动作菜单无处派发,只给详情
-        const isExternal = grp.external === true && !!grp.meta;
-        const isLocalCard = !isSsh && grp.devId === "local";
-        const dev = !isSsh && grp.devId !== "local" ? remotes.find((r) => r.id === grp.devId) : null;
-        // 设备卡重命名仅本地桌面形态(remotes.json 持久化;web/远程窗口 connConfig 派生不落盘)
-        const canRename = dev !== null && getMode() === "local";
-        return (
-          <div key={grp.devId} className="macro-group port-group">
-            <GroupHead
-              name={grp.label}
-              count={grp.ports.length}
-              collapsed={portCollapsed.has(grp.devId)}
-              onToggle={() => onTogglePortGroup(grp.devId)}
-              // 三态:在线=绿 / 离线=红 / 连接中(unknown)=无修饰类,落 .dot 默认灰
-              leading={<span className={`dot ${grp.online === true ? "on" : grp.online === false ? "off" : ""}`} />}
-              // SSH 卡:lazy 连接无在线态,leading 落默认灰点;徽标是与远程 ss 设备卡的视觉区分
-              badge={isSsh ? "SSH" : undefined}
-              // 设了昵称后组标签只剩昵称,地址无处可看——悬停兜底显示 host:port
-              title={dev ? `${dev.host}:${dev.port}` : grp.detail}
-              onRename={canRename ? (n) => { if (dev) onRenameRemote(dev, n); } : undefined}
-              renameLabel="重命名设备"
-              renameInitial={dev?.nickname ?? ""}
-              renamePlaceholder="设备昵称(留空显示地址)"
-              menuHidden={!dev && !isSsh && !isLocalCard && !isExternal}
-              extraMenuItems={
-                dev
-                  ? [
-                      // 附加项首位(整菜单序:重命名设备→详情→断开/重连→删除)
-                      { label: "设备详情", onSelect: () => { if (dev) onShowDeviceDetail({ kind: "remote", dev }); } },
-                      // 在线可断开;离线/连接中可重连(状态相关项)
-                      grp.online === true
-                        ? { label: "断开设备", onSelect: () => { if (dev) onDisconnectRemote(dev); } }
-                        : { label: "重连设备", onSelect: () => { if (dev) onReconnectRemote(dev); } },
-                      { label: "删除设备", danger: true, onSelect: () => { if (dev) onRemoveRemote(dev); } },
-                    ]
-                  : isExternal
-                    ? [{ label: "设备详情", onSelect: () => { if (grp.meta) onShowDeviceDetail({ kind: "meta", device: grp.meta }); } }]
-                    : isSsh
-                      ? [
-                          { label: "新建终端", onSelect: () => onSshAction(grp.devId, "connect") },
-                          { label: "设备详情", onSelect: () => onShowDeviceDetail({ kind: "ssh", devId: grp.devId }) },
-                          { label: "编辑设备", onSelect: () => onSshAction(grp.devId, "edit") },
-                          { label: "删除设备", danger: true, onSelect: () => onSshAction(grp.devId, "delete") },
-                        ]
-                      : isLocalCard
-                        ? [{ label: "设备详情", onSelect: () => onShowDeviceDetail({ kind: "local" }) }]
-                        : undefined
-              }
-            />
-            {!portCollapsed.has(grp.devId) &&
-              (grp.ports.length === 0 ? (
-                <p className="sidebar__empty">
-                  {grp.online === false
-                    ? "未连接"
-                    : isSsh
-                      ? "无端点"
-                      : grp.online === undefined && grp.devId !== "local"
-                        ? "连接中…"
-                        : "无可用端口"}
-                </p>
-              ) : (
-                grp.ports.map((p) => {
-                  const pid = p.pid; // ingest 定型(与事件回流键同源),不再反算
-                  const shown = displayPortName(p.name); // 展示剥设备前缀,只留串口名/端点名
-                  const isActive = pid === activePort;
-                  const editingThis = aliasEditPort === pid;
-                  // 强制关闭仅桌面形态:踢本机服务器的其它本地会话(远程设备上别的主机
-                  // 的会话归远端管理)。web/远窗连的是远端 ss,无此本地特权——隐藏按钮。
-                  // SSH 卡无此语义(用实例行 ✕ 关闭终端),同样隐藏。
-                  const canForce = !isSsh && getMode() === "local" && p.opened;
-                  // SSH 实例行挂 ✕:关闭该终端(临时产物,删除语义);端点定义行(shell)
-                  // 不挂——它代表能力,不是会话。判据线上 instance(老 server 回退嗅探 @)。
-                  // data-closable 让铅笔左移让位(✕ 与铅笔同在 right:4px,不移开则
-                  // ✕ 后到 DOM 压住铅笔)。
-                  const isSshInstance = isSsh && (p.instance != null || p.name.includes("@"));
-                  return (
-                    <div
-                      key={p.name}
-                      className="port-item-row"
-                      data-active={isActive}
-                      data-opened={p.opened ? "true" : undefined}
-                      data-force={canForce ? "true" : undefined}
-                      data-closable={isSshInstance ? "true" : undefined}
-                      data-editing={editingThis ? "true" : undefined}
-                      // 悬停可见服务端键(与右键复制同值;别名/昵称是展示层,键才是寻址身份)
-                      title={`端口键：${p.name}`}
-                      onContextMenu={(e) => {
-                        if (editingThis) return; // 别名编辑中放行原生右键(输入框剪切/粘贴)
-                        e.preventDefault();
-                        setKeyMenu({ x: e.clientX, y: e.clientY, row: p });
-                      }}
-                    >
-                      <div
-                        className="port-item"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => {
-                          if (!editingThis) onTriggerPort(pid);
-                        }}
-                        onKeyDown={(e) => {
-                          if (editingThis) return;
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            onTriggerPort(pid);
-                          }
-                        }}
-                      >
-                        <span className={`port-item__dot${p.opened ? " open" : ""}`} />
-                        <span className="port-item__name">
-                          {editingThis ? (
-                            <InlineAliasInput
-                              initial={p.alias ?? ""}
-                              placeholder={`为 ${shown} 设置别名`}
-                              onCommit={(alias) => onCommitAlias(pid, alias)}
-                              onCancel={onCancelAlias}
-                            />
-                          ) : (
-                            <PortLabel name={shown} alias={p.alias} />
-                          )}
-                        </span>
-                        {p.opened && p.holders > 0 && <span className="port-item__holders">{p.holders}</span>}
-                      </div>
-                      {/* 别名编辑:串口与 SSH 行同交互(端点别名落注册表,实例别名走内存表) */}
-                      <button
-                        className="port-item__edit"
-                        title={`设置 ${shown} 别名`}
-                        aria-label={`设置 ${shown} 别名`}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => onSetAliasEdit(pid)}
-                      >
-                        <IconEdit />
-                      </button>
-                      {isSshInstance && (
-                        <button
-                          className="port-item__force"
-                          title={`关闭终端 ${shown}`}
-                          aria-label={`关闭终端 ${shown}`}
-                          onClick={() => onClosePort(pid)}
-                        >
-                          <IconClose />
-                        </button>
-                      )}
-                      {canForce && (
-                        <button
-                          className="port-item__force"
-                          title={`强制关闭 ${shown}（断开远程）`}
-                          aria-label={`强制关闭 ${shown}`}
-                          onClick={() => onForceClose(pid)}
-                        >
-                          <IconPower />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })
-              ))}
-          </div>
-        );
+      {!port.locked && <button className="port-item__edit" title={`设置 ${shown} 别名`} aria-label={`设置 ${shown} 别名`} onMouseDown={(event) => event.preventDefault()} onClick={() => onSetAliasEdit(pid)}><IconEdit /></button>}
+      {canForce && <button className="port-item__force" title={`强制关闭 ${shown}（断开远程）`} aria-label={`强制关闭 ${shown}`} onClick={() => onForceClose(pid)}><IconPower /></button>}
+    </div>;
+  };
+  const renderSsh = (row: SshRow, scope: string, ids: string[], deviceLevel = false) => {
+    const { group, ports } = row;
+    const selected = selectSshPort(ports, activePort);
+    const opened = ports.filter((port) => port.opened);
+    const activate = () => {
+      if (selected) onTriggerPort(selected.pid);
+      else if (!group.external) onSshAction(group.devId, "connect");
+    };
+    return <div
+      {...order.bind(scope, deviceLevel ? group.devId : rowKey(row), ids)}
+      key={`ssh:${group.devId}`} className={`port-item-row port-item-row--single port-item-row--ssh${deviceLevel ? " port-item-row--device" : ""}`}
+      data-active={ports.some((port) => port.pid === activePort)} data-opened={opened.length > 0 || undefined}
+      title={`${group.label} · ${group.detail ?? group.meta?.detail ?? "SSH"}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        if (selected?.locked) return;
+        setKeyMenu({ x: event.clientX, y: event.clientY, kind: "ssh", row });
+      }}
+    >
+      <button className="port-item" onClick={activate}>
+        <span className={`port-item__dot${opened.length ? " open" : ""}`} />
+        {deviceLevel && <span aria-hidden="true" />}
+        <span className="port-item__name">{group.label}</span>
+        <span className="port-item__meta">
+          {selected?.locked ? <span className="port-item__kind access-locked">需验证</span> : <span className="port-item__kind">SSH</span>}
+          {opened.length > 1 && <span className="port-item__holders" title={`${opened.length} 个终端`}>{opened.length}</span>}
+        </span>
+      </button>
+    </div>;
+  };
+  const sections = listView === "default"
+    ? defaultConnectionSections(devices, new Set(remotes.map((remote) => remote.id)))
+    : [];
+  const topLevelIds = sections.map(({ group }) => group.devId);
+  const defaultRows = sections.map(({ group, sshChildren }) => {
+    if (group.kind === "ssh") {
+      const [row] = connectionRows([group], grouping, null, query);
+      return row?.kind === "ssh" ? renderSsh(row, "devices", topLevelIds, true) : null;
+    }
+    const scope = deviceScope(group.devId);
+    const children = [group, ...sshChildren];
+    const allRows = order.sort(scope, connectionRows(children, grouping, null, ""), rowKey);
+    const rowIds = allRows.map(rowKey);
+    const parentMatches = `${group.label} ${group.detail ?? ""}`.toLocaleLowerCase().includes(search);
+    const visibleIds = new Set(connectionRows(children, grouping, null, parentMatches ? "" : query).map(rowKey));
+    const visibleRows = allRows.filter((row) => visibleIds.has(rowKey(row)));
+    if (!visibleRows.length && search && !parentMatches) return null;
+    const dev = remotes.find((remote) => remote.id === group.devId);
+    const canRename = Boolean(dev && getMode() === "local");
+    const details = () => onShowDeviceDetail(group.external && group.meta ? { kind: "meta", device: group.meta } : dev ? { kind: "remote", dev } : { kind: "local" });
+    const collapsed = !search && portCollapsed.has(group.devId);
+    return <div key={`device:${group.devId}`} className="macro-group port-group">
+      <GroupHead
+        dragProps={order.bind("devices", group.devId, topLevelIds)}
+        name={group.label} count={visibleRows.length} collapsed={collapsed}
+        onToggle={() => onTogglePortGroup(group.devId)}
+        leading={<span className={`dot ${group.online === true ? "on" : group.online === false ? "off" : ""}`} />}
+        title={dev ? `${dev.host}:${dev.port}` : group.detail}
+        onRename={canRename && dev ? (name) => onRenameRemote(dev, name) : undefined}
+        renameLabel="重命名设备" renameInitial={dev?.nickname ?? ""} renamePlaceholder="设备昵称(留空显示地址)"
+        menuHidden={!dev && group.devId !== "local" && !group.external}
+        extraMenuItems={[
+          { label: "设备详情", onSelect: details },
+          ...(dev && onVerifyRemote ? [{ label: "远程访问验证", onSelect: () => onVerifyRemote(dev) }] : []),
+          ...(dev ? [
+            { label: group.online === true ? "断开设备" : "重连设备", onSelect: () => group.online === true ? onDisconnectRemote(dev) : onReconnectRemote(dev) },
+            { label: "删除设备", danger: true, onSelect: () => onRemoveRemote(dev) },
+          ] : []),
+        ]}
+      />
+      {!collapsed && <div className="connection-tree__children">
+        {visibleRows.length ? visibleRows.map((row) => row.kind === "ssh" ? renderSsh(row, scope, rowIds) : renderSerial(group, row.port, false, scope, rowIds)) :
+          (dev?.securePort || dev?.verifyHttp) && group.online !== true && onVerifyRemote ? <button className="btn" onClick={() => onVerifyRemote(dev)}>输入验证码</button> :
+          <p className="sidebar__empty">{group.online === false ? "未连接" : group.online === undefined && group.devId !== "local" ? "连接中…" : "无可用端口"}</p>}
+      </div>}
+    </div>;
+  });
+
+  return <>
+    {/* 分组视图的「+ 新建分组」内联行(原 section-head 上的按钮迁此;标题/刷新/切视图收进面板 ··· 菜单) */}
+    {listView === "groups" && !creatingGroup && (
+      <button className="group-create-row" disabled={!groupsReady} onClick={() => setCreatingGroup(true)}>
+        + 新建分组
+      </button>
+    )}
+    {listView === "groups" && creatingGroup && <form className="port-group-create" onSubmit={(event) => { event.preventDefault(); void createGroup(); }}>
+      <input className="field" aria-label="新分组名称" placeholder="分组名称" autoFocus maxLength={64} value={groupName} onChange={(event) => setGroupName(event.target.value)} />
+      <button className="mini-btn" type="submit" disabled={!groupsReady || groupSaving}>{groupSaving ? "保存中…" : "创建"}</button>
+      <button className="icon-btn" type="button" aria-label="取消新建分组" onClick={() => { setCreatingGroup(false); setGroupError(""); }}><IconClose /></button>
+    </form>}
+    {(groupsError || groupError) && <p className="sidebar__group-error" role="alert">{groupsError || groupError}</p>}
+    {listView === "groups" && !groupsReady && !groupsError && <p className="sidebar__empty">正在同步分组，请确认服务已连接。</p>}
+    {listView === "groups" && groupsReady && !grouping.names.length && <p className="sidebar__empty">暂无分组，点击“新建分组”，再右键串口或 SSH 设备添加。</p>}
+    {search && (listView === "default" ? defaultRows.every((row) => row === null) :
+      buckets.length > 0 && buckets.every((bucket) => !bucket.rows.length && !bucket.name.toLocaleLowerCase().includes(search))) &&
+      <p className="sidebar__empty">没有匹配的连接</p>}
+    <div className="connection-tree" data-view={listView}>
+      {listView === "default" && <div className="connection-tree__default">{defaultRows}</div>}
+      {buckets.map((bucket) => {
+        const customName = bucket.name;
+        if (search && !bucket.rows.length && !customName.toLocaleLowerCase().includes(search)) return null;
+        const collapsed = !search && grouping.collapsed.includes(customName);
+        const scope = memberScope(customName);
+        const ids = order.sort(scope, connectionRows(devices, grouping, customName, ""), rowKey).map(rowKey);
+        return <div key={`custom:${customName}`} className="port-custom-group">
+          <GroupHead name={customName} count={bucket.rows.length} collapsed={collapsed}
+            dragProps={order.bind("groups", customName, customNames)}
+            onToggle={() => onToggleCustomGroup(customName)}
+            onRename={(value) => {
+              if (value.trim() === customName) { setGroupError(""); return; }
+              const newName = value.trim();
+              if (!newName || grouping.names.includes(newName)) setGroupError("分组名称不能为空或与现有分组重复");
+              else { void updateGroups({ type: "rename", name: customName, newName }); }
+            }}
+            onDissolve={() => { void updateGroups({ type: "dissolve", name: customName }); }}
+          />
+          {!collapsed && <div className="connection-tree__children">{bucket.rows.length ? bucket.rows.map((row) => row.kind === "ssh" ? renderSsh(row, scope, ids) : renderSerial(row.group, row.port, true, scope, ids)) : <p className="sidebar__empty">{search ? "没有匹配的连接" : "在默认视图右键串口或 SSH 设备可添加到此分组"}</p>}</div>}
+        </div>;
       })}
-      {keyMenu && (
-        <ContextMenu x={keyMenu.x} y={keyMenu.y} items={keyMenuItems} onClose={() => setKeyMenu(null)} />
-      )}
-    </>
-  );
+    </div>
+    {keyMenu && <ContextMenu x={keyMenu.x} y={keyMenu.y} items={keyMenuItems} onClose={() => setKeyMenu(null)} />}
+  </>;
 }
 
-/** 宏/脚本面板共用的库面板骨架：段头（导入/导出/新增/可选扩展按钮）+ 分组列表 + 运行卡片。 */
+/** Shared library content; creation lives in the workspace sidebar.
+ *  段标题/导入/导出等面板级动作已上收至面板标题栏的 ··· 菜单(App 组装),
+ *  此处只留隐藏的导入 file input(菜单触发 importRef.click())与列表本体。 */
 export function NamedLibraryPanel<T extends { group?: string }>({
-  title,
   items,
   hasItems,
   collapsed,
@@ -294,18 +416,13 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   onDissolveGroup,
   importRef,
   onImportFile,
-  onExport,
-  exportTitle,
-  onNew,
-  newItemLabel,
   emptyHint,
   renderRow,
   children,
-  extraActions,
   storageHint,
+  query = "",
 }: {
-  /** 段标题（MACROS / SCRIPTS，含 → activePort 后缀由调用方拼好）。 */
-  title: React.ReactNode;
+  query?: string;
   items: Record<string, T>;
   hasItems: boolean;
   collapsed: Set<string>;
@@ -314,63 +431,39 @@ export function NamedLibraryPanel<T extends { group?: string }>({
   onDissolveGroup: (name: string) => void;
   importRef: RefObject<HTMLInputElement>;
   onImportFile: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onExport: () => void;
-  exportTitle: string;
-  onNew: () => void;
-  newItemLabel: string;
   emptyHint: string;
   /** 分组内单行（运行/编辑/删除按钮组）。 */
   renderRow: (name: string) => React.ReactNode;
   /** 运行卡片等尾随内容。 */
   children?: React.ReactNode;
-  /** 段头额外按钮（脚本面板的「指南」等），排在末尾（新增按钮之后）。 */
-  extraActions?: React.ReactNode;
   /** 存储位置说明（Web 模式:localStorage,与桌面端落盘不同——防止误以为存服务器）。 */
   storageHint?: string;
 }) {
+  const filteredItems = Object.entries(items).filter(([name, item]) => `${name} ${item.group ?? ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   return (
     <>
-      <div className="section-head">
-        <h4 className="section-head__title">{title}</h4>
-        <div className="section-head__actions">
-          <button className="icon-btn" onClick={() => importRef.current?.click()} title={`导入${newItemLabel}`}>
-            <IconImport />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={onExport}
-            disabled={!hasItems}
-            title={exportTitle}
-          >
-            <IconExport />
-          </button>
-          <button className="icon-btn" onClick={onNew} title={`新增${newItemLabel}`}>
-            <IconPlus />
-          </button>
-          {extraActions}
-        </div>
-        <input
-          ref={importRef}
-          type="file"
-          accept=".json,application/json"
-          style={{ display: "none" }}
-          onChange={onImportFile}
-        />
-      </div>
+      <input
+        ref={importRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: "none" }}
+        onChange={onImportFile}
+      />
       {storageHint && <p className="sidebar__storage-hint">{storageHint}</p>}
       {!hasItems && <p className="sidebar__empty">{emptyHint}</p>}
-      {groupBy(Object.entries(items), (m) => m.group).map((g) => (
+      {hasItems && !filteredItems.length && <p className="sidebar__empty">没有匹配的条目</p>}
+      {groupBy(filteredItems, (m) => m.group).map((g) => (
         <div key={g.name} className="macro-group">
           <GroupHead
             name={g.name}
             count={g.items.length}
-            collapsed={collapsed.has(g.name)}
+            collapsed={!query.trim() && collapsed.has(g.name)}
             onToggle={() => onToggleGroup(g.name)}
             onRename={(n) => onRenameGroup(g.name, n)}
             onDissolve={() => onDissolveGroup(g.name)}
             menuHidden={g.name === "未分组"}
           />
-          {!collapsed.has(g.name) && g.items.map(([name]) => renderRow(name))}
+          {(!!query.trim() || !collapsed.has(g.name)) && g.items.map(([name]) => renderRow(name))}
         </div>
       ))}
       {children}

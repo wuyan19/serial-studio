@@ -1,22 +1,12 @@
-/** 对话框族：串口配置、宏/脚本批量导出、设置面板、快捷键改键、关于（含在线更新）、
-脚本指南、添加远程设备、远程设备详情、脚本运行参数收集、通用确认弹窗。 */
+/** 对话框族：串口配置、宏/脚本批量导出、脚本指南、添加远程设备、
+远程设备详情、脚本运行参数收集、通用确认弹窗。设置/快捷键/关于已并入 settings-page.tsx。 */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ActionId, ConnConfig, Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, ShortcutMap, SrvSettings, SshAuth, SshHost, SshOpenError } from "../types";
+import type { Macro, PortInfo, RemoteDevice, Script, ScriptParam, SerialConfig, SshAuth, SshHost, SshOpenError, SshTestState } from "../types";
 import { BAUD_RATES, copyText, displayPortName, isTauri, prefillRunValues } from "../lib";
-import { ACTION_LABELS, DEFAULT_BINDINGS, eventToCombo, formatCombo, getBindings, resetAll, resetBinding, setBinding, subscribeBindings } from "../shortcuts";
-import { checkUpdate, downloadAndInstall, isLocalDesktop, openReleasesPage, openRepoPage, REPO_URL, supportsAutoInstall, type Update, type UpdateStatus } from "../updater";
-import { IconAlert, IconClose, IconCode, IconCopy, IconExport, IconGear, IconGlobe, IconInfo, IconKeyboard, IconPlug, IconSsh } from "../icons";
-import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
+import { IconAlert, IconCode, IconCopy, IconExport, IconGlobe, IconPlug, IconSsh } from "../icons";
+import { ConfigRow, overlayClose, useDialogA11y, useDialogKeys, useEscClose } from "./primitives";
 import { marked } from "marked";
-
-/** 遮罩点击关闭的统一判定:必须 mousedown 起点就是遮罩本身。
- *  不能用 onClick——框内选字拖到遮罩上松手时,click 会派发到公共祖先(恰是遮罩),
- *  target 判断防不住,误关丢选区。mousedown 判定是标准方案(react-modal 同款)。 */
-function overlayClose(e: React.MouseEvent, onClose: () => void, guard?: () => boolean) {
-  if (e.target !== e.currentTarget) return; // 按下点在对话框内
-  if (guard?.()) return; // 上下文不允许关(如下载进行中)
-  onClose();
-}
+import { DEFAULT_ACCESS_PORT, HTTP_ACCESS_WARNING, validAccessPort, type DesktopAccessMode } from "../access";
 
 // ===== marked 安全配置(脚本指南 Markdown 预览) =====
 // SKILL 文本并非始终可信:local 模式来自二进制内嵌文档,但远程窗口/Web 模式下
@@ -65,7 +55,7 @@ export function SerialConfigDialog({
   useDialogA11y(dialogRef);
   return (
     <div className="dialog-overlay">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="打开串口" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="打开串口" className="dialog dialog--narrow dialog--port" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           <IconPlug /> OPEN PORT
         </h3>
@@ -336,504 +326,7 @@ export function ExportScriptsDialog({
 }
 
 
-// ===== 设置面板 =====
-
-export function SettingsPanel({
-  connConfig,
-  srvSettings,
-  srvFailed,
-  onRetrySrv,
-  onConnChange,
-  onSaveSrv,
-  showServer,
-  onClose,
-}: {
-  connConfig: ConnConfig;
-  srvSettings: SrvSettings | null;
-  /** get_settings 失败(srvSettings 为 null 时区分「加载中」与「失败」)。 */
-  srvFailed?: boolean;
-  onRetrySrv?: () => void;
-  onConnChange: (c: ConnConfig) => void;
-  onSaveSrv: (s: SrvSettings) => void;
-  showServer: boolean;
-  onClose: () => void;
-}) {
-  const [conn, setConn] = useState<ConnConfig>(connConfig);
-  const [srv, setSrv] = useState<SrvSettings | null>(srvSettings);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    setSrv(srvSettings);
-  }, [srvSettings]);
-
-  /** 打开脚本日志目录(后端不存在则先建);失败静默,不打断设置页。 */
-  const openLogDir = () => {
-    void (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("open_script_log_dir");
-      } catch {
-        /* ignore */
-      }
-    })();
-  };
-
-  /** 应用：本地模式存服务设置并打「已应用」标；远程客户端模式应用连接。按钮和回车都走这里。 */
-  const apply = () => {
-    if (!showServer) {
-      onConnChange(conn);
-    } else if (srv) {
-      onSaveSrv(srv);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    }
-  };
-
-  // 同 AliasDialog：默认聚焦首个输入框可直接键入；回车（任意焦点）触发主操作。
-  useDialogKeys({ onClose, onEnter: apply });
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
-
-  return (
-    <div className="dialog-overlay">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
-        <h3 className="dialog__title">
-          <IconGear /> SETTINGS
-        </h3>
-
-        {!showServer && (
-          <>
-            <div className="dialog__group-label">连接（前端 → 服务器）</div>
-            <ConfigRow label="主机">
-              <input autoFocus value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <ConfigRow label="端口">
-              <input type="number" value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
-            </ConfigRow>
-            <p className="dialog__hint">改连别的远程 Serial Studio 服务</p>
-            <div className="btn-row">
-              <button className="btn btn--ghost" onClick={onClose}>
-                关闭
-              </button>
-              <button className="btn btn--primary" onClick={apply}>
-                应用并重连
-              </button>
-            </div>
-          </>
-        )}
-
-        {showServer && (
-          <>
-            <div className="dialog__group-label">服务器监听（热重启生效）</div>
-            {srv ? (
-              <>
-                <ConfigRow label="监听地址">
-                  <input autoFocus value={srv.ws_host} onChange={(e) => setSrv({ ...srv, ws_host: e.target.value })} className="field" autoCapitalize="off" spellCheck={false} />
-                </ConfigRow>
-                <ConfigRow label="WS 端口">
-                  <input type="number" value={srv.ws_port} onChange={(e) => setSrv({ ...srv, ws_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
-                </ConfigRow>
-                <ConfigRow label="Telnet 端口">
-                  <input type="number" value={srv.telnet_port} onChange={(e) => setSrv({ ...srv, telnet_port: Number(e.target.value) })} className="field" autoCapitalize="off" spellCheck={false} />
-                </ConfigRow>
-                <ConfigRow label="远程脚本">
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-                    <input
-                      type="checkbox"
-                      checked={srv.enable_scripting}
-                      onChange={(e) => setSrv({ ...srv, enable_scripting: e.target.checked })}
-                    />
-                    <span>允许远程执行 JS 脚本</span>
-                    <span
-                      title="服务器无认证，开启后任何已连接的客户端都可执行脚本（可读写本机文件）。"
-                      style={{ cursor: "help" }}
-                    >
-                      ⚠
-                    </span>
-                  </label>
-                </ConfigRow>
-                <ConfigRow label="脚本日志">
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-                    <input
-                      type="checkbox"
-                      checked={srv.script_log_to_disk}
-                      onChange={(e) => setSrv({ ...srv, script_log_to_disk: e.target.checked })}
-                    />
-                    <span>log 输出自动落盘</span>
-                    <span
-                      title="脚本的运行日志（log函数的输出）自动落盘到 script-logs 目录。"
-                      style={{ cursor: "help" }}
-                    >
-                      ⚠
-                    </span>
-                  </label>
-                  {/* 常驻行尾小按钮:直达日志目录,不依赖开关状态(后端不存在则先建) */}
-                  <button
-                    className="btn btn--ghost"
-                    style={{ marginLeft: "auto", padding: "3px 10px", fontSize: 12, flexShrink: 0 }}
-                    onClick={openLogDir}
-                  >
-                    打开目录
-                  </button>
-                </ConfigRow>
-                <div className="btn-row">
-                  {saved && <span className="btn--save-pulse">已应用</span>}
-                  <button className="btn btn--ghost" onClick={onClose}>
-                    关闭
-                  </button>
-                  <button
-                    className="btn btn--primary"
-                    onClick={apply}
-                  >
-                    应用
-                  </button>
-                </div>
-              </>
-            ) : srvFailed ? (
-              <div style={{ color: "var(--danger)", display: "flex", alignItems: "center", gap: 10 }}>
-                服务器配置加载失败
-                <button className="btn" onClick={onRetrySrv}>重试</button>
-              </div>
-            ) : (
-              <div style={{ color: "var(--ink-faint)" }}>加载中…</div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
-// ===== 快捷键改键对话框 =====
-
-/** 分组卡片展示(两列手工配平:左列 = 前两组,右列 = 后三组)。
- *  注意:新增 ActionId 时除了同步 types.ts 的 ActionId 联合与 shortcuts.ts 的
- *  DEFAULT_BINDINGS/ACTION_LABELS,也要加进对应组——改键对话框只渲染这些组,
- *  漏加则该动作在改键页不可见(快捷键仍生效,只是无法在此改键)。
- *  tab.select 特殊:一族固定键(Ctrl+Alt+1..9),落在「标签页」组渲染为说明行。 */
-const SHORTCUT_GROUPS: { title: string; items: ActionId[] }[] = [
-  {
-    title: "面板与搜索",
-    items: [
-      "search.open",
-      "macro.palette",
-      "script.palette",
-      "port.palette",
-      "activity.toggle-ports",
-      "activity.toggle-macros",
-      "activity.toggle-scripts",
-    ],
-  },
-  {
-    title: "端口与设备",
-    items: ["port.refresh", "port.close-active", "port.reconnect", "remote.open"],
-  },
-  { title: "标签页", items: ["tab.next", "tab.prev", "tab.select"] },
-  { title: "显示与外观", items: ["zoom.in", "zoom.out", "zoom.reset", "theme.toggle"] },
-  { title: "应用", items: ["settings.open", "about.open"] },
-];
-
-/** 快捷键改键对话框：分 5 组卡片两列展示动作 + 当前组合，点键帽进入录制；行内 / 全部重置。
- *  模态打开时 App 的全局 listener 已被抑制，这里的录制 listener 独占 keydown。
- *  录制中：读下一组非纯修饰符 keydown → setBinding 校验；裸 Backspace 清除绑定；Esc 取消录制。
- *  非录制：Esc 关闭对话框。 */
-export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
-  const [map, setMap] = useState<ShortcutMap>(() => getBindings());
-  const [recording, setRecording] = useState<ActionId | null>(null);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [error, setError] = useState("");
-  // Web 页面端(!isTauri)只隐藏 remote.open(已处远程,再开远程无意义);其余均显示
-  const groups = SHORTCUT_GROUPS.map((g) => ({
-    ...g,
-    items: isTauri() ? g.items : g.items.filter((a) => a !== "remote.open"),
-  }));
-  // 两列配平:左列(7+4 行)≈ 右列(3+4+2 行 + 多一个卡片头)
-  const columns: { title: string; items: ActionId[] }[][] = [
-    [groups[0], groups[1]],
-    [groups[2], groups[3], groups[4]],
-  ];
-
-  useEffect(() => subscribeBindings(setMap), []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Esc 优先级链(由外到内逐层退)：帮助浮层 → 录制态 → 对话框本身。
-      // 帮助浮层不能用 useEscClose——它与本 effect 双 window 监听且本 effect 先注册，
-      // Esc 会连对话框一起关掉，必须在此统一裁决。
-      if (e.key === "Escape" && helpOpen) {
-        e.preventDefault();
-        setHelpOpen(false);
-        return;
-      }
-      if (recording) {
-        e.preventDefault();
-        e.stopPropagation();
-        const combo = eventToCombo(e);
-        if (!combo) return; // 纯修饰符，等主键
-        if (combo === "escape") {
-          setRecording(null);
-          setError("");
-          return;
-        }
-        // 裸退格 = 清除该动作的快捷键；带修饰符的组合(mod+alt+backspace)仍是普通候选
-        if (combo === "backspace") {
-          setBinding(recording, ""); // 空 combo = 解绑，validateCombo 恒放行
-          setRecording(null);
-          setError("");
-          return;
-        }
-        const r = setBinding(recording, combo);
-        if (r.ok) {
-          setRecording(null);
-          setError("");
-        } else {
-          setError(r.reason); // 保持录制，让用户重按
-        }
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [recording, helpOpen, onClose]);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
-  return (
-    /* 遮罩按下关闭(改键即改即存,无"未保存丢失"顾虑;Esc 语义不变) */
-    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="键盘快捷键" className="dialog dialog--med dialog--shortcuts" onClick={(e) => e.stopPropagation()}>
-        {/* 右上角操作说明浮层(同脚本编辑器的 info 速查) */}
-        <button
-          className="dialog__max"
-          onMouseDown={(e) => e.preventDefault() /* 不抢焦点 */}
-          onClick={() => setHelpOpen((v) => !v)}
-          title="快捷键操作说明"
-          aria-label="快捷键操作说明"
-          aria-expanded={helpOpen}
-        >
-          <IconInfo />
-        </button>
-        {helpOpen && <ShortcutsHelpPanel onClose={() => setHelpOpen(false)} />}
-        <h3 className="dialog__title">
-          <IconKeyboard /> SHORTCUTS
-        </h3>
-
-        <div className="shortcut-list">
-          {columns.map((col, ci) => (
-            <div className="shortcut-col" key={ci}>
-              {col.map((g) => (
-                <section className="shortcut-group" key={g.title}>
-                  <h4 className="shortcut-group__title">{g.title}</h4>
-                  {g.items.map((action) => {
-                    if (action === "tab.select") {
-                      // tab.select 是一族键(Ctrl+Alt+1..9,0→末个),不可改键——静态说明行
-                      return (
-                        <div className="shortcut-row shortcut-row--fixed" key={action}>
-                          <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
-                          <span className="kbd kbd--fixed">{formatCombo("mod+alt+1")}…9</span>
-                          <span className="shortcut-row__hint">固定</span>
-                        </div>
-                      );
-                    }
-                    const b = map[action];
-                    const isRec = recording === action;
-                    const isDefault = b.combo === DEFAULT_BINDINGS[action].combo;
-                    return (
-                      <div className="shortcut-row" key={action}>
-                        <span className="shortcut-row__label">{ACTION_LABELS[action]}</span>
-                        <button
-                          type="button"
-                          className={"kbd" + (isRec ? " kbd--rec" : "")}
-                          onClick={() => {
-                            setRecording(action);
-                            setError("");
-                          }}
-                        >
-                          {isRec ? "按下新组合…" : formatCombo(b.combo)}
-                        </button>
-                        <button
-                          type="button"
-                          className="mini-btn"
-                          title="重置默认"
-                          aria-label={`重置「${ACTION_LABELS[action]}」为默认键`}
-                          disabled={isDefault}
-                          onClick={() => {
-                            resetBinding(action);
-                            setError("");
-                          }}
-                        >
-                          ↺
-                        </button>
-                      </div>
-                    );
-                  })}
-                </section>
-              ))}
-            </div>
-          ))}
-        </div>
-
-        {error && <p className="editor-error">{error}</p>}
-
-        <div className="btn-row" style={{ justifyContent: "space-between" }}>
-          <button
-            className="btn btn--ghost"
-            onClick={() => {
-              resetAll();
-              setError("");
-            }}
-          >
-            全部重置
-          </button>
-          <button className="btn btn--ghost" onClick={onClose}>
-            关闭
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** 快捷键对话框右上角速查浮层：复用脚本编辑器 script-help 的浮层样式与结构。
- *  键盘关闭由 ShortcutsDialog 的录制 effect 统一裁决（Esc 优先级链），此处不做键盘处理。 */
-function ShortcutsHelpPanel({ onClose }: { onClose: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useDialogA11y(ref);
-  return (
-    <>
-      {/* 点击面板外(对话框内区域)关闭；同时挡住行区域——帮助开着时点行先关帮助 */}
-      <div className="script-help__backdrop" onClick={onClose} />
-      <div ref={ref} role="dialog" aria-modal="true" aria-label="快捷键操作说明" className="script-help">
-        <div className="script-help__head">
-          <span>速查</span>
-          <button className="banner__close" onClick={onClose} aria-label="关闭帮助">
-            <IconClose />
-          </button>
-        </div>
-        <div className="script-help__row">点击键帽 → 录制新组合</div>
-        <div className="script-help__row">录制中 <code>Backspace</code> 清除 / <code>Esc</code> 取消</div>
-        <div className="script-help__row">组合须含 Ctrl/⌘ 或 Alt（重连除外）</div>
-        <div className="script-help__row">冲突 / 保留键会被拒绝</div>
-        <div className="script-help__row"><code>↺</code> 恢复默认 · 「全部重置」恢复全部</div>
-      </div>
-    </>
-  );
-}
-
-
-// ===== 关于 / 脚本指南 / 远程 / 参数收集 =====
-export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
-  useEscClose(onClose);
-  const local = isLocalDesktop(); // 仅本地桌面模式渲染检查更新（Web/远程窗口不显示）
-  const [status, setStatus] = useState<UpdateStatus>({ state: "idle" });
-  const [update, setUpdate] = useState<Update | null>(null);
-
-  async function onCheck() {
-    setStatus({ state: "checking" });
-    const { status: s, update: u } = await checkUpdate();
-    setStatus(s);
-    setUpdate(u);
-  }
-
-  async function onInstall() {
-    if (!update) return;
-    setStatus({ state: "downloading", percent: 0 });
-    const s = await downloadAndInstall(update, (p) =>
-      setStatus({ state: "downloading", percent: p }),
-    );
-    setStatus(s);
-  }
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
-
-  return (
-    /* 遮罩按下关闭(local 模式的更新流程是有状态操作:下载中/下载完成禁止遮罩关——
-     * 否则进度指示消失而 downloadAndInstall 仍在跑,应用会在用户以为已取消的时刻突然重启) */
-    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose, () => status.state === "downloading" || status.state === "downloadComplete")}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="关于 Serial Studio" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
-        <div className="about">
-          <div className="about__mark">
-            <IconPlug />
-          </div>
-          <h3 className="about__name">Serial Studio</h3>
-          <p className="about__version">版本 {version || "…"}</p>
-          <p className="about__tagline">
-            多形态串口通信工具
-            <br />
-            本地 / 远程 双模式 · Tauri + MCP & WebSocket
-            <br />
-            MCP Url http://IP:PORT/mcp
-          </p>
-          <p className="about__repo">
-            {/* Tauri webview 内直接导航会顶掉应用页面 → 拦下交给 opener 开系统浏览器；
-                Web 模式是普通浏览器，走原生 <a> 新标签即可 */}
-            <a
-              href={REPO_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => {
-                if (isTauri()) {
-                  e.preventDefault();
-                  void openRepoPage();
-                }
-              }}
-            >
-              {REPO_URL}
-            </a>
-          </p>
-
-          {local && (
-            <div className="about__update">
-              {status.state === "idle" && (
-                <button className="btn btn--primary" onClick={onCheck}>检查更新</button>
-              )}
-              {status.state === "checking" && <p className="about__update-msg">检查中…</p>}
-              {status.state === "upToDate" && <p className="about__update-msg">已是最新版本</p>}
-              {status.state === "available" && (
-                <div className="about__update-available">
-                  <p>发现新版本 {status.version}</p>
-                  {supportsAutoInstall() ? (
-                    <button className="btn btn--primary" onClick={onInstall}>下载并重启</button>
-                  ) : (
-                    /* macOS 未公证：自动安装后 Gatekeeper 拦到打不开 → 只引导手动下载 */
-                    <button className="btn btn--primary" onClick={openReleasesPage}>前往下载</button>
-                  )}
-                </div>
-              )}
-              {status.state === "downloading" && (
-                <div className="about__update-progress">
-                  <div className="about__progress">
-                    <div className="about__progress-fill" style={{ width: `${status.percent ?? 0}%` }} />
-                  </div>
-                  <p className="about__update-msg">下载中… {status.percent ?? 0}%</p>
-                </div>
-              )}
-              {status.state === "downloadComplete" && (
-                <p className="about__update-msg">下载完成，即将重启…</p>
-              )}
-              {status.state === "failed" && (
-                <div className="about__update-available">
-                  <p className="about__update-msg">更新失败：{status.message}</p>
-                  <button className="btn" onClick={openReleasesPage}>前往下载</button>
-                </div>
-              )}
-            </div>
-          )}
-          {/* Web/远程模式没有更新区(仅 local 渲染)——保留一个关闭按钮,
-              否则对话框内零可聚焦元素,Tab 被圈闭逻辑吞掉,键盘用户只剩不可见的 Esc 出口 */}
-          {!local && (
-            <button className="btn btn--primary" onClick={onClose}>
-              关闭
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
+// ===== 脚本指南 / 远程 / 参数收集 =====
 /** 脚本编写指南(SKILL 全文):查看 + 一键复制给外部 Agent(Claude/Cursor 等)。
  *  默认 Markdown 预览(阅读),可切原文(等宽 pre-wrap,核对 Markdown 源);
  *  复制的始终是 SKILL.md 原文,粘给 Agent 即完整 skill。 */
@@ -911,17 +404,19 @@ export function ScriptSkillDialog({
   );
 }
 
-export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }: {
-  input: { host: string; port: number; nickname: string };
-  onChange: (v: { host: string; port: number; nickname: string }) => void;
+export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing, allowSecure = false }: {
+  input: { host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean };
+  onChange: (v: { host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean }) => void;
   onConfirm: () => void;
   onCancel: () => void;
   /** 已存在设备地址列表（"host:port"），用于重复拦截 */
   existing: string[];
+  allowSecure?: boolean;
 }) {
   const host = input.host.trim();
+  const mode: DesktopAccessMode = input.securePort !== undefined ? "https" : input.verifyHttp ? "http" : "legacy";
   const dup = host !== "" && existing.includes(`${host}:${input.port}`);
-  const invalid = host === "" || dup;
+  const invalid = host === "" || dup || !validAccessPort(input.port) || (input.securePort !== undefined && !validAccessPort(input.securePort));
   // Enter 是 window 级监听,不看按钮 disabled——主操作必须自带校验,否则键盘路径绕过拦截
   useDialogKeys({ onClose: onCancel, onEnter: () => { if (!invalid) onConfirm(); } });
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -937,8 +432,24 @@ export function RemoteDialog({ input, onChange, onConfirm, onCancel, existing }:
           <input autoFocus value={input.host} onChange={(e) => onChange({ ...input, host: e.target.value })} placeholder="192.168.1.50" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
         <ConfigRow label="端口">
-          <input type="number" value={input.port} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
+          <input type="number" min={1} max={65535} value={input.port || ""} onChange={(e) => onChange({ ...input, port: Number(e.target.value) })} className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
+        {allowSecure && <>
+          <ConfigRow label="访问验证">
+            <select className="field-select" aria-label="访问验证" value={mode} onChange={(e) => {
+              const value = e.target.value;
+              onChange({ ...input, securePort: value === "https" ? DEFAULT_ACCESS_PORT : undefined, verifyHttp: value === "http" || undefined });
+            }}>
+              <option value="legacy">不验证（旧版兼容）</option>
+              <option value="https">HTTPS 验证（推荐）</option>
+              <option value="http">HTTP 验证</option>
+            </select>
+          </ConfigRow>
+          {mode === "http" && <p className="dialog__hint" role="note">{HTTP_ACCESS_WARNING}</p>}
+          {input.securePort !== undefined && <ConfigRow label="HTTPS 端口">
+            <input type="number" min={1} max={65535} value={input.securePort || ""} onChange={(e) => onChange({ ...input, securePort: Number(e.target.value) })} className="field" />
+          </ConfigRow>}
+        </>}
         <ConfigRow label="昵称">
           <input value={input.nickname} onChange={(e) => onChange({ ...input, nickname: e.target.value })} placeholder="可选，如「实验室机械臂」" className="field" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         </ConfigRow>
@@ -1033,7 +544,7 @@ export function DeviceDetailDialog({ info, onClose }: {
   return (
     /* 遮罩按下关闭（纯只读信息，无输入；Esc 同） */
     <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`设备详情 ${info.label}`} className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`设备详情 ${info.label}`} className="dialog dialog--narrow dialog--detail" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog__title">
           {icon} 设备详情
         </h3>
@@ -1123,7 +634,7 @@ export function PortDetailDialog({ info, onClose }: {
   );
 }
 
-// ===== SSH 设备管理（UI 预览：本地 mock 数据 + 连接/测试模拟；后端接入后同一界面换数据源） =====
+// ===== SSH device management =====
 
 /** 认证方式短标签（管理表/详情共用）。 */
 export function sshAuthLabel(auth: SshAuth): string {
@@ -1143,8 +654,7 @@ export function SshManagerDialog({
   onClose,
 }: {
   hosts: SshHost[];
-  /** 测试连接结果（真实 ssh_test 回执）：testing=测试中 / ok=可达 / fail=失败(行内 ✗) / undefined=未测。 */
-  testOf: (id: string) => "testing" | "ok" | "fail" | undefined;
+  testOf: (id: string) => SshTestState | undefined;
   /** 保存设备（isNew 区分添加/编辑；新建时 id 为空串，App 负责生成 UUID）。 */
   onCommit: (host: SshHost, isNew: boolean) => void;
   onDelete: (host: SshHost) => void;
@@ -1153,6 +663,12 @@ export function SshManagerDialog({
 }) {
   // 表单只在管理列表内部切换(添加/编辑行按钮);右键等直达编辑走独立的 SshEditDialog
   const [form, setForm] = useState<null | { mode: "add" } | { mode: "edit"; host: SshHost }>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(5);
+  const pageCount = Math.max(1, Math.ceil(hosts.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageHosts = hosts.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  useEffect(() => { if (page !== currentPage) setPage(currentPage); }, [page, currentPage]);
   // 列表视图 Esc 关弹窗；表单视图开着时本监听让位（表单自己的 Esc=返回列表，对话框栈仲裁）
   useEscClose(() => {
     if (form === null) onClose();
@@ -1194,8 +710,9 @@ export function SshManagerDialog({
                 <span>测试</span>
                 <span>操作</span>
               </div>
-              {hosts.map((h) => {
-                const tst = testOf(h.id);
+              {pageHosts.map((h) => {
+                const test = testOf(h.id);
+                const tst = test?.status;
                 const testText = tst === "testing" ? "…" : tst === "ok" ? "✓" : tst === "fail" ? "✗" : "—";
                 return (
                   <div key={h.id} className="ssh-table__row">
@@ -1206,7 +723,7 @@ export function SshManagerDialog({
                       </span>
                     </span>
                     <span className="ssh-table__auth">{sshAuthLabel(h.auth)}</span>
-                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}${tst === "fail" ? " bad" : ""}`} title={tst === "ok" ? "可达" : tst === "fail" ? "失败（原因见提示）" : undefined}>
+                    <span className={`ssh-table__status${tst === "ok" ? " ok" : ""}${tst === "fail" ? " bad" : ""}`} title={tst === "ok" ? "可达" : test?.message}>
                       {testText}
                     </span>
                     <span className="ssh-table__actions">
@@ -1220,11 +737,28 @@ export function SshManagerDialog({
                         删除
                       </button>
                     </span>
+                    {tst === "fail" && test?.message && <span className="ssh-table__error" role="status">{test.message}</span>}
                   </div>
                 );
               })}
             </div>
           )}
+          {hosts.length > 0 && <nav className="ssh-pagination" aria-label="SSH 设备分页">
+            <span className="ssh-pagination__total">共 {hosts.length} 台</span>
+            <label className="ssh-pagination__size">每页
+              <select aria-label="每页设备数" value={pageSize} onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(0);
+              }}>
+                {[5, 10, 20].map(size => <option key={size} value={size}>{size} 台</option>)}
+              </select>
+            </label>
+            <div className="ssh-pagination__pages">
+              <button type="button" className="ssh-pagination__button" aria-label="上一页" title="上一页" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>‹</button>
+              <span className="ssh-pagination__position" aria-live="polite" aria-atomic="true">第 {currentPage + 1} / {pageCount} 页</span>
+              <button type="button" className="ssh-pagination__button" aria-label="下一页" title="下一页" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>›</button>
+            </div>
+          </nav>}
           <div className="btn-row">
             <button className="btn btn--primary" onClick={onClose}>
               关闭
@@ -1287,7 +821,7 @@ function SshHostForm({
 }: {
   /** 编辑时的原设备；添加为 null。 */
   initial: SshHost | null;
-  /** 既有设备（重复地址校验；编辑时排除自身）。 */
+  /** 既有设备（重复校验 user@host:port；编辑时排除自身）。 */
   existing: SshHost[];
   onBack: () => void;
   /** 左侧退出按钮文案：落点是回列表传「返回」，直接关弹窗传「关闭」。 */
@@ -1307,7 +841,7 @@ function SshHostForm({
   // 编辑且原认证为密码时才有已存密码；切到密码方式且无存货则必须输入
   const savedPassword = initial?.auth.type === "password" ? initial.auth.password : "";
   const others = existing.filter((h) => h.id !== initial?.id);
-  const dup = host.trim() !== "" && others.some((h) => h.host === host.trim() && h.port === port);
+  const dup = host.trim() !== "" && others.some((h) => h.host === host.trim() && h.port === port && h.username === username.trim());
   const missingPassword = authType === "password" && password === "" && savedPassword === "";
   const invalid =
     host.trim() === "" ||
@@ -1439,7 +973,7 @@ function SshHostForm({
         )}
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
-            已存在同地址设备 {host.trim()}:{port}，无需重复添加。
+            已存在相同设备 {username.trim()}@{host.trim()}:{port}，无需重复添加。
           </p>
         )}
         <div className="btn-row">
@@ -1461,11 +995,13 @@ function SshHostForm({
  *  失败详情不上(标题+host 身份已足);method 差异等诊断信息留在 App 的 toast 里。 */
 export function SshAuthDialog({
   host,
+  operation = "connect",
   onRetryPassword,
   onEdit,
   onCancel,
 }: {
   host: SshHost;
+  operation?: "connect" | "test";
   onRetryPassword: (password: string, updateSaved: boolean) => void;
   onEdit: () => void;
   onCancel: () => void;
@@ -1475,7 +1011,7 @@ export function SshAuthDialog({
   const [updateSaved, setUpdateSaved] = useState(true);
   const canRetry = isPassword && password !== "";
   const confirm = () => {
-    if (canRetry) onRetryPassword(password, updateSaved);
+    if (canRetry) onRetryPassword(password, operation === "test" || updateSaved);
   };
   useDialogKeys({ onClose: onCancel, onEnter: confirm });
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1500,11 +1036,11 @@ export function SshAuthDialog({
                 autoComplete="new-password"
               />
             </ConfigRow>
-            <label className="ssh-dialog__check">
+            {operation !== "test" && <label className="ssh-dialog__check">
               <input type="checkbox" checked={updateSaved} onChange={(e) => setUpdateSaved(e.target.checked)} />
               同时更新已保存的密码
-            </label>
-            <p className="dialog__hint">重试成功前不会写盘;仅勾选更新时保存新密码。</p>
+            </label>}
+            <p className="dialog__hint">{operation === "test" ? "保存新密码后重新测试，不打开终端。" : "勾选更新时先保存新密码，再重新连接。"}</p>
           </>
         ) : (
           <>
@@ -1523,7 +1059,7 @@ export function SshAuthDialog({
         {isPassword && (
           <div className="btn-row">
             <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-            <button className="btn btn--primary" onClick={confirm} disabled={!canRetry}>重试连接</button>
+            <button className="btn btn--primary" onClick={confirm} disabled={!canRetry}>{operation === "test" ? "保存并重新测试" : "重试连接"}</button>
           </div>
         )}
       </div>
@@ -1535,11 +1071,13 @@ export function SshAuthDialog({
 export function SshTrustDialog({
   host,
   error,
+  operation = "connect",
   onTrust,
   onCancel,
 }: {
   host: SshHost;
   error: Extract<SshOpenError, { kind: "host_key_unknown" | "host_key_changed" }>;
+  operation?: "connect" | "test";
   onTrust: () => void;
   onCancel: () => void;
 }) {
@@ -1573,10 +1111,10 @@ export function SshTrustDialog({
             <ConfigRow label="本次收到">
               <code className="ssh-trust__fp">{error.received}</code>
             </ConfigRow>
-            <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并重连。</p>
+            <p className="dialog__hint">算法 {error.keyType}。「仍要信任」将覆盖记录的指纹并{operation === "test" ? "重新测试" : "重连"}。</p>
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-              <button className="btn btn--danger-solid" onClick={onTrust}>仍要信任并连接</button>
+              <button className="btn btn--danger-solid" onClick={onTrust}>{operation === "test" ? "仍要信任并测试" : "仍要信任并连接"}</button>
             </div>
           </>
         ) : (
@@ -1587,7 +1125,7 @@ export function SshTrustDialog({
             <p className="dialog__hint">算法 {error.keyType}(SHA256)。首次连接需确认服务器身份,信任后本机将记住该指纹。</p>
             <div className="btn-row">
               <button className="btn btn--ghost" onClick={onCancel}>取消</button>
-              <button className="btn btn--primary" onClick={onTrust}>信任并连接</button>
+              <button className="btn btn--primary" onClick={onTrust}>{operation === "test" ? "信任并测试" : "信任并连接"}</button>
             </div>
           </>
         )}

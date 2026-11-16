@@ -173,44 +173,62 @@ async fn trust(mgr: &SshManager, host_id: &str) {
     assert!(fp.starts_with("SHA256:"), "指纹形态: {fp}");
 }
 
-/// 端到端主干：open（建连+认证+PTY+shell）→ write → 回显 read → drop 关闭。
-#[tokio::test]
-async fn open_write_read_roundtrip() {
+/// 并行测试共享同一配置目录:set_var 是进程级的,各测试各设各的路径会让
+/// trust/open/ssh_save 随机落到别的测试目录(本地多核下 set_var 风暴在开头
+/// 瞬间完成而侥幸;CI 2 核测试错峰启动,必现交错→指纹"丢失")。
+/// known_hosts/ssh_hosts 按 host:port / 设备 id 键控且测试各用随机端口,
+/// 共享目录互不冲突;mcp.rs 单测同范式。
+fn ensure_test_config_dir() {
     let dir = std::env::temp_dir().join(format!("ss-ssh-test-{}", std::process::id()));
     std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
     std::fs::create_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_first_open_keeps_shell_usable() {
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
     mgr.update_registry(vec![record("sshdev1", &host, port)]);
     trust(&mgr, "sshdev1").await;
 
-    let m = Arc::clone(&mgr);
-    let mut io = tokio::task::spawn_blocking(move || {
-        m.open_blocking("sshdev1", "shell", &SerialConfig::default())
-    })
-    .await
-    .unwrap()
-    .expect("open 失败");
-
-    // PortIo 是同步阻塞接口(write 内 recv_timeout 等回执)——必须 spawn_blocking,
-    // 在 current_thread 测试 runtime 的 async 上下文直接调会冻结唯一线程(命令循环停摆)。
-    let echoed = tokio::task::spawn_blocking(move || {
-        io.write_all(b"ping-ssh\n").unwrap();
-        read_until(&mut io, b"ping-ssh\n".len(), Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
-    assert_eq!(echoed, b"ping-ssh\n", "回显服务器应原样返回");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bus = Arc::new(EventBus::new(16));
+    let devices = Arc::new(ss_server::device::DeviceClientManager::empty(
+        tokio::sync::broadcast::channel(16).0,
+        "inst-ssh-open",
+    ));
+    let manager = SerialManager::new(
+        bus,
+        Arc::new(ss_server::device::CompositeOpener::new(devices, mgr)),
+    );
+    let port = "sshdev1::shell";
+    let session = ss_core::SessionId::next();
+    let (first, duplicate) = tokio::join!(
+        manager.acquire(port.into(), SerialConfig::default(), session),
+        manager.acquire(port.into(), SerialConfig::default(), session),
+    );
+    use ss_core::AcquireResult::{Attached, Opened};
+    assert!(matches!(
+        (first.unwrap(), duplicate.unwrap()),
+        (Opened { holders: 1, .. }, Attached { holders: 1, .. })
+            | (Attached { holders: 1, .. }, Opened { holders: 1, .. })
+    ));
+    assert_eq!(
+        manager
+            .write(port.into(), bytes::Bytes::from_static(b"\r"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(manager.drain_buffer(port, 2_000).await.unwrap(), b"\r");
+    manager.release(port, session).await.unwrap();
 }
 
 /// 多实例：shell 与 shell@2 两条独立 PTY,各写各读互不串流。
 #[tokio::test]
 async fn multiple_instances_isolated() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-multi-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
@@ -251,9 +269,7 @@ async fn multiple_instances_isolated() {
 /// 重信任(新 host:port 首连)后重开走第二台服务器。
 #[tokio::test]
 async fn update_registry_kills_changed_session() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-regsync-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host1, port1) = spawn_echo_ssh_server().await;
     let (host2, port2) = spawn_echo_ssh_server().await;
@@ -316,9 +332,7 @@ async fn update_registry_kills_changed_session() {
 /// 密码错误：open 回执带认证失败信息（不 panic,错误进 SerialError::OpenFailed）。
 #[tokio::test]
 async fn wrong_password_reports_auth_failure() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-auth-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mut rec = record("sshdev3", &host, port);
@@ -360,9 +374,7 @@ async fn wrong_password_reports_auth_failure() {
 /// resize 走通(回显服务器忽略 window_change;不崩即算过)。
 #[tokio::test]
 async fn resize_is_idempotent_noop() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-resize-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
@@ -410,6 +422,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// 起 server(空设备表 + 真 SshManager,无 opener 需要——SSH 动作不触 open)。
 /// 返回 (ws_url, ssh 管理器)——测试驱动注册表/别名。
 async fn boot_ws() -> (String, Arc<SshManager>) {
+    ensure_test_config_dir();
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(
         event_bus.clone(),
@@ -424,6 +437,10 @@ async fn boot_ws() -> (String, Arc<SshManager>) {
     devices.bind(Arc::downgrade(&devices));
     let ssh = Arc::new(SshManager::from_registry());
     let state = AppState {
+        access: Default::default(),
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         mcp_extensions: Vec::new(),
         manager,
         event_bus,
@@ -587,6 +604,10 @@ async fn instance_rows_visible_in_list() {
     let ssh = Arc::new(SshManager::empty());
     ssh.update_registry(vec![record("hlist", "192.0.2.50", 22)]);
     let state = AppState {
+        access: Default::default(),
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
+            "test-server",
+        )),
         mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
@@ -754,9 +775,7 @@ async fn ssh_nickname_resolves_in_addressing() {
 /// 同端口换 key:先 abort 旧 server 任务,再用新 key 在同端口起新 server。
 #[tokio::test]
 async fn host_key_lifecycle_unknown_then_changed() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-hk-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     // 起第一台(随机端口,key1,可中止——第三步同端口换 key 需要)
     let (host, port, server1) = spawn_echo_ssh_server_abortable().await;
@@ -875,4 +894,110 @@ fn ssh_open_error_wire_shape() {
         e,
         ss_core::SerialError::OpenFailed { detail: None, .. }
     ));
+}
+
+#[tokio::test]
+async fn ws_ssh_test_preserves_confirmation_errors_without_opening_channels() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct ProbeServer(Arc<AtomicUsize>);
+    impl server::Handler for ProbeServer {
+        type Error = russh::Error;
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            password: &str,
+        ) -> Result<Auth, Self::Error> {
+            if password == "correct-password" {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                })
+            }
+        }
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<russh::server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            reply.accept().await;
+            Ok(())
+        }
+    }
+
+    type Ws = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn test_reply(ws: &mut Ws) -> serde_json::Value {
+        ws.send(Message::Text(
+            r#"{"action":"ssh_test","host_id":"probe"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(Ok(Message::Text(raw))) = ws.next().await {
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == "ssh_test_result" {
+                    return value;
+                }
+            }
+            panic!("connection closed before SSH test reply");
+        })
+        .await
+        .unwrap()
+    }
+
+    ensure_test_config_dir();
+    let channels = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_channels = Arc::clone(&channels);
+    let config = Arc::new(server_config());
+    let ssh_server = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            let handler = ProbeServer(Arc::clone(&server_channels));
+            tokio::spawn(async move {
+                let _ = server::run_stream(config, socket, handler).await;
+            });
+        }
+    });
+    let (url, manager) = boot_ws().await;
+    manager.update_registry(vec![record("probe", "127.0.0.1", port)]);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let unknown = test_reply(&mut ws).await;
+    assert_eq!(unknown["ok"], false);
+    assert_eq!(unknown["ssh"]["kind"], "host_key_unknown");
+    assert!(unknown["ssh"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .starts_with("SHA256:"));
+    assert!(!unknown["ssh"]["keyType"].as_str().unwrap().is_empty());
+    assert!(!unknown["message"].as_str().unwrap().is_empty());
+
+    trust(&manager, "probe").await;
+    let passed = test_reply(&mut ws).await;
+    assert_eq!(passed["ok"], true);
+    assert_eq!(passed["message"], "");
+    assert!(passed.get("ssh").is_none());
+
+    let mut wrong = record("probe", "127.0.0.1", port);
+    wrong.auth = SshAuthRecord::Password {
+        password: "wrong-password".into(),
+    };
+    manager.update_registry(vec![wrong]);
+    let rejected = test_reply(&mut ws).await;
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["ssh"]["kind"], "auth_failed");
+    assert_eq!(channels.load(Ordering::SeqCst), 0);
+    ws.close(None).await.unwrap();
+    ssh_server.abort();
 }

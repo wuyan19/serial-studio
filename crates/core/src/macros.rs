@@ -92,6 +92,12 @@ pub async fn run_macro(
     manager: &SerialManager,
     abort: Arc<AtomicBool>,
 ) -> Result<(), MacroError> {
+    run_macro_canonical(&manager.canon_key(port), mac, manager, abort).await
+}
+
+pub async fn run_macro_canonical(
+    port: &str, mac: &Macro, manager: &SerialManager, abort: Arc<AtomicBool>,
+) -> Result<(), MacroError> {
     for step in &mac.steps {
         // 步骤间检查 abort:覆盖 Send/Clear 之间的空隙(Delay/Expect 内部另有分段/select 兜底)。
         if abort.load(Ordering::Relaxed) {
@@ -103,7 +109,7 @@ pub async fn run_macro(
                 format,
                 auto_newline,
             } => {
-                manager.send(port, data, format, *auto_newline).await?;
+                manager.send_canonical(port, data, format, *auto_newline).await?;
             }
             MacroStep::Delay { ms } => {
                 // 分段(≤50ms)轮询 abort,否则单个长 Delay 会让中断延迟到 delay 结束。
@@ -127,7 +133,7 @@ pub async fn run_macro(
             } => {
                 // select! 让 abort 能打断长 expect(否则要等满 timeout_ms)。
                 let lines = tokio::select! {
-                    r = manager.grep_buffer(port, pattern, *timeout_ms) => r?,
+                    r = manager.grep_buffer_canonical(port, pattern, *timeout_ms) => r?,
                     _ = await_abort(abort.clone()) => return Err(MacroError::Aborted),
                 };
                 if lines.is_empty() {
@@ -138,7 +144,7 @@ pub async fn run_macro(
                 }
             }
             MacroStep::Clear => {
-                manager.clear_buffer(port).await?;
+                manager.clear_buffer_canonical(port).await?;
             }
         }
     }

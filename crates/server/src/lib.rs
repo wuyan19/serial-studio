@@ -9,18 +9,21 @@
 //! 经 `pub use` 重导出设备域模块——下游（tauri-app/topo-hub）零改动。
 
 // 设备域重导出（ss-device 的模块原路径在 ss-server 命名空间可见）
-pub use ss_device::{address, device, port_meta_store, protocol, remotes_store, ssh};
+pub use ss_device::{address, device, port_groups, port_meta_store, protocol, remotes_store, ssh};
 pub use ss_device::{
     bare_name_of, endpoint_kind, instance_no, legacy_origin_view, local_device_view,
     passthrough_port_key, rewrite_remote_device, ssh_device_view, DeviceView, PortView,
     MAX_PASSTHROUGH_SEGMENTS,
 };
 
+pub mod access;
+mod access_http;
 pub mod config;
 pub mod macros_store;
 /// MCP JSON-RPC 层。pub 供二次宿主（topo-hub）的扩展工具做集成测试——
 /// 经 handle_request 走完整调度链（内置 + 扩展），绕过 axum 更轻。
 pub mod mcp;
+pub mod libraries;
 pub mod mcp_ext;
 pub mod script_logs;
 pub mod scripts_store;
@@ -75,6 +78,8 @@ pub enum ScriptKind {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub access: Arc<access::AccessControl>,
+    pub port_groups: Arc<port_groups::PortGroupsStore>,
     pub manager: Arc<SerialManager>,
     pub event_bus: Arc<EventBus>,
     /// 端口元数据（别名等）变更广播。set_alias 后通知所有 WS/IPC 客户端刷新列表，
@@ -150,6 +155,8 @@ pub fn create_state() -> AppState {
         settings::load().enable_scripting,
     ));
     AppState {
+        access: Arc::new(access::AccessControl::load()),
+        port_groups: Arc::new(port_groups::PortGroupsStore::from_config(&instance_id)),
         manager,
         event_bus,
         meta_bus: Arc::new(meta_tx),
@@ -167,6 +174,7 @@ pub fn create_state() -> AppState {
 }
 
 // ===== PortView/DeviceView 及纯函数已移至 ss-device；本文件经 pub use 重导出 =====
+
 
 /// 列出端口并组合别名，返回面向客户端的 PortView。三条 list 路径（REST / WS / Tauri）共用。
 ///
@@ -194,6 +202,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 .get(bare_name_of(&info.name))
                 .and_then(|m| m.alias.clone());
             PortView {
+                locked: None,
+                access_tls_port: None,
                 info,
                 alias,
                 kind: Some("serial".into()),
@@ -243,6 +253,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 rewrite_remote_device(&mut device, direct);
             }
             views.push(PortView {
+                locked: None,
+                access_tls_port: None,
                 info: ss_core::PortInfo { name, ..pv.info },
                 alias: pv.alias,
                 kind: pv.kind,
@@ -261,6 +273,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
         let device = ssh_device_view(rec);
         for ep in &rec.endpoints {
             views.push(PortView {
+                locked: None,
+                access_tls_port: None,
                 info: ss_core::PortInfo {
                     name: ss_core::compose_port_key(&rec.id, &ep.name),
                     opened: false,
@@ -300,6 +314,8 @@ pub async fn list_ports_with_meta(state: &AppState) -> Vec<PortView> {
                 // 刻意不覆盖 holders(远端桶权威在远端 hub),SSH 行的权威恰是本地快照
                 Some(existing) => existing.info.holders = info.holders,
                 None => views.push(PortView {
+                    locked: None,
+                    access_tls_port: None,
                     info: info.clone(),
                     alias: state.ssh.instance_alias_of(name),
                     kind: Some(kind),
@@ -427,7 +443,10 @@ pub fn base_router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/ports", get(list_ports))
-        .route("/mcp", post(mcp::mcp_handler))
+        .route("/api/access/status", get(access_http::status))
+        .route("/api/access/verify", post(access_http::verify))
+        .route("/api/access/logout", post(access_http::logout))
+        .route("/mcp", post(access_http::mcp))
         .with_state(state)
 }
 
@@ -436,9 +455,21 @@ pub fn create_router(state: AppState) -> Router {
     base_router(state).fallback(serve_web)
 }
 
+pub(crate) fn create_secure_router(state: AppState) -> Router {
+    create_router(state).layer(axum::Extension(access_http::SecureTransport))
+}
+
 /// REST: 列出端口（带别名）。WS 客户端也可通过 `{"action":"list"}` 获取。
-async fn list_ports(State(state): State<AppState>) -> Json<Vec<PortView>> {
-    Json(list_ports_with_meta(&state).await)
+async fn list_ports(
+    State(state): State<AppState>,
+    secure: Option<axum::Extension<access_http::SecureTransport>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let grant = access_http::Grant::new(&state, secure.is_some(), &headers);
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(access_http::visible_ports(&state, &grant, false).await),
+    )
 }
 
 #[cfg(test)]
@@ -469,6 +500,8 @@ mod tests {
     #[test]
     fn port_view_flattens_to_flat_wire() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "COM7".into(),
                 opened: true,
@@ -499,6 +532,8 @@ mod tests {
     #[test]
     fn port_view_carries_structured_meta() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "ssh-uuid::shell@2".into(),
                 opened: true,
@@ -629,6 +664,8 @@ mod tests {
     #[test]
     fn local_override_keeps_remote_holders() {
         let mut views = vec![PortView {
+            locked: None,
+            access_tls_port: None,
             // 远端桶条目:hub 上报 opened/holders=3(PC1 窗口 + PC2 web + PC3 设备连接)
             info: ss_core::PortInfo {
                 name: "uuid-pc1::COM3".into(),
@@ -658,6 +695,8 @@ mod tests {
 
         // 断连兜底仍生效:本地 drainer 红标覆盖远端缓存里的 disconnected=false
         let mut views2 = vec![PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "uuid-pc1::COM3".into(),
                 opened: true,
@@ -690,6 +729,8 @@ mod tests {
     #[test]
     fn port_view_skips_none_alias() {
         let v = PortView {
+            locked: None,
+            access_tls_port: None,
             info: ss_core::PortInfo {
                 name: "COM3".into(),
                 opened: false,

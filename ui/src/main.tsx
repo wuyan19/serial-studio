@@ -2,7 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { isTauri } from "./lib";
+import { installFileDropGuard } from "./file-drop";
 import "./styles.css";
+
+const removeFileDropGuard = installFileDropGuard(window);
+if (import.meta.hot) import.meta.hot.dispose(removeFileDropGuard);
 
 // 桌面壳(Tauri WebView2/WKWebView/webkitgtk)里未 preventDefault 的空白处右键会弹
 // 浏览器默认菜单(后退/刷新/打印/检查)——桌面应用观感突兀,全局拦掉。仅 Tauri 形态

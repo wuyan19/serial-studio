@@ -15,6 +15,11 @@ import { parsePortId, wireToPid } from "./lib";
 import { createRoot, leafGroupIds, removeLeaf, splitLeaf } from "./pane-tree";
 import type { Group, PaneHalf, PaneNode, PortId, PortInfo, PortRow, SerialConfig } from "./types";
 
+export type PortAttempt = { config: SerialConfig; alias?: string } & (
+  | { status: "opening" }
+  | { status: "failed"; message: string }
+);
+
 export interface SessionState {
   /** 按设备域分桶的端口列表（key=devId："local"/远程设备 UUID/窗口 "remote"）。
    *  桶内条目带 ingest 定型的 pid（单源，消费方不再各自反算）。 */
@@ -23,6 +28,7 @@ export interface SessionState {
   devOnline: Record<string, boolean>;
   /** 本会话打开的端口复合键，有序。 */
   openPorts: PortId[];
+  portAttempts: ReadonlyMap<PortId, PortAttempt>;
   /** 设备断开(USB 拔出/WS 断连)但 tab 保留的端口——可重连。 */
   disconnectedPorts: Set<PortId>;
   /** 端口实际生效的配置（acquire 结果），key=PortId。 */
@@ -41,6 +47,7 @@ export const initialSession: SessionState = {
   portsByDev: {},
   devOnline: {},
   openPorts: [],
+  portAttempts: new Map(),
   disconnectedPorts: new Set(),
   portConfigs: {},
   groups: { g1: { id: "g1", ports: [], activePort: "" } },
@@ -60,8 +67,10 @@ export type SessionAction =
   | { type: "port_opened_evt"; devId: string; port: string }
   /** 设备物理断开（USB 拔出）→ 保留 tab，仅标记断开待重连。 */
   | { type: "port_disconnected_evt"; devId: string; port: string }
-  /** acquire 成功（首开或附加）：记录实际配置、建 tab、进焦点 group；断开标记一并清除。 */
-  | { type: "port_acquired"; pid: PortId; config: SerialConfig }
+  | { type: "port_open_started"; pid: PortId; config: SerialConfig; alias?: string; groupId?: string }
+  | { type: "port_open_failed"; pid: PortId; message: string }
+  /** Acquire uses an optional source group so asynchronous duplication preserves its destination. */
+  | { type: "port_acquired"; pid: PortId; config: SerialConfig; groupId?: string }
   /** 移除端口（用户主动关 + 远端被关共用）：清 openPorts/portConfigs/groups/layout。 */
   | { type: "prune_port"; pid: PortId }
   /** 聚焦指定 group。 */
@@ -70,8 +79,8 @@ export type SessionAction =
   | { type: "switch_tab"; groupId: string; port: PortId }
   /** 拖 tab 到某 group 终端区半区：新建 group 并分裂。 */
   | { type: "drop_half"; port: PortId; srcGroupId: string; dstGroupId: string; half: PaneHalf }
-  /** 拖 tab 到另一 group 的标签栏：迁移归属。 */
-  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string }
+  /** Move a tab into an insertion gap; an omitted index keeps cross-pane append behavior. */
+  | { type: "move_port"; port: PortId; srcGroupId: string; dstGroupId: string; index?: number }
   /** 拖分栏手柄改比例。path = 从根到目标 split 节点的子索引序列（根 split 为 []）。 */
   | { type: "set_split_ratio"; path: number[]; ratio: number };
 
@@ -81,17 +90,45 @@ function groupOf(groups: Record<string, Group>, pid: PortId): string | undefined
   return undefined;
 }
 
-/** move_port 的共享实现（drop_half 落空 group 时也复用）。 */
-function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId: string): SessionState {
-  if (srcGroupId === dstGroupId) return s;
+function addTab(s: SessionState, pid: PortId, groupId?: string): SessionState["groups"] {
+  if (groupOf(s.groups, pid)) return s.groups;
+  const group = (groupId && s.groups[groupId]) || s.groups[s.focusedGroupId];
+  return group
+    ? { ...s.groups, [group.id]: { ...group, ports: [...group.ports, pid], activePort: pid } }
+    : s.groups;
+}
+
+function clearAttempt(s: SessionState, pid: PortId): SessionState["portAttempts"] {
+  if (!s.portAttempts.has(pid)) return s.portAttempts;
+  const attempts = new Map(s.portAttempts);
+  attempts.delete(pid);
+  return attempts;
+}
+
+/** Preserve terminal ownership while reordering tabs or moving between panes. */
+function movePort(s: SessionState, port: PortId, srcGroupId: string, dstGroupId: string, index?: number): SessionState {
   const src = s.groups[srcGroupId];
   const dst = s.groups[dstGroupId];
-  if (!src || !dst || !src.ports.includes(port) || dst.ports.includes(port)) return s;
+  if (!src || !dst || !src.ports.includes(port)) return s;
+  if (index !== undefined && !Number.isFinite(index)) return s;
+  const slot = index === undefined ? dst.ports.length : Math.max(0, Math.min(dst.ports.length, Math.trunc(index)));
+  if (srcGroupId === dstGroupId) {
+    if (index === undefined) return s;
+    const from = src.ports.indexOf(port);
+    const to = slot > from ? slot - 1 : slot;
+    if (from === to) return s;
+    const ports = src.ports.filter(p => p !== port);
+    ports.splice(to, 0, port);
+    return { ...s, groups: { ...s.groups, [srcGroupId]: { ...src, ports } } };
+  }
+  if (dst.ports.includes(port)) return s;
+  const dstPorts = [...dst.ports];
+  dstPorts.splice(slot, 0, port);
   const sp = src.ports.filter((p) => p !== port);
   const srcEmpty = sp.length === 0; // 只有这一个 → 迁出后空
   const groups: Record<string, Group> = {
     ...s.groups,
-    [dstGroupId]: { ...dst, ports: [...dst.ports, port], activePort: port },
+    [dstGroupId]: { ...dst, ports: dstPorts, activePort: port },
   };
   if (srcEmpty) delete groups[srcGroupId];
   else groups[srcGroupId] = { ...src, ports: sp, activePort: src.activePort === port ? sp[sp.length - 1] : src.activePort };
@@ -167,6 +204,19 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
       return { ...s, disconnectedPorts };
     }
 
+    case "port_open_started": {
+      const { pid, config, alias, groupId } = a;
+      const portAttempts = new Map(s.portAttempts).set(pid, { status: "opening", config, alias });
+      return { ...s, portAttempts, groups: addTab(s, pid, groupId) };
+    }
+
+    case "port_open_failed": {
+      const attempt = s.portAttempts.get(a.pid);
+      if (attempt?.status !== "opening") return s;
+      const portAttempts = new Map(s.portAttempts).set(a.pid, { ...attempt, status: "failed", message: a.message });
+      return { ...s, portAttempts };
+    }
+
     case "port_acquired": {
       const { pid, config } = a;
       const openPorts = s.openPorts.includes(pid) ? s.openPorts : [...s.openPorts, pid];
@@ -175,27 +225,14 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
       const disconnectedPorts = s.disconnectedPorts.has(pid)
         ? new Set([...s.disconnectedPorts].filter((p) => p !== pid))
         : s.disconnectedPorts;
-      // 进焦点 group 并设为活动端口。端口唯一归属（INV-1）：已在某 group（重连重放、
-      // tab 期间被挪动）则保持原归属不动，只追加新开的端口——否则会同时出现在两个 group。
-      const cur = s.groups[s.focusedGroupId];
-      const alreadyGrouped = groupOf(s.groups, pid) !== undefined;
-      const groups = cur && !alreadyGrouped
-        ? {
-            ...s.groups,
-            [s.focusedGroupId]: {
-              ...cur,
-              ports: cur.ports.includes(pid) ? cur.ports : [...cur.ports, pid],
-              activePort: pid,
-            },
-          }
-        : s.groups;
-      return { ...s, openPorts, portConfigs, disconnectedPorts, groups };
+      return { ...s, openPorts, portConfigs, disconnectedPorts, groups: addTab(s, pid, a.groupId), portAttempts: clearAttempt(s, pid) };
     }
 
     case "prune_port": {
       const pid = a.pid;
       const gid = groupOf(s.groups, pid);
       const openPorts = s.openPorts.filter((p) => p !== pid);
+      const portAttempts = clearAttempt(s, pid);
       const portConfigs = { ...s.portConfigs };
       delete portConfigs[pid];
       const disconnectedPorts = s.disconnectedPorts.has(pid)
@@ -203,7 +240,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
         : s.disconnectedPorts;
       // 顺带清断开标记（有意修正）：原实现不删，用户关掉"断开待重连"的 tab 后，
       // 设备重连时会按重放集合把这个已关的端口重新打开（僵尸复活）。
-      if (!gid) return { ...s, openPorts, portConfigs, disconnectedPorts }; // 不在任何 group（异常）
+      if (!gid) return { ...s, openPorts, portConfigs, disconnectedPorts, portAttempts };
       const cur = s.groups[gid];
       const rest = cur.ports.filter((p) => p !== pid);
       const groups = { ...s.groups };
@@ -217,7 +254,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
         delete groups[gid];
         layout = leafGroupIds(s.layout).length <= 1 ? s.layout : removeLeaf(s.layout, gid) ?? s.layout;
       }
-      return { ...s, openPorts, portConfigs, disconnectedPorts, groups, layout };
+      return { ...s, openPorts, portConfigs, disconnectedPorts, portAttempts, groups, layout };
     }
 
     case "set_focused_group":
@@ -278,7 +315,7 @@ function reduce(s: SessionState, a: SessionAction): SessionState {
     }
 
     case "move_port":
-      return movePort(s, a.port, a.srcGroupId, a.dstGroupId);
+      return movePort(s, a.port, a.srcGroupId, a.dstGroupId, a.index);
     default: {
       // 联合已穷尽；default 仅满足返回类型检查
       const _exhaustive: never = a;

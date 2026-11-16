@@ -21,6 +21,18 @@ function withPorts(...pids: string[]): SessionState {
 }
 
 describe("port_acquired", () => {
+  it("uses the existing connection tab without switching away from the current tab", () => {
+    const pid = "ssh::shell";
+    let s = sessionReducer(withPorts("COM3"), { type: "port_open_started", pid, config: CFG });
+    expect(s.groups.g1.activePort).toBe(pid);
+    expect(s.openPorts).toEqual(["COM3"]);
+    s = sessionReducer(s, { type: "switch_tab", groupId: "g1", port: "COM3" });
+    s = sessionReducer(s, { type: "port_acquired", pid, config: CFG });
+    expect(s.groups.g1).toEqual({ id: "g1", ports: ["COM3", pid], activePort: "COM3" });
+    expect(s.openPorts).toEqual(["COM3", pid]);
+    expect(s.portAttempts.has(pid)).toBe(false);
+  });
+
   it("记录配置、追加 openPorts、进焦点 group 并设为活动端口", () => {
     const cfg = { baud_rate: 9600, data_bits: "eight", stop_bits: "one", parity: "none", flow_control: "none", line_ending: "lf" };
     const s = sessionReducer(initialSession, { type: "port_acquired", pid: "COM3", config: cfg });
@@ -35,6 +47,23 @@ describe("port_acquired", () => {
     const s2 = sessionReducer(s1, { type: "port_acquired", pid: "COM3", config: CFG });
     expect(s2.openPorts.length).toBe(1);
     expect(s2.groups.g1.ports.length).toBe(1);
+  });
+
+  it("keeps an asynchronously duplicated SSH tab in the requested group after focus changes", () => {
+    let s = withPorts("COM3", "ssh::shell");
+    s = sessionReducer(s, { type: "drop_half", port: "ssh::shell", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "set_focused_group", groupId: "g1" });
+    s = sessionReducer(s, { type: "port_acquired", pid: "ssh::shell@2", config: CFG, groupId: "g2" });
+    expect(s.groups.g2.ports).toEqual(["ssh::shell", "ssh::shell@2"]);
+    expect(s.groups.g2.activePort).toBe("ssh::shell@2");
+    expect(s.groups.g1.ports).toEqual(["COM3"]);
+    expect(s.focusedGroupId).toBe("g1");
+  });
+
+  it("falls back to the focused group when the requested group was removed", () => {
+    const s = sessionReducer(withPorts("COM3"), { type: "port_acquired", pid: "ssh::shell@2", config: CFG, groupId: "removed" });
+    expect(s.groups.g1.ports).toEqual(["COM3", "ssh::shell@2"]);
+    expect(Object.keys(s.groups)).toEqual(["g1"]);
   });
 
   it("acquire 成功清除断开标记（重连路径）", () => {
@@ -128,6 +157,35 @@ describe("dev_online", () => {
 });
 
 describe("drop_half / move_port", () => {
+  it("reorders tabs in either direction using insertion gaps without changing the active port", () => {
+    const s = withPorts("COM1", "COM2", "COM3");
+    const moved = sessionReducer(s, { type: "move_port", port: "COM1", srcGroupId: "g1", dstGroupId: "g1", index: 3 });
+    expect(moved.groups.g1.ports).toEqual(["COM2", "COM3", "COM1"]);
+    expect(moved.groups.g1.activePort).toBe("COM3");
+    expect(moved.layout).toBe(s.layout);
+    expect(moved.openPorts).toBe(s.openPorts);
+    const restored = sessionReducer(moved, { type: "move_port", port: "COM1", srcGroupId: "g1", dstGroupId: "g1", index: 0 });
+    expect(restored.groups.g1.ports).toEqual(["COM1", "COM2", "COM3"]);
+  });
+
+  it("ignores adjacent gaps, missing tabs and malformed insertion indices", () => {
+    const s = withPorts("COM1", "COM2", "COM3");
+    for (const index of [1, 2, NaN, Infinity]) {
+      expect(sessionReducer(s, { type: "move_port", port: "COM2", srcGroupId: "g1", dstGroupId: "g1", index })).toBe(s);
+    }
+    expect(sessionReducer(s, { type: "move_port", port: "missing", srcGroupId: "g1", dstGroupId: "g1", index: 0 })).toBe(s);
+  });
+
+  it("inserts a tab at a specific position across panes and collapses an emptied source", () => {
+    let s = withPorts("COM1", "COM2", "COM3");
+    s = sessionReducer(s, { type: "drop_half", port: "COM3", srcGroupId: "g1", dstGroupId: "g1", half: "right" });
+    s = sessionReducer(s, { type: "move_port", port: "COM3", srcGroupId: "g2", dstGroupId: "g1", index: 1 });
+    expect(s.groups.g1.ports).toEqual(["COM1", "COM3", "COM2"]);
+    expect(s.groups.g1.activePort).toBe("COM3");
+    expect(s.groups.g2).toBeUndefined();
+    expect(leafGroupIds(s.layout)).toEqual(["g1"]);
+  });
+
   it("拖到另一 group 半区：新建 group + 分裂 + 焦点转移", () => {
     let s = withPorts("COM3", "COM4");
     s = sessionReducer(s, { type: "drop_half", port: "COM4", srcGroupId: "g1", dstGroupId: "g1", half: "right" });

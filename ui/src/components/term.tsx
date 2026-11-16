@@ -1,17 +1,20 @@
 /** 终端区：xterm 实例池（TermView，DOM reparent 跨 group 保 scrollback）、
 editor group（标签栏 + 终端区 + 拖拽分栏）、终端内搜索条。 */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Group, PaneHalf, ShortcutMap, TermInstance } from "../types";
+import type { PortAttempt } from "../store";
 import { copyText, displayPortName, readClipboardText } from "../lib";
+import { installSelectionCopy } from "../term-selection";
 import { getTheme, subscribe, themeDefOf, type Theme } from "../theme";
 import { getFontSize, subscribeFont, zoomIn, zoomOut, resetFontSize } from "../term-font";
 import { eventToCombo, formatCombo, getBindings, subscribeBindings } from "../shortcuts";
-import { IconChevronDown, IconChevronUp, IconClose, IconPlug } from "../icons";
+import { IconAlert, IconChevronDown, IconChevronUp, IconClose, IconHub, IconPlug } from "../icons";
 import { InlineAliasInput, PortLabel } from "./primitives";
 import { ContextMenu, type ContextMenuItem } from "./context-menu";
+import { TabOverflow } from "./tab-overflow";
 
 // ===== 终端视图 =====
 
@@ -155,14 +158,9 @@ export function TermView({
     fitRef.current = fit;
     termRef.current = term;
     onReady({ term, fit, search });
-    // 选中即复制（VS Code copyOnSelection 同款）：拖选/双击/右键选词一完成就写系统剪贴板。
-    // hasSelection 守卫：取消选择（点空白）触发同一事件，此时不动剪贴板（否则被清空）。
-    const selDisposable = term.onSelectionChange(() => {
-      if (!term.hasSelection()) return;
-      const text = term.getSelection();
-      if (text) void copyText(text);
-    });
+    const stopSelectionCopy = installSelectionCopy(term, container);
     const disposable = term.onData((data) => {
+      if (disconnectedRef.current) return;
       // 任何输入(字符/回车/退格/控制序列)都回到底部：onData 只在真正产生待发送数据时触发，
       // 单独修饰键不会到这里，故在此滚底不会重现 scrollOnUserInput=true 的"按 Ctrl 误跳"。
       // 滚到底后设备回显到达会自然跟随。
@@ -196,7 +194,7 @@ export function TermView({
       document.fonts?.removeEventListener("loadingdone", refit);
       clearTimeout(timer);
       disposable.dispose();
-      selDisposable.dispose();
+      stopSelectionCopy();
       term.dispose();
       fitRef.current = null;
       termRef.current = null;
@@ -253,9 +251,10 @@ export function TermView({
       { label: "复制", disabled: !sel, onSelect: () => void copyText(sel) },
       {
         label: "粘贴",
+        disabled: disconnected,
         onSelect: () => {
           void readClipboardText().then((text) => {
-            if (!text) return;
+            if (!text || disconnectedRef.current) return;
             // 粘贴等价键盘输入但不经 onData(Ctrl+V 原生粘贴才走 onData)，回底需单独补
             termRef.current?.scrollToBottom();
             onWrite(port, text);
@@ -408,10 +407,12 @@ export function GroupView({
   aliasOf,
   sourceLabelOf,
   disconnectedOf,
+  portAttempts,
   onReconnectTab,
   onSwitchTab,
   onCloseTab,
   onRenameTab,
+  onTabContextMenu,
   onCommitAlias,
   onCancelAlias,
   onFocusGroup,
@@ -426,6 +427,8 @@ export function GroupView({
   onDropOnTabs,
   dropHint,
   termContainerRef,
+  fileTools,
+  filePanel,
 }: {
   group: Group;
   focused: boolean;
@@ -435,11 +438,13 @@ export function GroupView({
   sourceLabelOf?: (port: string) => string | undefined;
   /** 该端口是否处于"设备断开"态(灰显 + 显示重连按钮)。 */
   disconnectedOf?: (port: string) => boolean;
+  portAttempts?: ReadonlyMap<string, PortAttempt>;
   /** 重连断开的 tab。 */
   onReconnectTab?: (port: string) => void;
   onSwitchTab: (port: string) => void;
   onCloseTab: (port: string) => void;
   onRenameTab: (port: string) => void;
+  onTabContextMenu: (port: string, position: { x: number; y: number }) => void;
   onCommitAlias: (port: string, alias: string) => void;
   onCancelAlias: () => void;
   onFocusGroup: () => void;
@@ -456,12 +461,48 @@ export function GroupView({
   onDropHalf: (port: string, srcGroupId: string, dstGroupId: string, half: PaneHalf) => void;
   /** 当前拖拽高亮提示（{overGroupId, overHalf} | null）。 */
   dropHint: { overGroupId: string; overHalf: PaneHalf } | null;
-  /** 拖 tab 到本 group 标签栏：迁移 port 归属到本 group。 */
-  onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string) => void;
+  /** Insert at a gap in the destination's original tab order, before removing the source. */
+  onDropOnTabs: (port: string, srcGroupId: string, dstGroupId: string, index?: number) => void;
   /** 终端容器 DOM 就绪/卸载上报（App 把 TermView 经 DOM reparent 挪入，跨 group 搬 tab 保 scrollback）。 */
   termContainerRef: (el: HTMLDivElement | null) => void;
+  fileTools?: ReactNode;
+  filePanel?: ReactNode;
 }) {
+  const attempt = portAttempts?.get(group.activePort);
+  const connectionStatus = attempt?.status ?? (group.activePort && disconnectedOf?.(group.activePort) ? "disconnected" : undefined);
+  const connectionSource = connectionStatus && sourceLabelOf?.(group.activePort);
+  const connectionTitle = connectionStatus === "opening" ? "正在连接…" : connectionStatus === "failed" ? "连接失败" : "连接已断开";
   const termRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const [tabDropIndex, setTabDropIndex] = useState<number | null>(null);
+  useEffect(() => {
+    const clearTabDrop = () => setTabDropIndex(null);
+    window.addEventListener("dragend", clearTabDrop);
+    window.addEventListener("drop", clearTabDrop);
+    return () => {
+      window.removeEventListener("dragend", clearTabDrop);
+      window.removeEventListener("drop", clearTabDrop);
+    };
+  }, []);
+  const insertionIndex = (clientX: number) => {
+    const tabs = Array.from(tabsRef.current?.querySelectorAll<HTMLElement>(".tab") ?? []);
+    const index = tabs.findIndex(tab => {
+      const rect = tab.getBoundingClientRect();
+      return clientX < rect.left + rect.width / 2;
+    });
+    return index === -1 ? tabs.length : index;
+  };
+  // 标签溢出时,激活 tab 可能滚出可视区(侧栏切换/新开端口),把它滚回来。
+  // 手动算 scrollLeft 而非 scrollIntoView(inline):后者会连带滚动外层可滚祖先。
+  useLayoutEffect(() => {
+    const el = tabsRef.current;
+    const tab = el?.querySelector<HTMLElement>(".tab[data-active='true']");
+    if (!el || !tab) return;
+    const t = tab.getBoundingClientRect();
+    const b = el.getBoundingClientRect();
+    if (t.left < b.left) el.scrollLeft += t.left - b.left;
+    else if (t.right > b.right) el.scrollLeft += t.right - b.right;
+  }, [group.activePort]);
   // 空状态快捷键提示用:跟随改键(只在有空 tab 的格子短暂存在,订阅成本可忽略)
   const [bindings, setBindings] = useState<ShortcutMap>(() => getBindings());
   useEffect(() => subscribeBindings(setBindings), []);
@@ -513,118 +554,167 @@ export function GroupView({
   }, [group.id]);
   return (
     <div className="group" data-focused={focused} onMouseDownCapture={onFocusGroup}>
-      <div
-        className="group__tabs tab-bar"
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes("text/x-port")) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "move";
-          }
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          const raw = e.dataTransfer.getData("text/x-port");
-          if (raw) {
-            try {
-              const { port, src } = JSON.parse(raw) as { port: string; src: string };
-              onDropOnTabs(port, src, group.id);
-            } catch {
-              /* ignore */
+      <div className="group__tab-row" data-empty={group.ports.length === 0 ? "true" : undefined}>
+        <TabOverflow scrollRef={tabsRef}>
+        <div
+          ref={tabsRef}
+          className="group__tabs tab-bar"
+          onWheel={(e) => {
+            // 竖向滚轮转横向滚动:标签栏只有横向溢出,Chromium 默认不做这个映射(Shift+滚轮才行,用户难发现)
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
+          }}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("text/x-port")) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              setTabDropIndex(insertionIndex(e.clientX));
+              onDragLeave();
             }
-          }
-        }}
-      >
-        {group.ports.length === 0 && <span className="tab-bar__empty">未打开端口</span>}
-        {group.ports.map((port) => {
-          const isActive = port === group.activePort;
-          const editingThis = aliasEditTab?.port === port;
-          const portName = displayPortName(port); // 多级复合键也只显示串口名(设备归属由 source 标签表达)
-          const src = sourceLabelOf?.(port);
-          const disconnected = disconnectedOf?.(port) ?? false;
-          return (
-            <div
-              key={port}
-              className="tab"
-              data-active={isActive}
-              data-disconnected={disconnected ? "true" : undefined}
-              data-editing={editingThis ? "true" : undefined}
-              draggable={!editingThis}
-              onDragStart={(e) => {
-                e.dataTransfer.effectAllowed = "move";
-                e.dataTransfer.setData("text/x-port", JSON.stringify({ port, src: group.id }));
-                e.dataTransfer.setData("text/plain", port); // 部分 webview 需 text/plain 才进 drop
-              }}
-              onDragEnd={onDragLeave}
-              onClick={() => {
-                if (!editingThis) onSwitchTab(port);
-              }}
-              onDoubleClick={() => onRenameTab(port)}
-              title={`切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
-            >
-              <span className="tab__dot" />
-              <span className="tab__name">
-                {editingThis ? (
-                  <InlineAliasInput
-                    initial={aliasOf(port) ?? ""}
-                    placeholder={`为 ${portName} 设置别名`}
-                    onCommit={(alias) => onCommitAlias(port, alias)}
-                    onCancel={onCancelAlias}
-                  />
-                ) : (
-                  <>
-                    <PortLabel name={portName} alias={aliasOf(port)} />
-                    {src && <span className="tab__src">{src}</span>}
-                  </>
-                )}
-              </span>
-              <span
-                className="tab__btn tab__btn--close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCloseTab(port);
+          }}
+          onDragLeave={(e) => {
+            if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) setTabDropIndex(null);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setTabDropIndex(null);
+            onDragLeave();
+            const raw = e.dataTransfer.getData("text/x-port");
+            if (raw) {
+              try {
+                const { port, src } = JSON.parse(raw) as { port: string; src: string };
+                if (typeof port === "string" && typeof src === "string") onDropOnTabs(port, src, group.id, insertionIndex(e.clientX));
+              } catch {
+                /* ignore */
+              }
+            }
+          }}
+        >
+          {group.ports.map((port, index) => {
+            const isActive = port === group.activePort;
+            const editingThis = aliasEditTab?.port === port;
+            const portName = displayPortName(port); // 多级复合键也只显示串口名(设备归属由 source 标签表达)
+            const src = sourceLabelOf?.(port);
+            const disconnected = disconnectedOf?.(port) ?? false;
+            const status = portAttempts?.get(port)?.status;
+            return (
+              <div
+                key={port}
+                className="tab"
+                data-active={isActive}
+                data-disconnected={disconnected ? "true" : undefined}
+                data-connection={status}
+                data-editing={editingThis ? "true" : undefined}
+                data-drop-before={tabDropIndex === index ? "true" : undefined}
+                data-drop-after={tabDropIndex === group.ports.length && index === group.ports.length - 1 ? "true" : undefined}
+                draggable={!editingThis}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
+                  e.dataTransfer.setData("text/x-port", JSON.stringify({ port, src: group.id }));
+                  e.dataTransfer.setData("text/plain", port); // 部分 webview 需 text/plain 才进 drop
                 }}
-                title={`关闭 ${portName}`}
+                onDragEnd={() => { setTabDropIndex(null); onDragLeave(); }}
+                onClick={() => {
+                  if (!editingThis) onSwitchTab(port);
+                }}
+                onDoubleClick={() => { if (!status) onRenameTab(port); }}
+                onContextMenu={(e) => {
+                  if (editingThis) return;
+                  e.preventDefault();
+                  if (status) return;
+                  onSwitchTab(port);
+                  onTabContextMenu(port, { x: e.clientX, y: e.clientY });
+                }}
+                title={status === "opening" ? "正在连接…" : status === "failed" ? "连接失败" : disconnected ? "连接已断开" : `切换 ${portName}${src ? " · " + src : ""}（双击改名）`}
               >
-                <IconClose />
-              </span>
-              {disconnected && (
+                <span className="tab__dot" />
+                <span className="tab__name">
+                  {editingThis ? (
+                    <InlineAliasInput
+                      initial={aliasOf(port) ?? ""}
+                      placeholder={`为 ${portName} 设置别名`}
+                      onCommit={(alias) => onCommitAlias(port, alias)}
+                      onCancel={onCancelAlias}
+                    />
+                  ) : (
+                    <>
+                      <PortLabel name={portName} alias={aliasOf(port)} />
+                      {src && <span className="tab__src">{src}</span>}
+                    </>
+                  )}
+                </span>
                 <span
-                  className="tab__btn tab__btn--reconnect"
+                  className="tab__btn tab__btn--close"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onReconnectTab?.(port);
+                    onCloseTab(port);
                   }}
-                  title={`重连 ${portName}${bindings["port.reconnect"].combo ? ` (${formatCombo(bindings["port.reconnect"].combo)})` : ""}`}
+                  title={`关闭 ${portName}`}
                 >
-                  <IconPlug />
+                  <IconClose />
                 </span>
-              )}
-            </div>
-          );
-        })}
+                {disconnected && !status && (
+                  <span
+                    className="tab__btn tab__btn--reconnect"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onReconnectTab?.(port);
+                    }}
+                    title={`重连 ${portName}${bindings["port.reconnect"].combo ? ` (${formatCombo(bindings["port.reconnect"].combo)})` : ""}`}
+                  >
+                    <IconPlug />
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        </TabOverflow>
+        {fileTools}
       </div>
-      <div ref={termRef} className="group__term term-area">
-        {/* TermView 由 App 经 DOM reparent(appendChild)挪入此容器（不在本组件渲染），
-            跨 group 搬 tab 不重建、保 scrollback。拖拽用原生事件（见 useLayoutEffect）。 */}
-        {group.ports.length === 0 && (
-          <div className="term-empty">
-            <IconPlug className="term-empty__icon" />
-            <div>从左侧 PORTS 打开一个串口开始收发</div>
-            {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
-                现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。
-                动作被解绑(combo 空)时不渲染键帽,只留文字——不显示"—"残影 */}
-            <div className="term-empty__hint">
-              <span><HintKbd combo={bindings["port.palette"].combo} /> 串口面板</span>
-              <span><HintKbd combo={bindings["macro.palette"].combo} /> 宏</span>
-              <span><HintKbd combo={bindings["script.palette"].combo} /> 脚本</span>
+      <div className="group__body">
+        <div ref={termRef} className="group__term term-area">
+          {/* TermView 由 App 经 DOM reparent(appendChild)挪入此容器（不在本组件渲染），
+              跨 group 搬 tab 不重建、保 scrollback。拖拽用原生事件（见 useLayoutEffect）。 */}
+          {group.ports.length === 0 && (
+            <div className="term-empty">
+              <IconHub className="term-empty__icon" />
+              {/* 快捷键提示:用当前实际绑定(改键后跟随)。用 <kbd> 元素吃 .term-empty kbd
+                  现成样式——span.kbd 会撞上改键对话框 .kbd 基类的 min-width:96px 被撑爆。
+                  动作被解绑(combo 空)时不渲染键帽,只留文字——不显示"—"残影 */}
+              <div className="term-empty__hint">
+                <span className="term-empty__row"><span>打开连接</span><HintKbd combo={bindings["port.palette"].combo} /></span>
+                <span className="term-empty__row"><span>执行宏</span><HintKbd combo={bindings["macro.palette"].combo} /></span>
+                <span className="term-empty__row"><span>执行脚本</span><HintKbd combo={bindings["script.palette"].combo} /></span>
+              </div>
             </div>
-          </div>
-        )}
-        {focused && searchOpen && activeTerm?.search && (
-          <SearchBar searchAddon={activeTerm.search} term={activeTerm.term} onClose={onCloseSearch} />
-        )}
-        {/* 拖拽落点四半区高亮 */}
-        {dropHint?.overGroupId === group.id && <div className="group__dropzone" data-half={dropHint.overHalf} />}
+          )}
+          {connectionStatus && (
+            <div className="term-connection" data-state={connectionStatus}>
+              <div className="term-connection__card">
+                <div role={connectionStatus === "opening" ? "status" : "alert"}>
+                  <div className="term-connection__title">
+                    {connectionStatus === "opening" ? <span className="term-connection__spinner" aria-hidden="true" /> : <IconAlert />}
+                    {connectionTitle}
+                  </div>
+                  <p className="term-connection__target">
+                    <PortLabel name={displayPortName(group.activePort)} alias={aliasOf(group.activePort)} />
+                    {connectionSource && <> · {connectionSource}</>}
+                  </p>
+                  {attempt?.status === "failed" && <p className="term-connection__error">{attempt.message}</p>}
+                </div>
+                {connectionStatus !== "opening" && (
+                  <button className="btn" aria-keyshortcuts="Enter" onClick={() => onReconnectTab?.(group.activePort)}>重试连接</button>
+                )}
+              </div>
+            </div>
+          )}
+          {focused && searchOpen && activeTerm?.search && (
+            <SearchBar searchAddon={activeTerm.search} term={activeTerm.term} onClose={onCloseSearch} />
+          )}
+          {/* 拖拽落点四半区高亮 */}
+          {dropHint?.overGroupId === group.id && <div className="group__dropzone" data-half={dropHint.overHalf} />}
+        </div>
+        {filePanel}
       </div>
     </div>
   );

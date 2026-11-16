@@ -3,7 +3,7 @@
 //! GUI 模式由 ss-tauri 提供（它在 Tauri 窗口内启动同一套路由）。
 
 use clap::Parser;
-use ss_server::{create_router, create_state};
+use ss_server::{create_state, settings, supervisor::ServiceSupervisor};
 
 #[derive(Parser)]
 #[command(
@@ -32,34 +32,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let state = create_state();
-    // 远程设备连接池启动(惰性幂等;headless 不走 supervisor,这里显式拉起)
-    state.devices.start();
-
-    // 启动 Telnet 服务器（独立 TCP，与 axum 并行）
-    let telnet_addr = format!("{}:{}", args.host, args.telnet_port);
-    let telnet_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ss_server::telnet::run_telnet(telnet_addr, telnet_state).await {
-            tracing::error!("Telnet 服务器错误: {}", e);
-        }
-    });
-
-    let app = create_router(state);
-
-    let addr = format!("{}:{}", args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(
-        "Serial Studio server: ws://{}/ws · http://{}/api/ports",
-        addr,
-        addr
-    );
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    tracing::info!("已关闭");
+    let settings = settings::Settings {
+        ws_host: args.host,
+        ws_port: args.port,
+        telnet_port: args.telnet_port,
+        ..settings::load()
+    };
+    let supervisor = ServiceSupervisor::new(create_state());
+    supervisor
+        .start_headless(&settings)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    shutdown_signal().await;
+    supervisor.stop().await;
     Ok(())
 }
 

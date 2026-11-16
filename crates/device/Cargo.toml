@@ -15,5 +15,8 @@ uuid = { version = "1.24", features = ["v4"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.21"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh-sftp = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
 dirs = "6"
 hex = "0.4"

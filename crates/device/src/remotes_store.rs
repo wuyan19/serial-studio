@@ -95,6 +95,8 @@ mod tests {
 
     fn dev(id: &str, nick: Option<&str>) -> RemoteDevice {
         RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: id.into(),
             host: "127.0.0.1".into(),
             port: 18700,

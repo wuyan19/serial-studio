@@ -18,6 +18,7 @@ import type {
   SrvSettings,
   SshHost,
   SshOpenError,
+  SshTestState,
   TermInstance,
 } from "./types";
 import { leafGroupIds } from "./pane-tree";
@@ -44,6 +45,7 @@ import {
   sanitizeFileName,
   saveConfig,
   saveConn,
+  sshTabTarget,
   tauriInvoke,
   wireToPid,
 } from "./lib";
@@ -57,9 +59,14 @@ import {
   useNamedLibrary,
 } from "./library";
 import { LocalTransport, RemoteTransport, type OpenError, type Transport } from "./transport";
+import { usePortGroups } from "./use-port-groups";
+import { sharedLibrarySource } from "./shared-library";
+import type { DeviceShareAddress } from "./device-share";
+import { useShareClipboard } from "./use-share-clipboard";
+import { DeviceShareDialog } from "./components/device-share";
+import { AccessDialog } from "./components/access-dialog";
+import { accessOrigin, DEFAULT_ACCESS_PORT, fetchAccessStatus, logoutWebAccess, verifyWebAccess, type PublicAccessStatus } from "./access";
 import {
-  AboutDialog,
-  ActivityIcon,
   ConfirmDialog,
   ExportMacrosDialog,
   ExportScriptsDialog,
@@ -81,8 +88,7 @@ import {
   ScriptSkillDialog,
   SearchBar,
   SerialConfigDialog,
-  SettingsPanel,
-  ShortcutsDialog,
+  SettingsPage,
   SshAuthDialog,
   SshManagerDialog,
   SshEditDialog,
@@ -90,32 +96,27 @@ import {
   sshAuthLabel,
   TermView,
   validateMacro,
+  type SettingsCategoryId,
 } from "./components";
-import { MacroRow, NamedLibraryPanel, PortsPanel, ScriptRow, type PortGroupView } from "./components/sidebar";
+import {
+  PORT_LIST_VIEW_KEY, loadPortListView, MacroRow, NamedLibraryPanel, PortsPanel,
+  ScriptRow, type PortGroupView, type PortListView,
+} from "./components/sidebar";
+import { SshFileWorkspace } from "./components/ssh-file-workspace";
 import { TitleBar } from "./components/titlebar";
+import { ContextMenu, type ContextMenuItem } from "./components/context-menu";
+import { ConnectionLauncher, WorkspaceSettingsMenu, WorkspaceSidebar, type WorkspacePanel } from "./components/workspace";
 import {
   IconAlert,
-  IconBolt,
   IconClose,
-  IconCode,
-  IconGear,
-  IconGlobe,
   IconInfo,
-  IconKeyboard,
-  IconPlug,
   IconPower,
-  IconSliders,
   IconTrash,
-  IconShirt,
-  IconCheck,
-  IconSsh,
 } from "./icons";
-import { getTheme, setTheme, subscribe, toggleTheme, THEMES, type Theme } from "./theme";
+import { getTheme, subscribe, toggleTheme, type Theme } from "./theme";
 import { eventToCombo, findAction } from "./shortcuts";
 
 type Activity = { rx: number; tx: number };
-
-/* 主题图标/清单均从 theme.ts 注册表读取(THEMES),此处不再持有映射表。 */
 
 /** 把 SerialConfig 渲染成仪器读数字符串：115200 8N1 · LF */
 function formatConfig(c: SerialConfig): string {
@@ -192,7 +193,7 @@ const SCRIPT_SPEC: LibrarySpec<Script> = {
 
 /** Web/远程窗口：把单连接配置派生为单设备列表（id 固定 "remote"，无 localStorage 持久化）。 */
 function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
-  return [{ id: "remote", host: c.host, port: c.port }];
+  return [{ id: "remote", host: c.host, port: c.port, securePort: c.secure ? c.port : undefined }];
 }
 
 /**
@@ -200,6 +201,8 @@ function initRemoteFromConn(c: ConnConfig): RemoteDevice[] {
  * 数据面走 Transport（本地 IPC / 远程 WS），控制面走 Tauri invoke。
  * 仪器风布局：活动栏 + 可收起次侧栏 + 通道条 + 主终端区。
  */
+type SshIssue = { error: SshOpenError } & ({ pid: PortId } | { hostId: string });
+
 export default function App() {
   // 运行形态（唯一判定点 lib.ts::getMode）：本地桌面 / 远程窗口 / Web
   const mode = getMode();
@@ -208,7 +211,7 @@ export default function App() {
   // ===== 会话状态（reducer）：transport 事件回调会读写的领域状态统一于此。
   // 事件回调只 dispatch（永不 stale），不再需要 per-state 的 ref 镜像。见 store.ts。
   const [session, dispatch] = useReducer(sessionReducer, initialSession);
-  const { portsByDev, devOnline, openPorts, disconnectedPorts, portConfigs, groups, layout, focusedGroupId } = session;
+  const { portsByDev, devOnline, openPorts, portAttempts, disconnectedPorts, portConfigs, groups, layout, focusedGroupId } = session;
   // 唯一的快照镜像：bindTransport（空依赖、只绑一次）读最新会话状态用（重连重放的端口清单）。
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -236,6 +239,20 @@ export default function App() {
   const [pendingPort, setPendingPort] = useState<string | null>(null);
   const [serialConfig, setSerialConfig] = useState<SerialConfig>(loadConfig);
   const [connConfig, setConnConfig] = useState<ConnConfig>(initConn);
+  const [accessStatus, setAccessStatus] = useState<PublicAccessStatus | null>();
+  const [accessCheck, setAccessCheck] = useState(0);
+  const [accessError, setAccessError] = useState("");
+  const [remoteAccess, setRemoteAccess] = useState<RemoteDevice | null>(null);
+  const [webAccessOpen, setWebAccessOpen] = useState(false);
+  const secureWeb = !isTauri() && location.protocol === "https:";
+  const sameHttpService = location.protocol === "http:" && connConfig.host === location.hostname &&
+    connConfig.port === Number(location.port || 80);
+  const allowHttpVerification = !isTauri() && sameHttpService && accessStatus?.allow_http === true;
+  const canOpenHttps = accessStatus?.https_available !== false;
+  const showWebAccess = webAccessOpen && allowHttpVerification && !accessStatus?.authenticated;
+  const webAccessRequired = secureWeb && accessStatus?.enabled === true && !accessStatus.authenticated;
+  const webAccessWaiting = secureWeb && accessStatus === undefined;
+  const readOnlySsh = !isLocal && accessStatus?.enabled === true;
   // 已知远程设备列表：桌面端先空（mount effect 异步 invoke load_remotes 填充，见下）；
   // Web/远程窗口由 connConfig 派生单设备（不持久化）。
   const [remotes, setRemotes] = useState<RemoteDevice[]>(() =>
@@ -250,7 +267,10 @@ export default function App() {
     isLocal ? new Set() : new Set(["remote"]),
   );
   const [remoteOpen, setRemoteOpen] = useState(false);
-  const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
+  const [remotesReady, setRemotesReady] = useState(!isLocal);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [sharedDevice, setSharedDevice] = useState<DeviceShareAddress | null>(null);
+  const [remoteInput, setRemoteInput] = useState<{ host: string; port: number; nickname: string; securePort?: number; verifyHttp?: boolean }>({ host: "", port: 18700, nickname: "" });
   /** 设备详情弹窗：存 id 而非设备快照——App 侧按 id 实时查找注入，改名/状态变化即时刷新。 */
   /** 通用设备详情弹窗目标(remote/ssh 按 id 实时查本地注册表;meta = 级联补充卡,
    *  按 device.id 从端口行实时查元数据;local = 本机)。 */
@@ -264,12 +284,12 @@ export default function App() {
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
   /** 独立编辑弹窗的设备（右键「编辑设备」/认证失败弹窗直达，不经管理列表）；null = 关。 */
   const [sshEditDirect, setSshEditDirect] = useState<SshHost | null>(null);
-  /** 测试连接结果：testing=测试中，ok=可达，fail=失败（原因经 toast）。 */
-  const [sshTests, setSshTests] = useState<Map<string, "testing" | "ok" | "fail">>(new Map());
+  const [sshTests, setSshTests] = useState<Map<string, SshTestState>>(new Map());
   /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
-  const [sshIssue, setSshIssue] = useState<{ pid: PortId; error: SshOpenError } | null>(null);
+  const [sshIssue, setSshIssue] = useState<SshIssue | null>(null);
   const [srvSettings, setSrvSettings] = useState<SrvSettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 设置页当前分类（null=关闭）。原 settings/about/shortcuts 三个模态开关合一。 */
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategoryId | null>(null);
   /** 脚本运行卡片:runId → ScriptRunCard(贯穿 running→done,并发各自,就地切换)。logs 为 log() 实时累积。 */
   const [scriptRuns, setScriptRuns] = useState<Map<string, ScriptRunCard>>(new Map());
   /** 脚本上次运行参数(脚本名 → 键值):参数收集框预填,二次运行只改要动的参数。
@@ -318,8 +338,13 @@ export default function App() {
     });
   }, []);
   type ActivityView = "ports" | "macros" | "scripts" | null;
-  // 默认展开端口面板:空终端区的引导文案("从左侧 PORTS 打开一个串口")依赖它在场
+  // A null activity keeps the icon rail visible while the remembered panel stays mounted.
   const [activity, setActivity] = useState<ActivityView>("ports");
+  const lastActivity = useRef<WorkspacePanel>("ports");
+  if (activity) lastActivity.current = activity;
+  const sidebarPanel = activity ?? lastActivity.current;
+  const [sidebarQuery, setSidebarQuery] = useState("");
+  const [connectionLauncherOpen, setConnectionLauncherOpen] = useState(false);
   /** 打开对应面板即视为"已查看" → 清未读红角标。 */
   useEffect(() => {
     if (activity === "macros") setMacroUnseen(new Set());
@@ -328,9 +353,25 @@ export default function App() {
   /** 侧栏宽度(可拖动调整,localStorage 持久化,clamp 180–480)。 */
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem("sidebar-width"));
-    return saved >= 180 && saved <= 480 ? saved : 240;
+    return saved >= 180 && saved <= 480 ? saved : 280;
   });
-  const sidebarDrag = useRef<{ x: number; w: number } | null>(null);
+  /** 连接列表视图(default/groups)。原属 PortsPanel 内部态,上提以驱动面板 ··· 菜单切换。 */
+  const [listView, setListView] = useState<PortListView>(loadPortListView);
+  useEffect(() => {
+    try { localStorage.setItem(PORT_LIST_VIEW_KEY, listView); }
+    catch { /* 持久化失败不影响切换 */ }
+  }, [listView]);
+  /** 分隔条(Splitter)行为参数(VS Code 手势模型,手感不对调这里):
+   *  MIN_W/MAX_W 是「面板」宽度上下限(侧栏总宽 = 面板 + 图标栏 RAIL_W);
+   *  COLLAPSE_X:展开态鼠标(相对卡片左缘)左推越过此线收起;
+   *  EXPAND_DX:收起后自「武装点」(收起瞬间/按下时的鼠标位)右拖该距离才展开。
+   *  展开阈值=武装点+80 ∈ (136,200) 恒大于 COLLAPSE_X → 两阈值无重叠区间,
+   *  慢速拖动不会折叠↔展开来回震荡。 */
+  const SPLITTER_RAIL_W = 56;
+  const SPLITTER_MIN_W = 200;
+  const SPLITTER_MAX_W = 480;
+  const SPLITTER_COLLAPSE_X = 120;
+  const SPLITTER_EXPAND_DX = 80;
   /** 串口分组折叠（本地卡 / 远程设备卡），key=devId，localStorage 持久化。 */
   const [portCollapsed, setPortCollapsed] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("port-groups-collapsed") ?? "[]") as string[]));
   const togglePortGroup = (devId: string) =>
@@ -340,10 +381,6 @@ export default function App() {
       localStorage.setItem("port-groups-collapsed", JSON.stringify([...next]));
       return next;
     });
-  const [manageMenu, setManageMenu] = useState(false);
-  /** 主题选择菜单(按注册表顺序平铺列出全部主题)。 */
-  const [themeMenu, setThemeMenu] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false);
   /** 脚本指南对话框;skillText 首次打开时拉取并缓存(null=未拉/拉取中),skillFailed 标记失败可重试。 */
   const [skillOpen, setSkillOpen] = useState(false);
   const [skillText, setSkillText] = useState<string | null>(null);
@@ -364,7 +401,6 @@ export default function App() {
   /** 待收集参数的脚本名(非 null=弹参数收集框);null=关闭。 */
   const [pendingRun, setPendingRun] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
   const [scriptPaletteOpen, setScriptPaletteOpen] = useState(false);
   const [portPaletteOpen, setPortPaletteOpen] = useState(false);
@@ -405,8 +441,11 @@ export default function App() {
   }, []);
   // 事件回调里读当前活动面板(避免闭包过期;activityRef 已被 LED 活动时间戳占用,故名 activityViewRef)
   const activityViewRef = useRef<ActivityView>(null);
+  // 最后展开的面板:分隔条拖窄自动折叠后,右拖再展开时还原到它(初始/兜底「连接」)
+  const lastExpandedRef = useRef<NonNullable<ActivityView>>("ports");
   useEffect(() => {
     activityViewRef.current = activity;
+    if (activity) lastExpandedRef.current = activity;
   }, [activity]);
   // 库内确认(删除/解散)onConfirm 完成后自动关弹窗——对齐重构前各 handler 末尾的 setConfirmState(null)
   const libConfirm = useCallback((s: {
@@ -429,8 +468,29 @@ export default function App() {
     () => ({ confirm: libConfirm, notify: libNotify, error: libError }),
     [libConfirm, libNotify, libError]
   );
-  const macroLib = useNamedLibrary(MACRO_SPEC, libUI);
-  const scriptLib = useNamedLibrary(SCRIPT_SPEC, libUI);
+  // The command transport stays stable while library adapters follow the selected service.
+  const transportsRef = useRef<Map<string, Transport>>(new Map());
+  /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
+   *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
+   *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
+   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。
+   *  remotes 经 ref 读取(web 改连换 key)——**绝不能进依赖**:本回调是
+   *  cmdTransport→openPort→bindTransport 身份链的头,一旦随 remotes 变化,本地
+   *  transport effect 会拆掉重建(注释自称"常驻"却守不住),重建窗口内后端
+   *  devices-changed 等事件无人监听→首添设备卡死"连接中…";已开端口的 RX
+   *  Channel 也随旧实例作废(串口变哑)。 */
+  const cmdTransport = useCallback(
+    (): Transport | undefined =>
+      transportsRef.current.get(isLocal ? "local" : (remotesRef.current[0]?.id ?? "")),
+    // isLocal 是模块常量(getMode 逐 render 同值);remotesRef 每 render 刷新
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  const libraryScope = isLocal ? "local" : `${remotes[0]?.host}:${remotes[0]?.port}`;
+  const macroSource = useMemo(() => sharedLibrarySource<Macro>("macros", libraryScope, cmdTransport), [libraryScope, cmdTransport]);
+  const scriptSource = useMemo(() => sharedLibrarySource<Script>("scripts", libraryScope, cmdTransport), [libraryScope, cmdTransport]);
+  const macroLib = useNamedLibrary(MACRO_SPEC, libUI, macroSource);
+  const scriptLib = useNamedLibrary(SCRIPT_SPEC, libUI, scriptSource);
   // 解构成 JSX 原名，侧栏/编辑器零改动
   const {
     items: macros,
@@ -449,6 +509,7 @@ export default function App() {
     collapsed: macroCollapsed,
     toggleGroup: toggleMacroGroup,
     groupNames: macroGroupNames,
+    reload: reloadMacros,
   } = macroLib;
   const {
     items: scripts,
@@ -474,6 +535,12 @@ export default function App() {
    *  两处会各挂一个 InlineAliasInput 互抢焦点、随即互触 blur 全部关闭（表现为进不去编辑态）。
    *  where 把编辑态钉在触发处，杜绝两个 input 并存。 */
   const [aliasEdit, setAliasEdit] = useState<{ port: string; where: "list" | "tab" } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ port: PortId; groupId: string; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (tabMenu && !openPorts.includes(tabMenu.port)) setTabMenu(null);
+  }, [tabMenu, openPorts]);
+  const sshCreatingRef = useRef(false);
+  const [sshCreating, setSshCreating] = useState(false);
   /** 宏批量导出对话框是否打开。 */
   const [exportMacrosOpen, setExportMacrosOpen] = useState(false);
   const [exportScriptsOpen, setExportScriptsOpen] = useState(false);
@@ -482,8 +549,6 @@ export default function App() {
   const [serviceError, setServiceError] = useState("");
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
 
-  // 多 Transport 实例：key=devId。本地 "local" 常驻，远程按引用计数懒建/销（见 transport effect）。
-  const transportsRef = useRef<Map<string, Transport>>(new Map());
   /** 每设备 Transport 的回调取消函数（dispose 时清理）。 */
   const unsubsByDev = useRef<Map<string, (() => void)[]>>(new Map());
   /** 每远程设备上次连接地址（host:port）；变化时强制销毁重建（Web 改连接 / 编辑设备 host）。 */
@@ -525,25 +590,8 @@ export default function App() {
     activityRef.current.set(port, e);
   };
 
-  // 脚本入口显隐：本地主权恒显；远程/Web 取决于服务端 enable_scripting
-  const showScripts = isLocal || scriptEnabled;
-
-  /** 命令面 transport:**按形态**而非 pid 的 devId 选择——桌面恒 local(远程设备的
-   *  口由本地 manager 复合键路由到后端 DeviceClient,pid 直达);web/远窗恒唯一
-   *  RemoteTransport(所有口都是所连远端的)。此前按 devId 选,远程设备/镜像口的
-   *  devId 在 transportsRef 里查不到对应 transport,open/write 静默失败。
-   *  remotes 经 ref 读取(web 改连换 key)——**绝不能进依赖**:本回调是
-   *  cmdTransport→openPort→bindTransport 身份链的头,一旦随 remotes 变化,本地
-   *  transport effect 会拆掉重建(注释自称"常驻"却守不住),重建窗口内后端
-   *  devices-changed 等事件无人监听→首添设备卡死"连接中…";已开端口的 RX
-   *  Channel 也随旧实例作废(串口变哑)。 */
-  const cmdTransport = useCallback(
-    (): Transport | undefined =>
-      transportsRef.current.get(isLocal ? "local" : (remotesRef.current[0]?.id ?? "")),
-    // isLocal 是模块常量(getMode 逐 render 同值);remotesRef 每 render 刷新
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+  // Library visibility is independent from permission to execute remote scripts.
+  const showScripts = true;
 
   /** pid → 列表行（经 sessionRef 直读最新态）：稳定回调（openPort 等）与 render
    *  作用域共用同一访问器——ingest 定型的 pid 与结构化元数据（kind/device）的
@@ -568,14 +616,36 @@ export default function App() {
   const sshHostOfPid = (pid: PortId): SshHost | undefined =>
     sshHosts.find((h) => h.id === (portRowOf(pid)?.device?.id ?? parsePortId(pid).devId));
 
-  /** 真正发起占有：建终端标签、记实际配置；附加时提示沿用既有配置。返回 acquire 结果（供调用方按 opened 决策）。
-   *  稳定回调（dispatch/setter 永不 stale）：bindTransport 重连重放与 UI 触发共用同一入口。 */
-  const openPort = useCallback(async (pid: PortId, config: SerialConfig) => {
+  const openingPortsRef = useRef(new Map<PortId, {
+    transport: Transport; config: SerialConfig; alias?: string; dismissed: boolean; releasing: boolean;
+  }>());
+  const openPort = useCallback(async (pid: PortId, config: SerialConfig, groupId?: string, alias?: string) => {
+    const transport = cmdTransport();
+    const previous = openingPortsRef.current.get(pid);
+    if (previous && previous.transport === transport) {
+      if (previous.dismissed && !previous.releasing) {
+        previous.dismissed = false;
+        dispatch({ type: "port_open_started", pid, config: previous.config, alias: previous.alias, groupId });
+      }
+      return;
+    }
+    dispatch({ type: "port_open_started", pid, config, alias, groupId });
+    if (!transport) {
+      dispatch({ type: "port_open_failed", pid, message: "服务尚未连接，请连接后重试。" });
+      return;
+    }
+    const request = { transport, config, alias, dismissed: false, releasing: false };
+    const hadPort = sessionRef.current.openPorts.includes(pid);
+    openingPortsRef.current.set(pid, request);
+    let acquired = false;
     try {
-      // transport 命令面收完整 pid:本地 IPC 直传(Rust 规范化),WS 侧剥首段成远端线名
-      const res = await cmdTransport()?.open(pid, config);
-      if (!res) return undefined;
-      // 成功占有（首开或附加）：记录端口实际配置 + 建 tab 进焦点 group + 清断开标记，全部由 reducer 承担
+      const res = await transport.open(pid, config);
+      acquired = true;
+      if (request.dismissed || openingPortsRef.current.get(pid) !== request) return;
+      if (cmdTransport() !== transport) {
+        dispatch({ type: "port_open_failed", pid, message: "服务连接已变更，请重试。" });
+        return;
+      }
       dispatch({ type: "port_acquired", pid, config: res.config });
       if (!res.opened) {
         // 附加到已开端口：请求的 config 被忽略，告知实际配置。SSH 等非串口无
@@ -588,17 +658,32 @@ export default function App() {
           8000
         );
       }
-      return res;
+      if (alias !== undefined && res.opened) {
+        void transport.setAlias(pid, alias).then(() => transport.list()).catch((e) => {
+          libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
+        });
+      } else if (alias !== undefined) {
+        libNotify("端口已被其它会话打开，本次别名未生效。");
+      }
     } catch (e) {
-      // SSH 分类错误(auth/host key)→ 交互闭环弹窗;其余原样 toast。
-      // setSshIssue 是稳定 setter,不破坏 openPort 身份链(勿引入状态依赖)。
-      const ssh = (e as OpenError).ssh;
+      if (request.dismissed || openingPortsRef.current.get(pid) !== request) return;
+      if (cmdTransport() !== transport) {
+        dispatch({ type: "port_open_failed", pid, message: "服务连接已变更，请重试。" });
+        return;
+      }
+      const ssh = (e as OpenError)?.ssh;
+      const detail = e instanceof Error ? e.message : String(e);
+      const message = ssh?.kind === "other" ? ssh.message : detail.replace(/^串口 .+? 打开失败: /, "");
+      dispatch({ type: "port_open_failed", pid, message });
       if (ssh && ssh.kind !== "other") {
         setSshIssue({ pid, error: ssh });
-      } else {
-        libError(String(e instanceof Error ? e.message : e));
       }
-      return undefined;
+    } finally {
+      if (request.dismissed && (acquired || hadPort) && cmdTransport() === transport) {
+        request.releasing = true;
+        await transport.close(pid).catch(() => {});
+      }
+      if (openingPortsRef.current.get(pid) === request) openingPortsRef.current.delete(pid);
     }
   }, [libNotify, libError, cmdTransport, portRowOf]);
 
@@ -647,6 +732,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 /** 从分栏与端口清单移除端口（关端口共用：用户主动关 + 远端被关）。状态变更全在 reducer；
  *  此处仅清终端实例/活动时间戳等会话级资源（副作用不进 reducer）。 */
   const prunePort = useCallback((pid: PortId) => {
+    const request = openingPortsRef.current.get(pid);
+    if (request) request.dismissed = true;
+    setSshIssue((issue) => issue && "pid" in issue && issue.pid === pid ? null : issue);
     terminalsRef.current.delete(pid);
     activityRef.current.delete(pid);
     // 记录会话收尾:等在途批落盘后,尾批积压 + flush + 摘句柄原子完成
@@ -738,6 +826,29 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     [setCaptureSession, takeCaptureQueue],
   );
 
+  const stopTabCapture = (pid: PortId) => {
+    const current = captureSessionsRef.current.get(pid);
+    const tail = takeCaptureQueue(pid);
+    const next = new Map(captureSessionsRef.current);
+    next.delete(pid);
+    captureSessionsRef.current = next;
+    setCaptureSession(pid, undefined);
+    captureQueuesRef.current.delete(pid);
+    if (current?.id !== undefined) {
+      finishCapture(pid, { id: current.id }, tail, (e) => libError(`记录保存失败：${String(e)}`));
+    }
+  };
+
+  const toggleTabCapture = (pid: PortId) => {
+    if (!isLocal || !sessionRef.current.openPorts.includes(pid)) return;
+    if (captureSessionsRef.current.get(pid)?.id !== undefined) {
+      stopTabCapture(pid);
+    } else {
+      setRecBarByPort((previous) => new Map(previous).set(pid, true));
+      void selectCaptureFile(pid);
+    }
+  };
+
   // 攒批刷盘:onData 热路径只入队(零 await),此处 500ms 定时合并追加。同口单飞
   // (上批在途则留到下 tick,防同 id 并发写乱序);写失败 → 停会话 + toast。
   useEffect(() => {
@@ -821,7 +932,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const replayDisconnected = (upDev: string) => {
       const st = sessionRef.current;
       for (const pid of st.disconnectedPorts) {
-        if (parsePortId(pid).devId !== upDev) continue;
+        if (parsePortId(pid).devId !== upDev || !st.openPorts.includes(pid)) continue;
         void openPort(pid, st.portConfigs[pid] ?? DEFAULT_CONFIG);
       }
     };
@@ -905,7 +1016,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }),
       t.onPortClosed((port) => {
         // 端口全局关闭（末位释放/被强制关闭）：清掉本会话的标签、终端与分栏归属
-        prunePort(wireToPid(devId, port));
+        const pid = wireToPid(devId, port);
+        if (sessionRef.current.openPorts.includes(pid) && !openingPortsRef.current.has(pid)) prunePort(pid);
         t.list();
       }),
       t.onPortDisconnected((port) => {
@@ -920,8 +1032,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         t.list();
       }),
       t.onScriptsChanged(() => {
-        // 脚本库变更(MCP/Tauri 写入)→ 重新 load_scripts,不必重启
-        reloadScripts();
+        // Macro and script changes share the server library invalidation channel.
+        void reloadMacros();
+        void reloadScripts();
       }),
       t.onError((msg) => {
         libError(msg);
@@ -965,7 +1078,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         });
       }),
     ];
-  }, [openPort, prunePort, reloadScripts, libError, pushToast]);
+  }, [openPort, prunePort, reloadMacros, reloadScripts, libError, pushToast]);
 
   // 本地 Transport 常驻（devId="local"）：IPC 不随 connConfig 重连——重建会丢 per-port RX Channel，
   // 导致改服务监听设置后串口"变哑"（发得出收不到，重开才好）。重建窗口还会丢
@@ -1021,6 +1134,38 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected]);
 
+  useEffect(() => {
+    if (isLocal) return;
+    let origin: string;
+    try { origin = secureWeb ? location.origin : accessOrigin(connConfig.host, connConfig.port, false); }
+    catch { return; }
+    if (!secureWeb && origin !== location.origin) {
+      setAccessStatus(null);
+      setWebAccessOpen(false);
+      return;
+    }
+    const controller = new AbortController();
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const status = await fetchAccessStatus(origin, controller.signal);
+        if (!controller.signal.aborted) {
+          setAccessStatus(status);
+          setAccessError("");
+        }
+      } catch {
+        if (secureWeb && !controller.signal.aborted) setAccessError("无法确认远程访问状态，请重试");
+      } finally { checking = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5_000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [isLocal, secureWeb, connConfig.host, connConfig.port, accessCheck]);
+
+  // Rebuild the WebSocket when an HTTP session gains or loses its authorization cookie.
+  const httpAuthenticated = allowHttpVerification && accessStatus?.authenticated === true;
   // 远程 Transport 引用计数（按需）——仅 Web/远程窗口形态:前端直连远端 ss。
   // 桌面形态远程设备已下沉到后端(DeviceClientManager),本地只有 "local" 一个 transport,
   // 设备连接/重连/断开全由 Rust 侧管理,前端经 devices 事件观察状态。
@@ -1028,7 +1173,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     if (isLocal) return;
     // Web/远窗是单 transport 形态:所有口(含远端设备桶)都走它,恒保持连接——
     // 活跃 tab 计数按 pid 首段统计,远端设备的口不会计入本设备 id,不能作拆连依据。
-    const wanted = new Set(remotes.map((d) => d.id));
+    const wanted = new Set(webAccessRequired || webAccessWaiting ? [] : remotes.map((d) => d.id));
     const map = transportsRef.current;
     const addrMap = remoteAddrRef.current;
     const teardown = (id: string) => {
@@ -1037,17 +1182,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       map.get(id)?.dispose();
       map.delete(id);
       addrMap.delete(id);
+      dispatch({ type: "dev_online", devId: id, online: false });
       dispatch({ type: "teardown_dev", devId: id });
     };
     const create = (d: RemoteDevice) => {
-      const t = new RemoteTransport(d.host, d.port, d.id);
+      const t = new RemoteTransport(d.host, d.securePort ?? d.port, d.id, d.securePort !== undefined);
       map.set(d.id, t);
-      addrMap.set(d.id, `${d.host}:${d.port}`);
+      addrMap.set(d.id, `${d.host}:${d.port}:${d.securePort ?? ""}:${httpAuthenticated}`);
       unsubsByDev.current.set(d.id, bindTransport(d.id, t));
     };
     for (const d of remotes) {
       const existing = map.get(d.id);
-      const addrChanged = addrMap.get(d.id) !== `${d.host}:${d.port}`;
+      const addrChanged = addrMap.get(d.id) !== `${d.host}:${d.port}:${d.securePort ?? ""}:${httpAuthenticated}`;
       if (wanted.has(d.id)) {
         if (!existing) create(d);
         else if (addrChanged) {
@@ -1059,17 +1205,27 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remotes, bindTransport]);
+  }, [remotes, bindTransport, webAccessRequired, webAccessWaiting, httpAuthenticated]);
 
   // Web/远程窗口：connConfig 变 → 同步单设备 remotes[0] 的 host/port（驱动上面的引用计数 effect 重连）。
   useEffect(() => {
     if (isLocal) return;
     setRemotes((prev) => {
       const r = prev[0];
-      if (r && r.host === connConfig.host && r.port === connConfig.port) return prev;
-      return [{ id: r?.id ?? "remote", host: connConfig.host, port: connConfig.port }];
+      const securePort = connConfig.secure ? connConfig.port : undefined;
+      if (r && r.host === connConfig.host && r.port === connConfig.port && r.securePort === securePort) return prev;
+      return [{ id: r?.id ?? "remote", host: connConfig.host, port: connConfig.port, securePort }];
     });
-  }, [isLocal, connConfig.host, connConfig.port]);
+  }, [isLocal, connConfig.host, connConfig.port, connConfig.secure]);
+
+  useEffect(() => {
+    if (!isLocal && !connected) return;
+    void reloadMacros();
+    void reloadScripts();
+  }, [isLocal, connected, libraryScope, reloadMacros, reloadScripts]);
+
+  const sharedGroups = usePortGroups(cmdTransport, isLocal || connected,
+    isLocal ? "local" : `${remotes[0]?.host}:${remotes[0]?.port}`);
 
   // 改连反馈：设置页「应用并重连」后以 toast 报告结果(成功/超时失败),不再点了没反应。
   const [pendingConn, setPendingConn] = useState<string | null>(null);
@@ -1123,22 +1279,24 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       .then((loaded) => {
         setRemotes(loaded);
         setExpandedRemotes(new Set(loaded.map((r) => r.id)));
+        setRemotesReady(true);
       })
       .catch((e) => console.error("加载远程设备失败", e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 版本号：经 transport 统一取——本地取 Tauri app 版本，远程/Web 取服务端版本。
-  // 远程窗口虽 isTauri() 为真，但连的是远程服务，版本应反映服务端而非本机 app。
-  // 连接时序由 RemoteTransport.send() 内部 await open 兜底，挂载即取也不会踩 CONNECTING 异常。
   useEffect(() => {
-    const t = transportsRef.current.get(isLocal ? "local" : remotes[0]?.id ?? "");
-    t?.getVersion().then(({ version, enableScripting }) => {
+    let stale = false;
+    setScriptEnabled(false);
+    if (!isLocal && !connected) return;
+    const t = cmdTransport();
+    void t?.getVersion().then(({ version, enableScripting }) => {
+      if (stale) return;
       setVersion(version);
       setScriptEnabled(enableScripting);
     }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => { stale = true; };
+  }, [isLocal, connected, libraryScope, cmdTransport]);
 
   // 侧栏宽度持久化(随用户走,localStorage)
   useEffect(() => {
@@ -1197,7 +1355,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   }, [activePort]);
 
   /** 打开对话框确认：先 open，仅首开（opened=true）才落别名——与串口参数同逻辑（附加时别名忽略）。 */
-  const confirmOpen = async (config: SerialConfig, alias: string) => {
+  const confirmOpen = (config: SerialConfig, alias: string) => {
     const pid = pendingPort;
     if (!pid) return;
     saveConfig(config);
@@ -1207,27 +1365,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     // 把空串归一为清除)。此前"留空直接 return"把清空误当不设置,旧别名残留。
     const initial = (aliasOf(pid) ?? "").trim();
     const trimmed = alias.trim();
-    const res = await openPort(pid, config);
-    if (res?.opened) {
-      if (trimmed !== initial) {
-        try {
-          await cmdTransport()?.setAlias(pid, trimmed);
-          refreshPorts();
-        } catch (e) {
-          libError(`设置别名失败：${String(e)}，请重试或检查配置目录写入权限`);
-        }
-      }
-    } else if (res && !res.opened) {
-      // 附加：别名未生效（端口已被其它会话先开）
-      libNotify("端口已被其它会话打开，本次别名未生效。");
-    }
+    void openPort(pid, config, undefined, trimmed !== initial ? trimmed : undefined);
   };
 
   /** 关端口：释放占有权 + 移除 tab（prune_port 全量状态变更在 reducer，prunePort 补清终端资源）。 */
   const closePort = (pid: PortId) => {
     // 关闭正在编辑别名的端口时退出编辑态：组件直接卸载会跳过 blur，否则 state 残留到端口列表
     if (aliasEdit?.port === pid) setAliasEdit(null);
-    cmdTransport()?.close(pid);
+    if (!openingPortsRef.current.has(pid) && openPorts.includes(pid)) void cmdTransport()?.close(pid);
     prunePort(pid);
   };
 
@@ -1292,10 +1437,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   const onDragOverHalf = (groupId: string, half: PaneHalf) => setDropHint({ overGroupId: groupId, overHalf: half });
   const onPaneDragLeave = () => setDropHint(null);
 
-  /** 拖 tab 到另一 group 的标签栏：迁移 port 归属（源移除、目标追加 + 设其 activePort）。
-   *  源 group 空 → 坍缩。TermView 经 portal 不 remount → scrollback 保留。逻辑全在 reducer。 */
-  const movePort = (port: string, srcGroupId: string, dstGroupId: string) =>
-    dispatch({ type: "move_port", port, srcGroupId, dstGroupId });
+  /** Reorder within a pane or insert across panes without remounting terminal instances. */
+  const movePort = (port: string, srcGroupId: string, dstGroupId: string, index?: number) =>
+    dispatch({ type: "move_port", port, srcGroupId, dstGroupId, index });
 
   /** 递归渲染分栏布局树：split→flex 容器(row/col + 比例 + 拖动手柄)，leaf→GroupView(标签栏+终端区)。
    *  path = 从根到此节点的子索引序列,供 set_split_ratio 定位(根 split 为 [])。 */
@@ -1319,82 +1463,110 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const g = groups[node.groupId];
     if (!g) return null;
     const isFocused = node.groupId === focusedGroupId;
+    const fileTarget = openPorts.includes(g.activePort) && !portAttempts.has(g.activePort)
+      ? sshTabTarget(portRowOf(g.activePort), Boolean(sshHostOfPid(g.activePort)))
+      : undefined;
     return (
-      <GroupView
-        key={g.id}
-        group={g}
-        focused={isFocused}
-        aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
-        aliasOf={aliasOf}
-        sourceLabelOf={(pid) => {
-          // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
-          // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
-          const d = portRowOf(pid)?.device;
-          if (d) {
-            if (d.via !== "local") return d.label;
-            if (isLocal || remotes.length === 0) return undefined;
-            const s = remotes[0];
-            return s.nickname?.trim() || `${s.host}:${s.port}`;
-          }
-          if (remotes.length === 0) return undefined;
-          const { devId } = parsePortId(pid);
-          if (devId === "local") return undefined;
-          const r = remotes.find((x) => x.id === devId);
-          return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
-        }}
-        disconnectedOf={(pid) => disconnectedPorts.has(pid)}
-        onReconnectTab={reconnectPort}
-        onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
-        onCloseTab={closePort}
-        onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
-        onCommitAlias={commitAlias}
-        onCancelAlias={() => setAliasEdit(null)}
-        onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
-        onWrite={(p, data) => {
-          touch(p, "tx");
-          cmdTransport()?.write(p, data);
-        }}
-        onReady={(p, inst) => {
-          if (inst) terminalsRef.current.set(p, inst);
-          else terminalsRef.current.delete(p);
-        }}
-        searchOpen={searchOpen}
-        activeTerm={isFocused ? activeTerm : undefined}
-        onCloseSearch={() => {
-          setSearchOpen(false);
-          activeTerm?.term.focus();
-        }}
-        onDragOverHalf={onDragOverHalf}
-        onDragLeave={onPaneDragLeave}
-        onDropHalf={dropHalf}
-        dropHint={dropHint}
-        onDropOnTabs={movePort}
-        termContainerRef={(el) => setGroupContainer(node.groupId, el)}
-      />
+      <SshFileWorkspace key={g.id} transport={cmdTransport()} hostId={fileTarget?.hostId}
+        label={sshHostOfPid(g.activePort)?.nickname || fileTarget?.hostId || "SSH"}>
+        {(fileTools, filePanel) => (
+          <GroupView
+            key={g.id}
+            group={g}
+            focused={isFocused}
+            aliasEditTab={aliasEdit?.where === "tab" ? { port: aliasEdit.port } : null}
+            aliasOf={aliasOf}
+            sourceLabelOf={(pid) => {
+              // 结构化 device 优先:非本机属主显 label;via=local 在 web 形态的实际提供方
+              // 是所连 server(remotes[0] 派生条目),桌面本机口不标。老 server 回退首段查表。
+              const d = portRowOf(pid)?.device;
+              if (d) {
+                if (d.via !== "local") return d.label;
+                if (isLocal || remotes.length === 0) return undefined;
+                const s = remotes[0];
+                return s.nickname?.trim() || `${s.host}:${s.port}`;
+              }
+              if (remotes.length === 0) return undefined;
+              const { devId } = parsePortId(pid);
+              if (devId === "local") return undefined;
+              const r = remotes.find((x) => x.id === devId);
+              return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
+            }}
+            disconnectedOf={(pid) => disconnectedPorts.has(pid)}
+            portAttempts={portAttempts}
+            onReconnectTab={reconnectPort}
+            onSwitchTab={(port) => switchTabInGroup(node.groupId, port)}
+            onCloseTab={closePort}
+            onRenameTab={(port) => setAliasEdit({ port, where: "tab" })}
+            onTabContextMenu={(port, position) => setTabMenu({ port, groupId: g.id, ...position })}
+            onCommitAlias={commitAlias}
+            onCancelAlias={() => setAliasEdit(null)}
+            onFocusGroup={() => dispatch({ type: "set_focused_group", groupId: node.groupId })}
+            onWrite={(p, data) => {
+              touch(p, "tx");
+              cmdTransport()?.write(p, data);
+            }}
+            onReady={(p, inst) => {
+              if (inst) terminalsRef.current.set(p, inst);
+              else terminalsRef.current.delete(p);
+            }}
+            searchOpen={searchOpen}
+            activeTerm={isFocused ? activeTerm : undefined}
+            onCloseSearch={() => {
+              setSearchOpen(false);
+              activeTerm?.term.focus();
+            }}
+            onDragOverHalf={onDragOverHalf}
+            onDragLeave={onPaneDragLeave}
+            onDropHalf={dropHalf}
+            dropHint={dropHint}
+            onDropOnTabs={movePort}
+            termContainerRef={(el) => setGroupContainer(node.groupId, el)}
+            fileTools={fileTools}
+            filePanel={filePanel}
+          />
+        )}
+      </SshFileWorkspace>
     );
   };
 
   /** 重连断开的 tab:复用 openPort(自带 dedup + onData 路由接回同一 term)。成功即 port_acquired,
    *  断开标记由 reducer 一并清除(失败保持断开态待手动重试)。 */
-  const reconnectPort = (pid: PortId) =>
-    openPort(pid, portConfigs[pid] ?? DEFAULT_CONFIG);
+  const reconnectPort = (pid: PortId) => {
+    const row = portRowOf(pid);
+    if (row?.locked) {
+      void openPortAccess(row);
+      return;
+    }
+    const attempt = portAttempts.get(pid);
+    return openPort(pid, attempt?.config ?? portConfigs[pid] ?? DEFAULT_CONFIG, undefined, attempt?.alias);
+  };
 
   /** 触发某端口：已开则切过去；被他会话占着则附加；否则弹配置框。与点端口行同一流程，
    *  串口选择面板(Ctrl+I)的回车也走这里，避免两处复制三分支逻辑。
    *  串口/非串口的分野读线上 kind(isNonSerialPid)——与设备表无关,三种形态统一,
    *  不再有"pid 首段 ∈ sshHosts"的形态敏感猜测。 */
   const triggerPort = (pid: PortId) => {
+    const info = portInfoOf(pid);
+    if (info?.locked) {
+      void openPortAccess(info);
+      return;
+    }
+    const existingGroup = groupOfPort.get(pid);
+    if (portAttempts.has(pid) && existingGroup) {
+      switchTabInGroup(existingGroup, pid);
+      return;
+    }
     if (disconnectedPorts.has(pid)) {
       void reconnectPort(pid); // 断开 tab:重连(区别于"已开仅切 tab"的第一分支)
       return;
     }
     if (openPorts.includes(pid)) {
       // 已开：聚焦到端口所属 group 并切其 tab（端口可能不在当前聚焦 group，纯 switchPort 会 no-op）
-      const gid = groupOfPort.get(pid);
-      if (gid) switchTabInGroup(gid, pid);
+      if (existingGroup) switchTabInGroup(existingGroup, pid);
       else switchPort(pid);
+      if (pid === activePort) focusTab(pid);
     } else {
-      const info = portInfoOf(pid);
       if (info?.opened) void openPort(pid, serialConfig); // 被他会话占着：附加
       else if (isNonSerialPid(pid)) void openPort(pid, DEFAULT_CONFIG); // SSH 等非串口：直连(无配置框)
       else setPendingPort(pid); // 串口未开：弹配置框
@@ -1402,7 +1574,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
 
   const runMacro = (name: string) => {
-    if (!activePort) {
+    if (!activePort || portAttempts.has(activePort)) {
       libError("请先选择并打开一个串口");
       return;
     }
@@ -1413,10 +1585,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
 
   const doRun = (name: string, args: Record<string, string>) => {
+    if (!isLocal && !scriptEnabled) {
+      libError("该服务未开启远程脚本执行；可查看和编辑脚本，请在服务端设置中开启后运行");
+      return;
+    }
     // 有 tab 用其端口作主端口;无 tab → 主端口空(纯 sleep/log 脚本照跑便于调试流程;
     // 有缺省 send 的脚本则 send 抛"未指定端口")。脚本天生跨多端口,不绑 tab(区别于宏)。
-    const mainPort = activePort ?? "";
-    const devId = activePort ? parsePortId(activePort).devId : isLocal ? "local" : (remotes[0]?.id ?? "");
+    const mainPort = portAttempts.has(activePort) ? "" : activePort;
+    const devId = mainPort ? parsePortId(mainPort).devId : isLocal ? "local" : (remotes[0]?.id ?? "");
     const transport = cmdTransport();
     if (!transport) {
       libError(isLocal ? "本地服务未就绪，无法运行脚本；请重启应用后重试" : "尚无可用连接，请先添加并连接一台远程设备");
@@ -1428,6 +1604,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     transport.runScript(name, mainPort, scripts[name], args, runId);
   };
   const runScript = (name: string) => {
+    if (!isLocal && !scriptEnabled) {
+      libError("该服务未开启远程脚本执行；可查看和编辑脚本，请在服务端设置中开启后运行");
+      return;
+    }
     // 脚本声明了参数 → 弹收集框;否则直接跑。
     if (scripts[name]?.params?.length) {
       setPendingRun(name);
@@ -1439,20 +1619,80 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 添加远程设备：生成稳定 UUID + 持久化（桌面）+ 默认展开（触发按需连接）。
    *  重复地址由 RemoteDialog 内联拦截(含 Enter 路径),此处再兜一层防御——
    *  校验只在 UI 入口做等于只拦鼠标不拦键盘。 */
-  const addRemote = () => {
-    const host = remoteInput.host.trim();
-    if (!host) return;
-    if (remotes.some((r) => r.host === host && r.port === remoteInput.port)) return;
+  const openSecureAccess = async (suggestedPort?: number) => {
+    if (secureWeb) {
+      setAccessCheck((value) => value + 1);
+      return;
+    }
+    try {
+      const url = accessOrigin(connConfig.host, suggestedPort ?? accessStatus?.tls_port ?? DEFAULT_ACCESS_PORT, true);
+      if (isTauri()) {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(url);
+      } else {
+        window.location.assign(url);
+      }
+    } catch {
+      libError("无法打开目标设备的 HTTPS 验证页面");
+    }
+  };
+
+  const openPortAccess = async (row: PortInfo) => {
+    if (allowHttpVerification) {
+      if (httpAuthenticated) { refreshPorts(); return; }
+      setWebAccessOpen(true);
+      return;
+    }
+    if (row.access_tls_port !== undefined || (accessStatus?.enabled && canOpenHttps) || secureWeb) {
+      await openSecureAccess(row.access_tls_port);
+      return;
+    }
+    try {
+      const url = accessOrigin(connConfig.host, connConfig.port, false);
+      if (isTauri()) {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(url);
+      } else if (url !== location.origin) {
+        window.location.assign(url);
+      } else {
+        setAccessCheck((value) => value + 1);
+      }
+    } catch { libError("无法打开目标设备的验证页面"); }
+  };
+
+  const addRemoteDevice = (input: { host: string; port: number; nickname?: string; securePort?: number; verifyHttp?: boolean }) => {
+    const host = input.host.trim();
+    if (!host) return false;
+    if (remotes.some((r) => r.host === host && r.port === input.port)) return false;
     const id = crypto.randomUUID();
-    const dev: RemoteDevice = { id, host, port: remoteInput.port, nickname: remoteInput.nickname.trim() || undefined };
+    const dev: RemoteDevice = { id, host, port: input.port, nickname: input.nickname?.trim() || undefined, securePort: input.securePort, verifyHttp: input.verifyHttp };
     // 持久化在 updater 外调(StrictMode 双跑 updater,副作用内嵌会双发 save_remotes);
     // 重复地址已在上面拦截,这里基于当前闭包 remotes 计算即无并发风险。
     setRemotes((prev) => [...prev, dev]);
-    if (isLocal) persistRemotes([...remotes, dev]);
+    if (isLocal) {
+      if (dev.securePort !== undefined || dev.verifyHttp) {
+        void tauriInvoke("save_remotes", { remotes: [...remotes, dev] }).then(() => setRemoteAccess(dev)).catch((error) => {
+          setRemotes((current) => current.filter((item) => item.id !== dev.id));
+          libError(`保存远程设备失败：${String(error)}`);
+        });
+      } else {
+        void persistRemotes([...remotes, dev]);
+      }
+    }
     setExpandedRemotes((prev) => new Set(prev).add(id)); // 默认展开 → 引用计数 effect 建连
+    return true;
+  };
+  const addRemote = () => {
+    if (!addRemoteDevice(remoteInput)) return;
     setRemoteInput({ host: "", port: 18700, nickname: "" });
     setRemoteOpen(false);
   };
+
+  const loadShareAddresses = useCallback(async (): Promise<DeviceShareAddress[]> => {
+    if (isLocal) return tauriInvoke<DeviceShareAddress[]>("get_share_addresses");
+    if (!connected) throw new Error("设备尚未连接，请连接后再分享");
+    return [{ host: connConfig.host, port: connConfig.port, secure: connConfig.secure }];
+  }, [isLocal, connected, connConfig.host, connConfig.port, connConfig.secure]);
 
   /** 设备卡改名（空串 = 清除昵称，标题回退 host:port）。预校验 + updater 外持久化（同 addRemote）；
    * 落盘钩子 update_registry 对同 id 同地址仅昵称变 → 后端原地更新（连接不断，`新昵称::COM5` 寻址即时生效）。 */
@@ -1478,7 +1718,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       confirmText: "删除",
       tone: "danger",
       onConfirm: () => {
-        openPorts.filter((p) => parsePortId(p).devId === dev.id).forEach((pid) => prunePort(pid));
+        [...groupOfPort.keys()].filter((p) => parsePortId(p).devId === dev.id).forEach(prunePort);
         if (isLocal) {
           // 桌面:设备在后端——save_remotes 的落盘钩子触发 update_registry(断连+移除)
           dispatch({ type: "teardown_dev", devId: dev.id });
@@ -1510,15 +1750,19 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
   /** 保存（添加/编辑）SSH 设备：全量覆盖 server 侧注册表；乐观更新，失败回滚。 */
   const commitSshHost = async (host: SshHost, isNew: boolean) => {
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return false; }
     const next = isNew
       ? [...sshHosts, { ...host, id: crypto.randomUUID() }]
       : sshHosts.map((h) => (h.id === host.id ? host : h));
     setSshHosts(next);
     try {
-      await cmdTransport()?.sshSave(next);
+      await transport.sshSave(next);
+      return true;
     } catch (e) {
       setSshHosts(sshHosts);
       libError(`保存 SSH 设备失败：${String(e)}`);
+      return false;
     }
   };
 
@@ -1551,15 +1795,21 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     });
   };
 
-  /** 测试连接：server 侧建连+认证+即拆（不进会话池）。失败原因经 toast。 */
+  // Keep verification and authentication actionable without opening a terminal.
   const testSsh = async (host: SshHost) => {
-    setSshTests((prev) => new Map(prev).set(host.id, "testing"));
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
+    setSshTests((prev) => new Map(prev).set(host.id, { status: "testing" }));
     try {
-      const r = await cmdTransport()?.sshTest(host.id);
-      setSshTests((prev) => new Map(prev).set(host.id, r?.ok ? "ok" : "fail"));
-      if (r && !r.ok && r.message) libError(`SSH 测试失败：${r.message}`);
+      const r = await transport.sshTest(host.id);
+      if (cmdTransport() !== transport) return;
+      setSshTests((prev) => new Map(prev).set(host.id, { status: r.ok ? "ok" : "fail", message: r.message }));
+      if (!r.ok && r.ssh && r.ssh.kind !== "other") {
+        setSshIssue({ hostId: host.id, error: r.ssh });
+      } else if (!r.ok && r.message) libError(`SSH 测试失败：${r.message}`);
     } catch (e) {
-      setSshTests((prev) => new Map(prev).set(host.id, "fail"));
+      if (cmdTransport() !== transport) return;
+      setSshTests((prev) => new Map(prev).set(host.id, { status: "fail", message: String(e) }));
       libError(`SSH 测试失败：${String(e)}`);
     }
   };
@@ -1567,47 +1817,63 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 新建终端：先向 server 要空闲实例名（shell / shell@N）再走标准 open。
    *  pid 经 transport 域定型（wireToPid）——web 形态需 remote:: 前缀，与事件
    *  回流键同源；此前手拼 hostId::name 在 web 形态与数据帧键错位（终端哑）。 */
-  const newShellSession = async (hostId: string) => {
+  const newShellSession = async (hostId: string, base = "shell", groupId?: string) => {
+    if (sshCreatingRef.current) return;
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
+    sshCreatingRef.current = true;
+    setSshCreating(true);
     try {
-      const name = await cmdTransport()?.sshNextInstance(hostId, "shell");
+      const name = await transport.sshNextInstance(hostId, base);
       if (name) {
-        const domain = cmdTransport()?.devId ?? "local";
-        await openPort(wireToPid(domain, portIdOf(hostId, name)), DEFAULT_CONFIG);
+        await openPort(wireToPid(transport.devId, portIdOf(hostId, name)), DEFAULT_CONFIG, groupId);
       }
     } catch (e) {
       libError(`新建终端失败：${String(e)}`);
+    } finally {
+      sshCreatingRef.current = false;
+      setSshCreating(false);
     }
   };
 
-  /** 认证重输确认:更新保存的密码并立即重开(失败会再次进入闭环弹窗)。 */
-  const retrySshAuth = async (pid: PortId, password: string, updateSaved: boolean) => {
-    const host = sshHostOfPid(pid);
+  const sshIssueHost = (issue: SshIssue) => "hostId" in issue
+    ? sshHosts.find((host) => host.id === issue.hostId)
+    : sshHostOfPid(issue.pid);
+
+  const retrySshAuth = async (issue: SshIssue, password: string, updateSaved: boolean) => {
+    const host = sshIssueHost(issue);
     setSshIssue(null);
     if (!host) return;
     if (updateSaved) {
-      await commitSshHost({ ...host, auth: { type: "password", password } }, false);
+      if (!await commitSshHost({ ...host, auth: { type: "password", password } }, false)) return;
     }
-    await openPort(pid, DEFAULT_CONFIG);
+    if ("hostId" in issue) await testSsh(host);
+    else if (sessionRef.current.portAttempts.has(issue.pid)) await reconnectPort(issue.pid);
   };
 
   /** 指纹信任确认:记录指纹(直连即断)并立即重开。 */
-  const trustSshHost = async (pid: PortId) => {
-    const host = sshHostOfPid(pid);
+  const trustSshHost = async (issue: SshIssue) => {
+    const host = sshIssueHost(issue);
     setSshIssue(null);
     if (!host) return;
+    const transport = cmdTransport();
+    if (!transport) { libError("连接不可用，请先连接服务"); return; }
     try {
-      await cmdTransport()?.sshTrustHost(host.id);
+      await transport.sshTrustHost(host.id);
     } catch (e) {
       libError(`信任指纹失败：${String(e)}`);
       return;
     }
-    await openPort(pid, DEFAULT_CONFIG);
+    if (cmdTransport() !== transport) return;
+    if ("hostId" in issue) await testSsh(host);
+    else if (sessionRef.current.portAttempts.has(issue.pid)) await reconnectPort(issue.pid);
   };
 
   /** 侧栏 SSH 卡菜单动作分发。 */
   const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
+    if (readOnlySsh && action !== "connect") return;
     if (action === "connect") void newShellSession(devId);
     else if (action === "edit") setSshEditDirect(host);
     else deleteSshHost(host);
@@ -1616,6 +1882,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   /** 手动重连。桌面:后端删旧连接建新(device_connect);远程窗口/Web:前端重建 transport。 */
   const reconnectRemote = (dev: RemoteDevice) => {
     if (isLocal) {
+      if (dev.securePort !== undefined || dev.verifyHttp) { setRemoteAccess(dev); return; }
       void tauriInvoke("device_connect", { devId: dev.id }).catch((e) => libError(String(e)));
       return;
     }
@@ -1638,7 +1905,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
    *  与「删除设备」的差别:保留设备定义,可随时重连。 */
   const disconnectRemote = (dev: RemoteDevice) => {
     const label = dev.nickname?.trim() || `${dev.host}:${dev.port}`;
-    const tabs = openPorts.filter((p) => parsePortId(p).devId === dev.id);
+    const tabs = [...groupOfPort.keys()].filter((p) => parsePortId(p).devId === dev.id);
     const doDisconnect = () => {
       if (isLocal) {
         // 后端断连;断开事件会经 devices-changed 到达,tab 保留(Rust 侧 drainer 标 disconnected)
@@ -1761,8 +2028,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     const r = remotes.find((x) => x.id === devId);
     return r ? r.nickname?.trim() || `${r.host}:${r.port}` : undefined;
   };
-  const activeConfig = activePort ? portConfigs[activePort] : undefined;
-  const activeTerm = activePort ? terminalsRef.current.get(activePort) : undefined;
+  const activeConfig = portAttempts.has(activePort) ? undefined : portConfigs[activePort];
+  const activeTerm = portAttempts.has(activePort) ? undefined : terminalsRef.current.get(activePort);
   // 活动端口拆段:devId 优先换设备昵称,查无昵称/非本表设备(web 形态级联中段)
   // 退回裸 id;本地口("local")无前缀。悬停补 id+地址——与侧栏设备组标签的
   // tooltip 同一套信息。
@@ -1794,6 +2061,11 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     return h ? `${h.username}@${h.host}:${h.port} · PTY` : "PTY";
   })();
 
+  const activeAttempt = portAttempts.get(activePort);
+  const canRetryActivePort = !!activePort && (activeAttempt
+    ? activeAttempt.status === "failed"
+    : disconnectedPorts.has(activePort));
+
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
     "search.open": () => {
@@ -1801,8 +2073,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     },
     "theme.toggle": toggleTheme,
     "port.refresh": refreshPorts,
-    "settings.open": () => setSettingsOpen(true),
-    "about.open": () => setAboutOpen(true),
+    "settings.open": () => setSettingsCategory("connection"),
+    "about.open": () => setSettingsCategory("about"),
     "remote.open": () => setRemoteOpen(true),
     "macro.palette": () => setMacroPaletteOpen(true),
     "script.palette": () => setScriptPaletteOpen(true),
@@ -1813,23 +2085,29 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     "port.close-active": () => {
       if (activePort) closePort(activePort);
     },
+    "port.reconnect": () => {
+      if (canRetryActivePort) void reconnectPort(activePort);
+    },
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),
     "tab.select": (arg) => selectTab(Number(arg)),
   };
   const modalOpen = !!(
-    settingsOpen ||
-    aboutOpen ||
+    shareOpen || sharedDevice ||
+    connectionLauncherOpen ||
+    settingsCategory ||
     skillOpen ||
     pendingRun ||
     remoteOpen ||
+    remoteAccess ||
+    webAccessRequired ||
+    showWebAccess ||
     pendingPort ||
     aliasEdit ||
     exportMacrosOpen ||
     confirmState ||
     editing ||
     editingScript ||
-    shortcutsOpen ||
     macroPaletteOpen ||
     scriptPaletteOpen ||
     portPaletteOpen ||
@@ -1839,29 +2117,16 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     sshEditDirect ||
     sshIssue
   );
-  /** 活动栏弹出菜单（主题/管理）——不算模态,但同样要压住全局快捷键:
+  /** 标签页右键菜单——不算模态,但同样要压住全局快捷键:
    *  菜单浮层 z-200 在对话框 z-100 之上,快捷键此时开对话框会开进菜单底下,Esc 仲裁方向错乱。 */
-  const menuOpen = themeMenu || manageMenu;
+  const menuOpen = tabMenu !== null;
 
-  // 菜单打开时:Esc 收起菜单(capture,先于其它 Esc 处理)
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setThemeMenu(false);
-        setManageMenu(false);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [menuOpen]);
+  useShareClipboard({ enabled: isLocal, ready: remotesReady, blocked: modalOpen || menuOpen, remotes, onShare: setSharedDevice });
 
   // 任一对话框模态打开 → 收起菜单(避免菜单浮层压在模态之上)
   useEffect(() => {
     if (modalOpen) {
-      setThemeMenu(false);
-      setManageMenu(false);
+      setTabMenu(null);
     }
   }, [modalOpen]);
 
@@ -1885,6 +2150,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       }
       const combo = eventToCombo(e);
       if (!combo) return;
+      if (
+        combo === "enter" && canRetryActivePort && !e.isComposing &&
+        !e.defaultPrevented && !document.querySelector(".ctx-menu")
+      ) {
+        const control = t?.closest?.('button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"]');
+        if (!control || control.matches('.port-item-row[data-active="true"] .port-item, .term-connection__card button')) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) dispatchAction("port.reconnect");
+          return;
+        }
+      }
       const hit = findAction(combo, "global");
       if (hit) {
         e.preventDefault();
@@ -1894,7 +2171,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [dispatchAction, modalOpen, menuOpen]);
+  }, [dispatchAction, modalOpen, menuOpen, canRetryActivePort]);
 
   // 所有对话框关闭后,焦点送回活动终端(打开时焦点进了对话框,关掉后终端要重新接管输入)。
   // deps 只有 modalOpen:仅在模态关闭那一拍触发;闭包里的 activePort 即当时的活动端口。
@@ -1906,94 +2183,85 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     return () => window.clearTimeout(id);
   }, [modalOpen]);
 
+  const duplicateTarget = tabMenu ? sshTabTarget(portRowOf(tabMenu.port), Boolean(sshHostOfPid(tabMenu.port))) : undefined;
+  const tabMenuItems: ContextMenuItem[] = tabMenu ? [
+    { label: "重命名 tab", onSelect: () => setAliasEdit({ port: tabMenu.port, where: "tab" }) },
+    { label: "清空屏幕", onSelect: () => terminalsRef.current.get(tabMenu.port)?.term.clear() },
+    { sep: true },
+    {
+      label: captureSessions.get(tabMenu.port)?.id !== undefined ? "停止日志记录" : "开启日志记录…",
+      disabled: !isLocal,
+      hint: isLocal ? undefined : "仅本地桌面",
+      onSelect: () => toggleTabCapture(tabMenu.port),
+    },
+    ...(duplicateTarget ? [
+      { sep: true },
+      {
+        label: "复制 tab",
+        disabled: sshCreating,
+        onSelect: () => void newShellSession(duplicateTarget.hostId, duplicateTarget.base, tabMenu.groupId),
+      },
+    ] : []),
+  ] : [];
+
   return (
     <div className="app">
       {/* 自绘标题栏:仅 Tauri 桌面(本地/远程窗口);Web 模式浏览器自带窗口管理 */}
       {isTauri() && <TitleBar />}
+      {!isLocal && !secureWeb && accessStatus?.enabled && !httpAuthenticated && <div className="access-banner">
+        {accessStatus.scope === "all" ? "此设备的连接需要验证" : "部分连接需要验证"}
+        {canOpenHttps && <button className="btn" onClick={() => void openSecureAccess()}>打开 HTTPS 验证页面</button>}
+        {allowHttpVerification && <button className="btn" onClick={() => setWebAccessOpen(true)}>通过 HTTP 验证</button>}
+      </div>}
+      {secureWeb && accessError && <div className="access-banner" role="alert">
+        {accessError}<button className="btn" onClick={() => setAccessCheck((value) => value + 1)}>重试</button>
+      </div>}
+      {(secureWeb || allowHttpVerification) && accessStatus?.enabled && accessStatus.authenticated && <div className="access-banner">
+        {httpAuthenticated ? "已通过 HTTP 验证远程访问" : "已验证远程访问"}
+        <button className="btn" onClick={() => void logoutWebAccess(allowHttpVerification).then(() => {
+          setAccessStatus((status) => status && { ...status, authenticated: false });
+          setAccessCheck((value) => value + 1);
+        }).catch((error: Error) => libError(error.message))}>退出验证</button>
+      </div>}
       <div className="app__body">
-      {/* 活动栏：44px 窄竖条 */}
-      <div className="activity-bar">
-        <ActivityIcon icon={<IconPlug className="act-icon__svg" />} title="串口" active={activity === "ports"} onClick={() => setActivity(activity === "ports" ? null : "ports")} />
-        <ActivityIcon
-          icon={<IconBolt className="act-icon__svg" />}
-          title="宏"
-          active={activity === "macros"}
-          onClick={() => setActivity(activity === "macros" ? null : "macros")}
-          badge={macroRunning ? "run" : macroFailed ? "alert" : undefined}
-        />
-        {showScripts && (
-          <ActivityIcon
-            icon={<IconCode className="act-icon__svg" />}
-            title="脚本"
-            active={activity === "scripts"}
-            onClick={() => setActivity(activity === "scripts" ? null : "scripts")}
-            badge={scriptRunning ? "run" : scriptFailed ? "alert" : undefined}
-          />
-        )}
-        <div className="activity-bar__spacer" />
-        {isTauri() && <ActivityIcon icon={<IconGlobe className="act-icon__svg" />} title="添加远程设备" active={false} onClick={() => setRemoteOpen(true)} />}
-        {/* SSH 设备管理：不限定桌面形态（设计上注册表在 server 侧，Web 形态也能管理；预览为 localStorage） */}
-        <ActivityIcon icon={<IconSsh className="act-icon__svg" />} title="SSH 设备" active={sshManagerOpen} onClick={() => openSshManager()} />
-        <div className="manage">
-          <ActivityIcon
-            icon={<IconShirt className="act-icon__svg" />}
-            title="主题"
-            active={themeMenu}
-            onClick={() => setThemeMenu(!themeMenu)}
-          />
-          {themeMenu && (
-            <>
-              <div className="manage-backdrop" onClick={() => setThemeMenu(false)} />
-              <div className="manage-menu">
-                {THEMES.map((def) => {
-                  const current = def.id === theme;
-                  return (
-                    <button
-                      key={def.id}
-                      className="manage-menu__item"
-                      data-current={current || undefined}
-                      onClick={() => {
-                        setTheme(def.id);
-                        setThemeMenu(false);
-                      }}
-                    >
-                      {/* 勾选占位对齐:非当前项隐藏勾,保持文本同列 */}
-                      <span style={{ display: "inline-flex", visibility: current ? "visible" : "hidden" }}>
-                        <IconCheck />
-                      </span>
-                      {def.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
-        <div className="manage">
-          <ActivityIcon icon={<IconSliders className="act-icon__svg" />} title="管理" active={manageMenu} onClick={() => setManageMenu(!manageMenu)} />
-          {manageMenu && (
-            <>
-              <div className="manage-backdrop" onClick={() => setManageMenu(false)} />
-              <div className="manage-menu">
-                <button className="manage-menu__item" onClick={() => { setSettingsOpen(true); setManageMenu(false); }}>
-                  <IconGear /> 设置
-                </button>
-                <button className="manage-menu__item" onClick={() => { setShortcutsOpen(true); setManageMenu(false); }}>
-                  <IconKeyboard /> 快捷键
-                </button>
-                <button className="manage-menu__item" onClick={() => { setAboutOpen(true); setManageMenu(false); }}>
-                  <IconInfo /> 关于
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* 次侧栏：当前活动项内容，收起时不占位 */}
-      {activity && (
-        <>
-        <aside className="sidebar" style={{ width: sidebarWidth }}>
+        <WorkspaceSidebar
+          panel={sidebarPanel}
+          collapsed={activity === null}
+          onPanel={(panel) => { setActivity(current => current === panel ? null : panel); if (panel !== sidebarPanel) setSidebarQuery(""); }}
+          showScripts={showScripts}
+          counts={{ ports: portGroups.reduce((sum, group) => sum + (group.kind === "ssh" ? 1 : group.ports.length), 0), macros: Object.keys(macros).length, scripts: Object.keys(scripts).length }}
+          running={{ macros: macroRunning, scripts: scriptRunning }}
+          failed={{ macros: macroFailed, scripts: scriptFailed }}
+          query={sidebarQuery}
+          onQuery={setSidebarQuery}
+          onNew={() => sidebarPanel === "ports"
+            ? readOnlySsh ? setPortPaletteOpen(true) : setConnectionLauncherOpen(true)
+            : sidebarPanel === "macros" ? openMacroEditor(null) : openScriptEditor(null)}
+          onRemote={isTauri() ? () => setRemoteOpen(true) : undefined}
+          onShare={() => setShareOpen(true)}
+          width={sidebarWidth}
+          tools={<WorkspaceSettingsMenu onOpen={setSettingsCategory} />}
+          view={sidebarPanel === "ports" ? {
+            label: listView === "default" ? "默认" : "分组",
+            items: [
+              { label: "默认", checked: listView === "default", onSelect: () => setListView("default") },
+              { label: "分组", checked: listView === "groups", onSelect: () => setListView("groups") },
+            ],
+          } : undefined}
+          onRefresh={sidebarPanel === "ports" ? () => { refreshPorts(); sharedGroups.reload(); } : undefined}
+          /* 面板 ··· 菜单:按当前面板组装(原各面板 section-head 上的动作迁此) */
+          moreItems={
+            sidebarPanel === "ports" ? undefined : sidebarPanel === "macros" ? [
+              { label: "导入宏", onSelect: () => importInputRef.current?.click() },
+              { label: "导出宏", disabled: Object.keys(macros).length === 0, onSelect: () => setExportMacrosOpen(true) },
+            ] : [
+              { label: "脚本编写指南", onSelect: () => { setSkillOpen(true); if (skillText === null) fetchSkill(); } },
+              { sep: true },
+              { label: "导入脚本", onSelect: () => scriptImportInputRef.current?.click() },
+              { label: "导出脚本", disabled: Object.keys(scripts).length === 0, onSelect: () => setExportScriptsOpen(true) },
+            ]
+          }
+        >
           {(!isTauri() || isRemote) && (
             <div className="sidebar__conn">
               <span className={`dot ${connected ? "on" : "off"}`} />
@@ -2001,13 +2269,22 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </div>
           )}
 
-          {activity === "ports" && (
+          {sidebarPanel === "ports" && (
             <PortsPanel
+              orderScope={isLocal ? "local" : `${connConfig.host}:${connConfig.port}`}
+              grouping={sharedGroups.grouping}
+              groupsReady={sharedGroups.ready}
+              groupsError={sharedGroups.error}
+              onUpdateGroups={sharedGroups.update}
+              onToggleCustomGroup={sharedGroups.toggleCollapsed}
+              visible={activity !== null}
               portGroups={portGroups}
+              query={sidebarQuery}
               remotes={remotes}
               portCollapsed={portCollapsed}
               onTogglePortGroup={togglePortGroup}
               activePort={activePort}
+              openPorts={openPorts}
               aliasEditPort={aliasEdit?.where === "list" ? aliasEdit.port : null}
               onSetAliasEdit={(pid) => setAliasEdit({ port: pid, where: "list" })}
               onTriggerPort={triggerPort}
@@ -2015,6 +2292,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onCancelAlias={() => setAliasEdit(null)}
               onForceClose={forceClosePort}
               onReconnectRemote={reconnectRemote}
+              onVerifyRemote={isLocal ? setRemoteAccess : undefined}
               onDisconnectRemote={disconnectRemote}
               onRemoveRemote={removeRemote}
               onRenameRemote={renameRemote}
@@ -2030,6 +2308,13 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 )
               }
               onSshAction={onSshAction}
+              readOnlySsh={readOnlySsh}
+              onNewSshTerminal={(pid) => {
+                const row = portRowOf(pid);
+                if (row?.locked) { void openPortAccess(row); return; }
+                const target = sshTabTarget(portRowOf(pid), Boolean(sshHostOfPid(pid)));
+                if (target) void newShellSession(target.hostId, target.base);
+              }}
               onClosePort={(pid) => closePort(pid)}
               onCopyPortKey={(row) => {
                 void copyText(row.name).then((ok) => {
@@ -2038,13 +2323,14 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 });
               }}
               onShowPortDetail={(pid) => setPortDetail(pid)}
-              onRefresh={() => refreshPorts()}
+              onRefresh={() => { refreshPorts(); sharedGroups.reload(); }}
+              listView={listView}
             />
           )}
 
-          {activity === "macros" && (
+          {sidebarPanel === "macros" && (
             <NamedLibraryPanel
-              title={<>MACROS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
+              query={sidebarQuery}
               items={macros}
               hasItems={Object.keys(macros).length > 0}
               collapsed={macroCollapsed}
@@ -2053,12 +2339,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDissolveGroup={askDissolveMacroGroup}
               importRef={importInputRef}
               onImportFile={onImportFile}
-              onExport={() => setExportMacrosOpen(true)}
-              exportTitle="导出宏（可多选 / 全选）"
-              onNew={() => openMacroEditor(null)}
-              newItemLabel="宏"
-              emptyHint="无宏（点 ＋ 新增）"
-              storageHint={!isLocal ? "Web 模式：宏保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
+              emptyHint="暂无宏，点击上方“新建宏”添加"
+              storageHint={!isLocal ? "宏库与所连服务共用，修改会同步到桌面及其他页面。" : undefined}
               renderRow={(name) => (
                 <MacroRow
                   key={name}
@@ -2086,9 +2368,9 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             </NamedLibraryPanel>
           )}
 
-          {activity === "scripts" && (
+          {sidebarPanel === "scripts" && (
             <NamedLibraryPanel
-              title={<>SCRIPTS{activePortLabel && <span className="accent">→ {activePortLabel}</span>}</>}
+              query={sidebarQuery}
               items={scripts}
               hasItems={Object.keys(scripts).length > 0}
               collapsed={scriptCollapsed}
@@ -2097,25 +2379,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onDissolveGroup={askDissolveScriptGroup}
               importRef={scriptImportInputRef}
               onImportFile={onImportScripts}
-              onExport={() => setExportScriptsOpen(true)}
-              exportTitle="导出脚本（可多选 / 全选）"
-              onNew={() => openScriptEditor(null)}
-              newItemLabel="脚本"
-              emptyHint="无脚本（点 ＋ 新增）"
-              storageHint={!isLocal ? "Web 模式：脚本保存在本浏览器（localStorage），换浏览器或清缓存不会保留，请用导出备份。" : undefined}
-              extraActions={
-                <button
-                  className="icon-btn"
-                  title="脚本编写指南（查看 / 复制给外部 Agent）"
-                  aria-label="脚本编写指南"
-                  onClick={() => {
-                    setSkillOpen(true);
-                    if (skillText === null) fetchSkill();
-                  }}
-                >
-                  <IconInfo />
-                </button>
-              }
+              emptyHint="暂无脚本，点击上方“新建脚本”添加"
+              storageHint={!isLocal ? scriptEnabled ? "脚本库与所连服务共用，修改会同步到桌面及其他页面。" : "脚本库与所连服务共用；当前可查看和编辑，服务未开启远程脚本执行。" : undefined}
               renderRow={(name) => (
                 <ScriptRow
                   key={name}
@@ -2154,21 +2419,55 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               />
             </NamedLibraryPanel>
           )}
-        </aside>
+        </WorkspaceSidebar>
+        {/* 分隔条(Splitter):两卡之间 4px 缝隙即分隔条本体,折叠态也保留。
+            线位=clamp(鼠标−卡片左缘−图标栏宽, MIN_W, MAX_W)——线贴着鼠标走,不会越过;
+            展开态左拖:线到最小宽停住,鼠标再左推越过 COLLAPSE_X 才收起;
+            收起后右拖:自武装点 80px 才展开,展开瞬间线停在最小宽(鼠标右侧),
+            鼠标追上线后继续跟手。宽度更新 rAF 合帧:高刷鼠标事件每帧最多渲染一次。 */}
         <div
           className="sidebar-resizer"
           onMouseDown={(e) => {
             e.preventDefault();
-            sidebarDrag.current = { x: e.clientX, w: sidebarWidth };
+            const sidebarLeft = document.querySelector(".sidebar")!.getBoundingClientRect().left;
+            // 折叠态在闭包内本地跟踪:setActivity 后读不到新值
+            let collapsedNow = activity === null;
+            // 展开「武装点」:收起瞬间(或折叠态按下时)的鼠标位,右拖 80px 才展开
+            let expandArmedAt = e.clientX - sidebarLeft;
             document.body.style.cursor = "col-resize";
             document.body.style.userSelect = "none";
+            const clampPanel = (x: number) =>
+              Math.max(SPLITTER_MIN_W, Math.min(SPLITTER_MAX_W, x - SPLITTER_RAIL_W));
+            let raf = 0;
+            let pendingX: number | null = null;
+            const flush = () => {
+              raf = 0;
+              if (pendingX === null) return;
+              setSidebarWidth(clampPanel(pendingX));
+              pendingX = null;
+            };
             const onMove = (ev: MouseEvent) => {
-              const ds = sidebarDrag.current;
-              if (!ds) return;
-              setSidebarWidth(Math.max(180, Math.min(480, ds.w + (ev.clientX - ds.x))));
+              const x = ev.clientX - sidebarLeft;
+              if (collapsedNow) {
+                if (x > expandArmedAt + SPLITTER_EXPAND_DX) {
+                  collapsedNow = false;
+                  setActivity(lastExpandedRef.current);
+                  setSidebarWidth(clampPanel(x));
+                }
+                return;
+              }
+              if (x < SPLITTER_COLLAPSE_X) {
+                collapsedNow = true;
+                expandArmedAt = x; // 从收起位置重新武装(展开阈值随之抬到收起点+80,无重叠)
+                setActivity(null);
+                return;
+              }
+              pendingX = x;
+              if (!raf) raf = requestAnimationFrame(flush);
             };
             const onUp = () => {
-              sidebarDrag.current = null;
+              if (raf) cancelAnimationFrame(raf);
+              flush(); // 补上合帧中最后一帧
               document.body.style.cursor = "";
               document.body.style.userSelect = "";
               window.removeEventListener("mousemove", onMove);
@@ -2177,43 +2476,13 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             window.addEventListener("mousemove", onMove);
             window.addEventListener("mouseup", onUp);
           }}
-          onDoubleClick={() => setSidebarWidth(240)}
-          title="拖动调整宽度（双击重置）"
+          onDoubleClick={() => setSidebarWidth(280)}
+          title="拖动调整宽度（双击重置；拖到最窄自动折叠，右拖展开）"
         />
-        </>
-      )}
 
-      <main className="main">
-        {errorMsg && (
-          <div className="banner banner--err" role="alert">
-            <IconAlert /> {errorMsg}
-            <button
-              className="banner__close"
-              aria-label="关闭错误提示"
-              onClick={() => {
-                if (errorTimer.current !== null) clearTimeout(errorTimer.current);
-                setErrorMsg("");
-              }}
-            >
-              <IconClose />
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div className="banner banner--notice" role="status">
-            <IconInfo /> {notice}
-            <button
-              className="banner__close"
-              aria-label="关闭提示"
-              onClick={() => {
-                if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-                setNotice("");
-              }}
-            >
-              <IconClose />
-            </button>
-          </div>
-        )}
+      {/* main--solo:单分栏时 group 聚焦边框与卡片边框零间隙相邻会叠成 2px 双线,
+          CSS 据此抑制 group 边框(分栏 ≥2 时仍需它作聚焦窗格指示) */}
+      <main className={"main" + (leafGroupIds(layout).length === 1 ? " main--solo" : "")}>
         {serviceError && (
           <div className="banner banner--err" role="alert">
             <IconAlert /> {serviceError}
@@ -2256,8 +2525,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
                 key={port}
                 port={port}
                 targetContainer={gid ? groupContainers.get(gid) ?? null : null}
-                visible={!!g && g.activePort === port}
-                focused={!!g && gid === focusedGroupId && g.activePort === port}
+                visible={!!g && g.activePort === port && !portAttempts.has(port)}
+                focused={!!g && gid === focusedGroupId && g.activePort === port && !portAttempts.has(port)}
                 onWrite={(p, data) => {
                   touch(p, "tx");
                   cmdTransport()?.write(p, data);
@@ -2294,28 +2563,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
             );
           })}
         </div>
-
-        {/* 通道条：活动端口的仪器状态条 + TX/RX LED（签名）。置底 */}
-        {activePort && activeConfig && (
-          <div className="channel-strip">
-            <span className="channel-strip__port">
-              {activePortLabel}
-            </span>
-            <span className="channel-strip__sep">·</span>
-            <span className="channel-strip__config">
-              {channelConfigText ?? formatConfig(activeConfig)}
-            </span>
-            {activeHolders > 0 && (
-              <>
-                <span className="channel-strip__sep">·</span>
-                <span className="channel-strip__holders">● {activeHolders} 人</span>
-              </>
-            )}
-            <span className="channel-strip__spacer" />
-            <Leds port={activePort} activityRef={activityRef} />
-          </div>
-        )}
       </main>
+
+      {tabMenu && <ContextMenu
+        x={tabMenu.x} y={tabMenu.y} items={tabMenuItems}
+        onClose={(reason) => { setTabMenu(null); if (reason === "escape" || reason === "item") activeTerm?.term.focus(); }}
+      />}
+
+      {connectionLauncherOpen && <ConnectionLauncher
+        onClose={() => setConnectionLauncherOpen(false)}
+        onSerial={() => { setConnectionLauncherOpen(false); setPortPaletteOpen(true); }}
+        onSsh={() => { setConnectionLauncherOpen(false); openSshManager(); }}
+      />}
 
       {/* 串口配置对话框（key=pendingPort：换端口重挂，别名输入状态重置） */}
       {pendingPort && (
@@ -2376,20 +2635,26 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         />
       )}
 
-      {/* 设置面板 */}
-      {settingsOpen && (
-        <SettingsPanel
+      {/* 设置页（VS Code 式：搜索 + 分类 + 列表，整合连接/快捷键/关于） */}
+      {settingsCategory && (
+        <SettingsPage
+          initialCategory={settingsCategory}
+          version={version}
           connConfig={connConfig}
           srvSettings={srvSettings}
           srvFailed={srvFailed}
           onRetrySrv={loadSrvSettings}
           showServer={isTauri() && !isRemote}
           onConnChange={(c) => {
+            if (secureWeb && (c.host !== location.hostname || c.port !== Number(location.port || 443))) {
+              try { window.location.assign(accessOrigin(c.host, c.port, true)); }
+              catch { libError("服务地址无效"); }
+              return;
+            }
             saveConn(c);
             setConnConfig(c);
-            // 关闭设置页,连接结果走 toast(成功/超时失败,见 pendingConn effects)
+            // 不关页：反馈走页内「已应用」脉冲,连接结果走 toast(成功/超时失败,见 pendingConn effects)
             setPendingConn(`${c.host}:${c.port}`);
-            setSettingsOpen(false);
           }}
           onSaveSrv={async (s) => {
             if (!isTauri()) return;
@@ -2402,11 +2667,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               libError(String(e));
             }
           }}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => setSettingsCategory(null)}
         />
       )}
 
-      {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
       {skillOpen && (
         <ScriptSkillDialog text={skillText} failed={skillFailed} onRetry={fetchSkill} onClose={() => setSkillOpen(false)} />
       )}
@@ -2426,7 +2690,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onCancel={() => setPendingRun(null)}
         />
       )}
-      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {macroPaletteOpen && (
         <MacroPalette
           macros={macros}
@@ -2461,6 +2724,18 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           }}
         />
       )}
+      {shareOpen && <DeviceShareDialog loadAddresses={loadShareAddresses} onClose={() => setShareOpen(false)} />}
+      {sharedDevice && <ConfirmDialog
+        title="添加分享的远程设备？"
+        message={`剪贴板中发现设备分享链接：${sharedDevice.host}:${sharedDevice.port}。是否添加到远程设备列表？`}
+        confirmText="添加设备"
+        onConfirm={() => {
+          const input = sharedDevice.secure ? { ...sharedDevice, securePort: sharedDevice.port } : sharedDevice;
+          if (!addRemoteDevice(input)) libNotify("此设备已在远程设备列表中");
+          setSharedDevice(null);
+        }}
+        onCancel={() => setSharedDevice(null)}
+      />}
       {remoteOpen && (
         <RemoteDialog
           input={remoteInput}
@@ -2468,8 +2743,32 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           onConfirm={addRemote}
           onCancel={() => setRemoteOpen(false)}
           existing={remotes.map((r) => `${r.host}:${r.port}`)}
+          allowSecure={isLocal}
         />
       )}
+      {(webAccessRequired || showWebAccess) && <AccessDialog label={location.host} insecure={showWebAccess}
+        onCancel={showWebAccess ? () => setWebAccessOpen(false) : undefined} onVerify={async (code) => {
+        await verifyWebAccess(code, allowHttpVerification);
+        const status = await fetchAccessStatus(location.origin);
+        if (!status?.authenticated) throw new Error("无法建立验证会话，请检查浏览器是否允许本站 Cookie");
+        setAccessStatus(status);
+        setWebAccessOpen(false);
+        setAccessCheck((value) => value + 1);
+      }} />}
+      {remoteAccess && <AccessDialog key={remoteAccess.id} label={remoteAccess.nickname || remoteAccess.host} desktop={remoteAccess}
+        onCancel={() => setRemoteAccess(null)} onVerify={async (code, options) => {
+        const current = remotesRef.current.find((item) => item.id === remoteAccess.id);
+        if (!current) throw new Error("此远程设备已移除，请重新添加");
+        if (options?.securePort !== current.securePort || Boolean(options?.verifyHttp) !== Boolean(current.verifyHttp)) {
+          const updated = remotesRef.current.map((item) => item.id === current.id ? { ...item, ...options } : item);
+          await tauriInvoke("save_remotes", { remotes: updated });
+          remotesRef.current = updated;
+          setRemotes(updated);
+        }
+        await tauriInvoke("verify_remote_access", { devId: current.id, code });
+        setRemoteAccess(null);
+        libNotify("远程设备已验证，正在连接…");
+      }} />}
       {/* 通用设备详情(remote/SSH/本机):按 id 实时查找,设备被删 → info 为空 → 不渲染 */}
       {deviceDetail && (() => {
         let info: DeviceDetailInfo | null = null;
@@ -2609,37 +2908,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         };
         return <PortDetailDialog info={info} onClose={() => setPortDetail(null)} />;
       })()}
-      {sshIssue && (() => {
-        // 结构化 device.id 查属主(web 形态 pid 首段是连接桶,老查法失灵)
-        const host = sshHostOfPid(sshIssue.pid);
-        if (!host) return null;
-        const { error, pid } = sshIssue;
-        if (error.kind === "auth_failed") {
-          return (
-            <SshAuthDialog
-              host={host}
-              onRetryPassword={(pw, save) => void retrySshAuth(pid, pw, save)}
-              onEdit={() => {
-                setSshIssue(null);
-                setSshEditDirect(host);
-              }}
-              onCancel={() => setSshIssue(null)}
-            />
-          );
-        }
-        if (error.kind === "host_key_unknown" || error.kind === "host_key_changed") {
-          return (
-            <SshTrustDialog
-              host={host}
-              error={error}
-              onTrust={() => void trustSshHost(pid)}
-              onCancel={() => setSshIssue(null)}
-            />
-          );
-        }
-        return null;
-      })()}
-      {sshManagerOpen && (
+      {sshManagerOpen && !readOnlySsh && (
         <SshManagerDialog
           hosts={sshHosts}
           testOf={(id) => sshTests.get(id)}
@@ -2694,6 +2963,38 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
 
       {/* 确认弹窗:必须排在所有对话框之后——overlay 同 z-index 时后来者居上,
           放前面会被编辑器盖住(如编辑器 dirty 确认弹在编辑器下层不可见) */}
+      {sshIssue && (() => {
+        const host = sshIssueHost(sshIssue);
+        if (!host) return null;
+        const { error } = sshIssue;
+        const operation = "hostId" in sshIssue ? "test" : "connect";
+        if (error.kind === "auth_failed") {
+          return (
+            <SshAuthDialog
+              host={host}
+              operation={operation}
+              onRetryPassword={(pw, save) => void retrySshAuth(sshIssue, pw, save)}
+              onEdit={() => {
+                setSshIssue(null);
+                setSshEditDirect(host);
+              }}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        if (error.kind === "host_key_unknown" || error.kind === "host_key_changed") {
+          return (
+            <SshTrustDialog
+              host={host}
+              operation={operation}
+              error={error}
+              onTrust={() => void trustSshHost(sshIssue)}
+              onCancel={() => setSshIssue(null)}
+            />
+          );
+        }
+        return null;
+      })()}
       {confirmState && (
         <ConfirmDialog
           title={confirmState.title}
@@ -2706,6 +3007,46 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
         />
       )}
       </div>
+      {/* 底部状态栏:服务状态 + 瞬时消息(错误/提示,原主区顶部 banner 迁此,自动消失) */}
+      <footer className="statusbar">
+        <span
+          className={`statusbar__msg statusbar__conn${connected ? "" : " statusbar__conn--off"}`}
+          title={connected ? "已连接" : "未连接"}
+          aria-label={connected ? "已连接" : "未连接"}
+        >
+          <span className={`dot${connected ? " on" : ""}`} />
+          {connected ? "已连接" : "未连接"}
+        </span>
+        {errorMsg && (
+          <span className="statusbar__msg statusbar__msg--err" role="alert" title={errorMsg}>
+            <IconAlert /> {errorMsg}
+          </span>
+        )}
+        {notice && (
+          <span className="statusbar__msg" role="status" title={notice}>
+            <IconInfo /> {notice}
+          </span>
+        )}
+        {/* 通道条(原主区底部迁此,置右):活动端口的仪器状态 + TX/RX LED */}
+        {activePort && activeConfig && (
+          <div className="channel-strip">
+            <span className="channel-strip__port">
+              {activePortLabel}
+            </span>
+            <span className="channel-strip__sep">·</span>
+            <span className="channel-strip__config">
+              {channelConfigText ?? formatConfig(activeConfig)}
+            </span>
+            {activeHolders > 0 && (
+              <>
+                <span className="channel-strip__sep">·</span>
+                <span className="channel-strip__holders">● {activeHolders} 人</span>
+              </>
+            )}
+            <Leds port={activePort} activityRef={activityRef} />
+          </div>
+        )}
+      </footer>
     </div>
   );
 }

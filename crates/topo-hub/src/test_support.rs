@@ -110,5 +110,7 @@ pub fn make_state() -> AppState {
         addresses,
         instance_id: "inst-topo-test".into(),
         mcp_extensions: Vec::new(),
+        access: Default::default(),
+        port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory("inst-topo-test")),
     }
 }

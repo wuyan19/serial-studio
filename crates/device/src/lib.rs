@@ -9,6 +9,8 @@
 pub mod address;
 pub mod config;
 pub mod device;
+pub mod libraries;
+pub mod port_groups;
 pub mod port_meta_store;
 pub mod protocol;
 pub mod remotes_store;
@@ -19,6 +21,7 @@ use std::collections::HashSet;
 
 pub use address::AddressResolver;
 pub use device::DeviceClientManager;
+pub use port_groups::PortGroupsStore;
 pub use protocol::{ClientMsg, DeviceStateView, ServerMsg};
 pub use ssh::SshManager;
 
@@ -60,6 +63,10 @@ pub struct PortView {
     /// 属主设备(原始属主，非连接桶；远端桶经改写规则维持绝对属主)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_tls_port: Option<u16>,
 }
 
 // ===== 纯函数（组合/改写/透传判定，无 IO）=====

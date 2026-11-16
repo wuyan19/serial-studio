@@ -6,6 +6,12 @@
 
 type IconProps = { className?: string };
 
+export function IconShare({ className }: IconProps) {
+  return <Svg className={className}>
+    <path d="M12 15V3m-4 4 4-4 4 4M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8" />
+  </Svg>;
+}
+
 function Svg({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <svg
@@ -32,6 +38,16 @@ export function IconPlug({ className }: IconProps) {
       <rect x="7" y="8" width="10" height="6" rx="1.5" />
       <path d="M9 14v3a3 3 0 0 0 6 0v-3" />
       <path d="M12 20v2" />
+    </Svg>
+  );
+}
+
+/** Connections panel — chain link, medium-neutral across serial / SSH / remote devices. */
+export function IconLink({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </Svg>
   );
 }
@@ -113,6 +129,27 @@ export function IconSliders({ className }: IconProps) {
       <path d="M4 18h9" />
       <path d="M17 18h3" />
       <circle cx="14.5" cy="18" r="2.2" />
+    </Svg>
+  );
+}
+
+/** Server stack — the 服务 settings category (listen / connection config). */
+export function IconLock({ className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4m-4 8v-3" />
+    </svg>
+  );
+}
+
+export function IconServer({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="2.5" y="3" width="19" height="7.5" rx="2" />
+      <rect x="2.5" y="13.5" width="19" height="7.5" rx="2" />
+      <path d="M6.5 6.75h.01" />
+      <path d="M6.5 17.25h.01" />
     </Svg>
   );
 }
@@ -219,6 +256,28 @@ export function IconChevronDown({ className }: IconProps) {
   );
 }
 
+/** 分组折叠指示：">" 单线雪佛龙，展开态由 CSS 旋转 90° 朝下。 */
+export function IconChevronRight({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M9 6l6 6-6 6" />
+    </Svg>
+  );
+}
+
+/** 连接列表视图（默认/分组）切换：行首圆点 + 三行列表。 */
+export function IconListView({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M8 6h12" />
+      <path d="M8 12h12" />
+      <path d="M8 18h12" />
+      {/* round cap + 零长度路径 = 行首圆点 */}
+      <path d="M4 6h.01M4 12h.01M4 18h.01" />
+    </Svg>
+  );
+}
+
 export function IconPlus({ className }: IconProps) {
   return (
     <Svg className={className}>
@@ -261,6 +320,14 @@ export function IconCheck({ className }: IconProps) {
   return (
     <Svg className={className}>
       <path d="M4.5 12.5l5 5 10-11" />
+    </Svg>
+  );
+}
+
+export function IconListFilter({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M3 6h18M6 12h12M10 18h4" />
     </Svg>
   );
 }
@@ -318,5 +385,43 @@ export function IconExport({ className }: IconProps) {
       <path d="M17 8l-5-5-5 5" />
       <path d="M12 3v12" />
     </Svg>
+  );
+}
+
+/** 中心+四向节点(拓扑/枢纽):主区未打开端口时的空态图标。
+ *  用户手绘原稿 0 0 100 视图,笔宽 2(等比到 24 视图 ≈0.5,故独立 svg 不走 24 视图的 Svg 包装,
+ *  保持原比例的轻线条观感)。 */
+export function IconHub({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 100 100"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="50" cy="50" r="15" />
+      <circle cx="50" cy="16" r="8" />
+      <circle cx="50" cy="84" r="8" />
+      <circle cx="16" cy="50" r="8" />
+      <circle cx="84" cy="50" r="8" />
+      <line x1="50" y1="24" x2="50" y2="35" />
+      <line x1="50" y1="65" x2="50" y2="76" />
+      <line x1="24" y1="50" x2="35" y2="50" />
+      <line x1="65" y1="50" x2="76" y2="50" />
+    </svg>
+  );
+}
+
+/** 横向三点(面板标题栏「更多操作」)。实心小圆点,与单线条图标组混用时按点群处理。 */
+export function IconMore({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="19" cy="12" r="1.6" />
+    </svg>
   );
 }

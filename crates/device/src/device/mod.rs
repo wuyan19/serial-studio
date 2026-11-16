@@ -58,6 +58,7 @@ pub enum DeviceEvent {
 
 /// 设备连接管理器。
 pub struct DeviceClientManager {
+    credentials: std::sync::Mutex<HashMap<String, DeviceCredential>>,
     devices: std::sync::Mutex<HashMap<String, Arc<DeviceClient>>>,
     device_bus: broadcast::Sender<DeviceEvent>,
     meta_bus: broadcast::Sender<()>,
@@ -69,12 +70,26 @@ pub struct DeviceClientManager {
     instance_id: String,
 }
 
+struct DeviceCredential {
+    device: RemoteDevice,
+    token: String,
+}
+
 impl DeviceClientManager {
+    fn remote(&self, id: &str) -> Option<RemoteDevice> {
+        self.devices
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|c| c.device().clone())
+    }
+
     /// 空管理器(测试/无设备;不 spawn,注册设备需手动 update + start)。
     /// instance_id:本机实例身份(握手自报);测试注入固定值,不落盘。
     pub fn empty(meta_bus: broadcast::Sender<()>, instance_id: impl Into<String>) -> Self {
         let (device_bus, _) = broadcast::channel(16);
         Self {
+            credentials: Default::default(),
             devices: std::sync::Mutex::new(HashMap::new()),
             device_bus,
             meta_bus,
@@ -82,6 +97,75 @@ impl DeviceClientManager {
             self_weak: std::sync::Mutex::new(std::sync::Weak::new()),
             instance_id: instance_id.into(),
         }
+    }
+
+    pub fn is_private(&self, id: &str) -> bool {
+        self.devices
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|c| c.device().requires_verification())
+    }
+
+    pub fn has_private_devices(&self) -> bool {
+        self.devices
+            .lock()
+            .unwrap()
+            .values()
+            .any(|c| c.device().requires_verification())
+    }
+
+    pub fn has_port(&self, canonical: &str) -> bool {
+        let (id, name) = ss_core::split_port_key(canonical);
+        self.devices.lock().unwrap().get(id).is_some_and(|c| {
+            c.cached_ports_snapshot()
+                .iter()
+                .any(|p| p.info.name == name)
+        })
+    }
+
+    fn credential(&self, device: &RemoteDevice) -> Option<String> {
+        self.credentials
+            .lock()
+            .unwrap()
+            .get(&device.id)
+            .filter(|credential| same_address(&credential.device, device))
+            .map(|credential| credential.token.clone())
+    }
+
+    pub async fn verify_remote_access(&self, id: &str, code: &str) -> Result<(), String> {
+        let dev = self.remote(id).ok_or("远程设备未注册")?;
+        let token = client::verify_access(&dev, code).await?;
+        let mut devices = self.devices.lock().unwrap();
+        let old = devices.get(id).ok_or("远程设备已删除")?;
+        if !same_address(old.device(), &dev) {
+            return Err("远程设备地址已变更，请重试".into());
+        }
+        let mut dev = dev;
+        dev.nickname = old.nickname();
+        self.credentials.lock().unwrap().insert(
+            id.into(),
+            DeviceCredential {
+                device: dev.clone(),
+                token,
+            },
+        );
+        old.stop();
+        self.spawn_client_locked(&mut devices, dev);
+        Ok(())
+    }
+
+    pub(crate) async fn connect_files(&self, id: &str) -> Result<client::WsStream, String> {
+        let dev = self.remote(id).ok_or("远程设备未注册")?;
+        let token = self.credential(&dev);
+        // 对齐重连循环的 CONNECT_TIMEOUT:裸 connect 在 Windows/mio 下对死端口
+        // 可能永不完成(见 unreachable_relay 测试注释),不包超时会挂到 execute 的 30s。
+        tokio::time::timeout(
+            client::CONNECT_TIMEOUT,
+            client::connect_device(&dev, token.as_deref(), false),
+        )
+        .await
+        .map_err(|_| "远程设备连接超时".to_string())?
     }
 
     /// self-weak 注入:Arc 包装后由装配处调一次(create_state / 测试 boot)。
@@ -134,6 +218,12 @@ impl DeviceClientManager {
             dev.port
         );
         dev.id = learned.to_string();
+        {
+            let mut credentials = self.credentials.lock().unwrap();
+            if let Some(token) = credentials.remove(old_id) {
+                credentials.insert(learned.to_string(), token);
+            }
+        }
         devices.remove(old_id);
         old.stop(); // 未 online 的 stop:仅取消本会话 + Offline 广播(前端未见 Online,无害)
         self.spawn_client_locked(&mut devices, dev);
@@ -165,12 +255,13 @@ impl DeviceClientManager {
             .iter()
             .filter(|(id, c)| {
                 want.get(id.as_str())
-                    .map(|d| c.device().host != d.host || c.device().port != d.port)
+                    .map(|d| !same_address(c.device(), d))
                     .unwrap_or(true)
             })
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale_ids {
+            self.credentials.lock().unwrap().remove(&id);
             if let Some(old) = devices.remove(&id) {
                 old.stop();
             }
@@ -181,7 +272,7 @@ impl DeviceClientManager {
         for d in want.values().copied() {
             match devices.get(&d.id) {
                 // 存活且地址未变:仅昵称变 → 原地更新(连接/端口缓存不动)
-                Some(c) if c.device().host == d.host && c.device().port == d.port => {
+                Some(c) if same_address(c.device(), d) => {
                     if c.nickname().as_deref() != d.nickname.as_deref() {
                         tracing::info!("设备 {} 昵称更新为 {:?}", d.id, d.nickname);
                         c.set_nickname(d.nickname.clone());
@@ -360,6 +451,13 @@ impl DeviceClientManager {
     }
 }
 
+fn same_address(a: &RemoteDevice, b: &RemoteDevice) -> bool {
+    a.host == b.host
+        && a.port == b.port
+        && a.secure_port == b.secure_port
+        && a.verify_http == b.verify_http
+}
+
 /// 组合 opener:本地串口走 core 的 serial,SSH 设备走 SshManager,其余远端键走
 /// DeviceClientManager。后缀整体透传(split 首段路由)——级联(A→B→C)逐层剥段,无特判。
 pub struct CompositeOpener {
@@ -389,6 +487,8 @@ mod tests {
 
     fn dev(id: &str, nickname: Option<&str>) -> RemoteDevice {
         RemoteDevice {
+            secure_port: None,
+            verify_http: false,
             id: id.into(),
             host: "192.0.2.1".into(),
             port: 18700,

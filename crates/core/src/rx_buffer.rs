@@ -45,11 +45,23 @@ impl RxBuffer {
     pub fn drain(&self, timeout_ms: u64) -> Vec<u8> {
         let mut buf = self.buf.lock().unwrap();
         if timeout_ms > 0 && buf.is_empty() {
-            let guard = self
-                .cvar
-                .wait_timeout(buf, Duration::from_millis(timeout_ms))
-                .unwrap_or_else(|e| e.into_inner());
-            buf = guard.0;
+            // wait_timeout 允许虚假唤醒提前返回(std 文档明确)——deadline 循环
+            // 保证空缓冲等满 timeout(否则 serial_read 的超时契约偶发被打破)。
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (guard, wt) = self
+                    .cvar
+                    .wait_timeout(buf, remaining)
+                    .unwrap_or_else(|e| e.into_inner());
+                buf = guard;
+                if !buf.is_empty() || wt.timed_out() {
+                    break;
+                }
+            }
         }
         buf.drain(..).collect()
     }

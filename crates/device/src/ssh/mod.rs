@@ -14,6 +14,7 @@
 //! - 本文件      管理器门面:注册表同步、会话池、open_blocking(CompositeOpener 入口)、
 //!   实例键分配(纯函数)
 
+pub mod files;
 pub mod port_io;
 pub mod session;
 pub mod store;
@@ -108,6 +109,7 @@ impl SshOpenError {
 
 /// SSH 设备管理器。挂在 AppState(跨 ServiceSupervisor 热重启保留)。
 pub struct SshManager {
+    pub files: files::FileStore,
     /// 内存权威注册表(构造时读盘;save/remove 后同步)。
     registry: Mutex<Vec<SshHostRecord>>,
     /// hostId → 会话(懒建;dead 会话在下次 open 时替换)。
@@ -121,6 +123,7 @@ impl SshManager {
     /// 读 ssh_hosts.json 构造(生产组装点)。
     pub fn from_registry() -> Self {
         Self {
+            files: Default::default(),
             registry: Mutex::new(
                 store::load()
                     .into_iter()
@@ -135,6 +138,7 @@ impl SshManager {
     /// 空管理器(测试)。
     pub fn empty() -> Self {
         Self {
+            files: Default::default(),
             registry: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
             instance_aliases: Mutex::new(std::collections::HashMap::new()),
@@ -464,7 +468,8 @@ impl SshManager {
 /// 取空闲而非单调递增:关掉 @2 后再新建复用 @2,避免长期运行序号无界增长
 /// (与 UI 预览的"只增"略有差异——tab 已关即无混淆对象,复用无害)。
 pub fn next_instance_key(host_id: &str, base: &str, occupied_full_keys: &[String]) -> String {
-    let base_key = format!("{host_id}{}{base}", ss_core::PORT_KEY_SEP);
+    let host_prefix = format!("{host_id}{}", ss_core::PORT_KEY_SEP);
+    let base_key = format!("{host_prefix}{base}");
     let taken: HashSet<&str> = occupied_full_keys
         .iter()
         .filter(|k| {
@@ -472,7 +477,7 @@ pub fn next_instance_key(host_id: &str, base: &str, occupied_full_keys: &[String
                 && k.len() > base_key.len()
                 && k.as_bytes()[base_key.len()] == b'@'
         })
-        .map(|k| ss_core::split_port_key(k).1)
+        .filter_map(|k| k.strip_prefix(&host_prefix))
         .collect();
     if !occupied_full_keys.contains(&base_key) {
         return base.to_string();
@@ -516,6 +521,40 @@ mod tests {
     fn next_instance_ignores_other_hosts() {
         let occ = vec![key("h2::shell"), key("h2::shell@2"), key("h::shell")];
         assert_eq!(next_instance_key("h", "shell", &occ), "shell@2");
+    }
+
+    #[test]
+    fn next_instance_cascaded_host_appends_smallest_free() {
+        let occ = vec![
+            key("remote::ssh::shell"),
+            key("remote::ssh::shell@2"),
+            key("remote::ssh::shell@3"),
+        ];
+        assert_eq!(next_instance_key("remote::ssh", "shell", &occ), "shell@4");
+    }
+
+    #[test]
+    fn next_instance_cascaded_host_ignores_other_paths() {
+        let occ = vec![
+            key("remote::ssh::shell"),
+            key("other::ssh::shell@2"),
+            key("remote::other::shell@2"),
+            key("remote::ssh::console@2"),
+        ];
+        assert_eq!(next_instance_key("remote::ssh", "shell", &occ), "shell@2");
+    }
+
+    #[test]
+    fn next_instance_deeply_cascaded_host_reuses_gap() {
+        let occ = vec![
+            key("remote::child::ssh::console"),
+            key("remote::child::ssh::console@2"),
+            key("remote::child::ssh::console@4"),
+        ];
+        assert_eq!(
+            next_instance_key("remote::child::ssh", "console", &occ),
+            "console@3"
+        );
     }
 
     /// open 端点校验:未定义端点 → OpenFailed(注册表语义,不碰网络)。

@@ -4,7 +4,7 @@
  * 解散组/导入/折叠持久化），第三种命名库出现时复制成本会再翻倍——此处收敛为一份实现，
  * 差异（判别、校验、新建默认、加载/持久化通道）全部由 LibrarySpec 注入。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   dissolveGroup,
   isTauri,
@@ -16,6 +16,7 @@ import {
 } from "./lib";
 import { IconAlert, IconTrash } from "./icons";
 import type { Macro, Script } from "./types";
+import { editorLibraryBefore, type NamedLibrarySource } from "./shared-library";
 
 /** 宿主 UI 能力（App 注入：确认弹窗 / 提示横幅 / 错误横幅）。 */
 export interface LibraryUI {
@@ -83,7 +84,7 @@ export function parseImportedItems<T>(
 }
 
 /** 宏/脚本共用的 useNamedLibrary 返回面。 */
-export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<T>, ui: LibraryUI) {
+export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<T>, ui: LibraryUI, source?: NamedLibrarySource<T>) {
   const [items, setItems] = useState<Record<string, T>>({});
   const [editing, setEditing] = useState<{ name: string; isNew: boolean } | null>(null);
   const [editorName, setEditorName] = useState("");
@@ -100,15 +101,83 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     localStorage.setItem(spec.collapsedKey, JSON.stringify([...collapsed]));
   }, [collapsed, spec.collapsedKey]);
 
-  const reload = useCallback(() => {
-    Promise.resolve(spec.load())
-      .then(setItems)
-      .catch((e) => console.error(`加载${spec.label}失败`, e));
-  }, [spec]);
-  // 挂载加载一次（脚本库后续由 scriptsChanged 广播触发 reload，宏库无此通道）
+  const sourceRef = useRef(source);
+  const specRef = useRef(spec);
+  const uiRef = useRef(ui);
+  const scopeRef = useRef(source?.scope);
+  const request = useRef(0);
+  const loaded = useRef(false);
+  const active = useRef(true);
+  const serverId = useRef<string | null>(null);
+  sourceRef.current = source;
+  specRef.current = spec;
+  uiRef.current = ui;
+  if (scopeRef.current !== source?.scope) {
+    scopeRef.current = source?.scope;
+    request.current++;
+    loaded.current = false;
+    serverId.current = null;
+  }
+
+  const reload = useCallback(async () => {
+    const number = ++request.current;
+    loaded.current = false;
+    const adapter = sourceRef.current;
+    try {
+      const result = adapter ? await adapter.load() : { items: await specRef.current.load(), serverId: "legacy" };
+      if (!active.current || number !== request.current || adapter !== sourceRef.current) return;
+      if (serverId.current && serverId.current !== result.serverId) setEditing(null);
+      serverId.current = result.serverId;
+      loaded.current = true;
+      setItems(result.items);
+    } catch (error) {
+      if (!active.current || number !== request.current || adapter !== sourceRef.current) return;
+      loaded.current = false;
+      uiRef.current.error(`加载${specRef.current.label}失败：${String(error instanceof Error ? error.message : error)}`);
+    }
+  }, []);
   useEffect(() => {
-    reload();
-  }, [reload]);
+    active.current = true;
+    loaded.current = false;
+    serverId.current = null;
+    setItems({});
+    setEditing(null);
+    setEditorError("");
+    if (!sourceRef.current) void reload();
+    return () => { active.current = false; request.current++; loaded.current = false; };
+  }, [source?.scope, reload]);
+
+  const commit = async (next: Record<string, T>, before = items): Promise<boolean> => {
+    const adapter = sourceRef.current;
+    if (!active.current || !loaded.current || adapter?.scope !== source?.scope) {
+      ui.error("库尚未加载或连接已切换，请连接服务并重新打开编辑器");
+      return false;
+    }
+    const scope = request.current;
+    const owner = serverId.current;
+    try {
+      const saved = adapter ? await adapter.persist(next, before) : (await spec.persist(next), { items: next, serverId: "legacy" });
+      if (!active.current || adapter !== sourceRef.current || scopeRef.current !== source?.scope) return false;
+      if (owner !== saved.serverId) {
+        loaded.current = false;
+        setEditing(null);
+        ui.error("服务身份已变化，请重新加载后重试");
+        void reload();
+        return false;
+      }
+      request.current++;
+      setItems(saved.items);
+      void reload();
+      return true;
+    } catch (error) {
+      if (!active.current || adapter !== sourceRef.current || scopeRef.current !== source?.scope) return false;
+      const message = `保存${spec.label}失败：${String(error instanceof Error ? error.message : error)}`;
+      setEditorError(message);
+      ui.error(message);
+      if (scope === request.current) void reload();
+      return false;
+    }
+  };
 
   const openEditor = (name: string | null) => {
     if (name && items[name]) {
@@ -162,9 +231,8 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       setEditorError(`已存在同名${spec.label}`);
       return;
     }
-    setItems(next);
-    await spec.persist(next);
-    setEditing(null);
+    const before = editorLibraryBefore(items, oldKey, editorInitial.item);
+    if (await commit(next, before)) setEditing(null);
   };
 
   const askDelete = (name: string) => {
@@ -177,9 +245,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       onConfirm: async () => {
         const next = { ...items };
         delete next[name];
-        setItems(next);
-        await spec.persist(next);
-        setEditing(null);
+        if (await commit(next)) setEditing(null);
       },
     });
   };
@@ -189,9 +255,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
     if (!trimmed) return; // 空名忽略（防误解散；解散走 askDissolve）
     const merged = trimmed !== oldName && Object.values(items).some((m) => m.group === trimmed);
     const next = renameGroup(items, oldName, trimmed);
-    setItems(next);
-    // 折叠态同步:旧组名 → 新组名(保留折叠)。须在 await 前——React 18 在 await 处断批,
-    // 否则折叠的组会先按新名展开、再折回,闪一帧。
+    if (!await commit(next)) return;
     setCollapsed((prev) => {
       if (!prev.has(oldName)) return prev;
       const n = new Set(prev);
@@ -199,7 +263,6 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       n.add(trimmed);
       return n;
     });
-    await spec.persist(next);
     if (merged) ui.notify(`已合并到组「${trimmed}」`, 4000);
   };
 
@@ -213,14 +276,13 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
       tone: "danger",
       onConfirm: async () => {
         const { next } = dissolveGroup(items, name);
-        setItems(next);
+        if (!await commit(next)) return;
         setCollapsed((prev) => {
           if (!prev.has(name)) return prev;
           const n = new Set(prev);
           n.delete(name);
           return n;
         });
-        await spec.persist(next);
       },
     });
   };
@@ -249,8 +311,7 @@ export function useNamedLibrary<T extends { group?: string }>(spec: LibrarySpec<
         added++;
       }
       if (added > 0) {
-        setItems(next);
-        await spec.persist(next);
+        if (!await commit(next)) return;
       }
       ui.notify(`导入完成：新增 ${added} 个${skipped ? `，跳过 ${skipped} 个（重名或无效）` : ""}。`, 5000);
     } catch (err) {

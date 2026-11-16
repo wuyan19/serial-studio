@@ -4,9 +4,10 @@
  * TermView 订阅变化，改 term.options.fontSize 并 fit() 重排。
  */
 const KEY = "serial-studio-fontsize";
-export const FONT_DEFAULT = 13;
-const MIN = 6;
-const MAX = 48;
+export const FONT_DEFAULT = 15;
+/** 字号允许范围（设置页输入框 min/max 同源）。 */
+export const FONT_MIN = 6;
+export const FONT_MAX = 48;
 
 type Listener = (n: number) => void;
 const listeners = new Set<Listener>();
@@ -16,7 +17,7 @@ function load(): number {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const n = parseInt(raw, 10);
-      if (!Number.isNaN(n)) return Math.min(MAX, Math.max(MIN, n));
+      if (!Number.isNaN(n)) return Math.min(FONT_MAX, Math.max(FONT_MIN, n));
     }
   } catch {
     /* ignore */
@@ -26,8 +27,15 @@ function load(): number {
 
 let current = load();
 
+function syncUiFont(n: number) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty("--ui-font-size", `${Math.min(20, Math.max(12, n))}px`);
+}
+
+syncUiFont(current);
+
 function clamp(n: number): number {
-  return Math.min(MAX, Math.max(MIN, Math.round(n)));
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(n)));
 }
 
 export function getFontSize(): number {
@@ -35,9 +43,11 @@ export function getFontSize(): number {
 }
 
 export function setFontSize(n: number) {
+  if (!Number.isFinite(n)) return;
   const c = clamp(n);
   if (c === current) return;
   current = c;
+  syncUiFont(current);
   try {
     localStorage.setItem(KEY, String(current));
   } catch {
