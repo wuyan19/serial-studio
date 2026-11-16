@@ -158,7 +158,14 @@ impl DeviceClientManager {
     pub(crate) async fn connect_files(&self, id: &str) -> Result<client::WsStream, String> {
         let dev = self.remote(id).ok_or("远程设备未注册")?;
         let token = self.credential(&dev);
-        client::connect_device(&dev, token.as_deref(), false).await
+        // 对齐重连循环的 CONNECT_TIMEOUT:裸 connect 在 Windows/mio 下对死端口
+        // 可能永不完成(见 unreachable_relay 测试注释),不包超时会挂到 execute 的 30s。
+        tokio::time::timeout(
+            client::CONNECT_TIMEOUT,
+            client::connect_device(&dev, token.as_deref(), false),
+        )
+        .await
+        .map_err(|_| "远程设备连接超时".to_string())?
     }
 
     /// self-weak 注入:Arc 包装后由装配处调一次(create_state / 测试 boot)。

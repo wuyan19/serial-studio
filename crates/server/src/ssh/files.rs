@@ -1254,6 +1254,11 @@ mod tests {
         assert_eq!(state.ssh.files.slots.available_permits(), 32);
         server.abort();
     }
+    // Windows 隔离:tokio 1.53/mio 1.2.2 下连死端口(内核 3ms 即 RST)的
+    // TcpStream::connect future 永不完成——裸 tokio 最小用例可复现,与本仓库
+    // 代码无关。本测试"立即拒绝快速返回"的前提在 Windows 不成立(有
+    // connect_files 的 CONNECT_TIMEOUT 兜底,不再挂死,只是快不起来)。
+    #[cfg_attr(windows, ignore = "tokio/mio on Windows: dead-port connect never completes")]
     #[tokio::test]
     async fn unreachable_relay_returns_without_waiting_for_session_timeout() {
         let state = isolated_state();

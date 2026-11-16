@@ -32,7 +32,7 @@ use super::{DeviceCommand, DeviceEvent};
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 const DEAD_AFTER: Duration = Duration::from_secs(20);
 /// 连接超时(含 TCP + WS 握手)。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// open/set_alias 回执等待。
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// writer 单次发送超时(背压/半开防护):超时视为断连。
