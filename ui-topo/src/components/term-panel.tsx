@@ -14,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   api,
   channelPortKey,
@@ -69,8 +70,9 @@ interface Tab {
 
 const TermPanel = forwardRef<
   TermPanelHandle,
-  { sshHosts: SshHost[]; openSshManager: () => void }
->(function TermPanel({ sshHosts, openSshManager }, ref) {
+  { sshHosts: SshHost[] }
+>(function TermPanel({ sshHosts }, ref) {
+  const navigate = useNavigate();
   const [layout, setLayout] = useState<PanelLayout>(loadLayout);
   const [devices, setDevices] = useState<Device[]>([]);
   const [ports, setPorts] = useState<PortView[]>([]);
@@ -265,23 +267,48 @@ const TermPanel = forwardRef<
     setLayout((l) => ({ ...l, width: Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, l.width + delta)) }));
   };
 
-  /** SSH 认证闭环：重输密码。协议无"仅本次密码"通道——勾选更新（默认）落库后
-   *  重开必成；不勾选则按旧记录重试（旧密码错时会再弹本框，用户自然勾上）。 */
+  /** SSH 认证闭环：重输密码。勾选更新（默认）= 写回属主设备的 SSH 通道
+   *  （devices.json 是唯一真源；凭据库 ssh.json 是设备保存时的投影，直写会被
+   *  下次投影覆盖——旧 SSH 管理弹窗的直写路径已随其退役）。写回后再重开。 */
   const retryWithPassword = (password: string, updateSaved: boolean) => {
     const fail = sshFail;
     setSshFail(null);
     if (!fail?.host) return;
-    if (updateSaved) {
-      ws.sshSave(
-        sshHosts.map((h) =>
-          h.id === fail.host!.id ? { ...h, auth: { type: "password", password } } : h,
-        ),
-      );
+    const reopen = () => {
+      const p =
+        ports.find((x) => x.name === fail.port) ??
+        ({ name: fail.port, opened: false, holders: 0 } as PortView);
+      void openPort(p);
+    };
+    if (!updateSaved) {
+      reopen();
+      return;
     }
-    const p =
-      ports.find((x) => x.name === fail.port) ??
-      ({ name: fail.port, opened: false, holders: 0 } as PortView);
-    void openPort(p);
+    void (async () => {
+      try {
+        const devices = await api.devices();
+        const dev = devices.find((d) =>
+          d.channels.some((c) => c.type === "ssh" && c.id === fail.host!.id),
+        );
+        if (!dev) {
+          setLastError("未找到该 SSH 通道的属主设备，请在设备页更新认证");
+          return;
+        }
+        await api.updateDevice(dev.id, {
+          name: dev.name,
+          model: dev.model,
+          location: dev.location,
+          channels: dev.channels.map((c) =>
+            c.type === "ssh" && c.id === fail.host!.id
+              ? { ...c, auth: { type: "password", password } }
+              : c,
+          ),
+        });
+        reopen();
+      } catch (e) {
+        setLastError(`保存认证失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    })();
   };
 
   const trustAndReopen = () => {
@@ -517,8 +544,9 @@ const TermPanel = forwardRef<
             host={sshFail.host}
             onRetryPassword={retryWithPassword}
             onEdit={() => {
+              // SSH 配置(用户名/密钥/主机)归设备编辑页管——凭据库只是投影
               setSshFail(null);
-              openSshManager();
+              navigate("/devices");
             }}
             onCancel={() => setSshFail(null)}
           />

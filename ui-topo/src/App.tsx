@@ -1,29 +1,21 @@
-/** 应用壳：左侧导航 + 顶栏全局入口（主题切换/SSH 设备/添加远端/设置/关于）+ 右侧终端面板。
- * 全局对话框（设置/关于/SSH 管理/添加远端）在此挂载，页面经 context 请求打开。
- * WS 数据面连接随壳启动（单例，终端面板/设备页/SSH 管理共用）。 */
+/** 应用壳：左侧导航 + 侧栏工具入口（主题切换/添加远端/设置/关于）+ 右侧终端面板。
+ * 全局对话框（设置/关于/添加远端）在此挂载，页面经 context 请求打开。
+ * WS 数据面连接随壳启动（单例，终端面板/设备页共用）。 */
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
 import { getTheme, setTheme, subscribe, THEMES, type Theme } from "./theme";
-import {
-  AboutDialog,
-  ConfirmDialog,
-  RemoteDialog,
-  SettingsPanel,
-  SshManagerDialog,
-} from "./components/dialogs";
+import { AboutDialog, RemoteDialog, SettingsPanel } from "./components/dialogs";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
 import { IconGear, IconGlobe, IconInfo, IconLock, IconPlug, IconTopology } from "./icons";
 import type { SshHost } from "./types";
 
-type DialogKind = null | "settings" | "about" | "ssh" | "remote";
+type DialogKind = null | "settings" | "about" | "remote";
 
 interface ShellCtx {
   openDialog: (k: Exclude<DialogKind, null>) => void;
   sshHosts: SshHost[];
-  /** 更新单台 SSH 设备（认证闭环重输密码后改记录）并打开管理弹窗。 */
-  editSsh: (host: SshHost) => void;
   /** 直达开终端（面板随之展开）；面板宿主在壳层，切页不丢会话。 */
   openTerminal: (key: string) => void;
   toggleTermPanel: () => void;
@@ -32,7 +24,6 @@ interface ShellCtx {
 export const ShellContext = createContext<ShellCtx>({
   openDialog: () => {},
   sshHosts: [],
-  editSsh: () => {},
   openTerminal: () => {},
   toggleTermPanel: () => {},
 });
@@ -48,12 +39,10 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
-  const [sshTests, setSshTests] = useState<Record<string, "testing" | "ok" | "fail">>({});
   const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [version, setVersion] = useState("");
   const [remoteInput, setRemoteInput] = useState({ host: "", port: 18700, nickname: "" });
   const [existingRemotes, setExistingRemotes] = useState<string[]>([]);
-  const [deleteSsh, setDeleteSsh] = useState<SshHost | null>(null);
   const [connUp, setConnUp] = useState(true);
   const termPanel = useRef<TermPanelHandle>(null);
 
@@ -61,15 +50,11 @@ export default function App() {
   useEffect(() => {
     ws.start();
     const offHosts = ws.on("sshHosts", (hosts) => setSshHosts(hosts));
-    const offTest = ws.on("sshTestResult", (id, ok) =>
-      setSshTests((t) => ({ ...t, [id]: ok ? "ok" : "fail" })),
-    );
     // 连接状态灯：数据面断连时全站可见（此前只有终端页有提示）
     const offConn = ws.on("connected", setConnUp);
     void ws.version().then((v) => setVersion(v.version)).catch(() => {});
     return () => {
       offHosts();
-      offTest();
       offConn();
     };
   }, []);
@@ -87,22 +72,6 @@ export default function App() {
     }
   }, []);
 
-  /** SSH 设备保存（全量表覆盖协议）。新建设备生成 UUID。 */
-  const commitSsh = (host: SshHost, isNew: boolean) => {
-    const next = isNew
-      ? [...sshHosts, { ...host, id: crypto.randomUUID() }]
-      : sshHosts.map((h) => (h.id === host.id ? host : h));
-    ws.sshSave(next);
-  };
-
-  /** 认证闭环的直达编辑：更新单台记录（如新密码）落库后打开管理弹窗。 */
-  const editSsh = (host: SshHost) => {
-    if (sshHosts.some((h) => h.id === host.id)) {
-      ws.sshSave(sshHosts.map((h) => (h.id === host.id ? host : h)));
-    }
-    setDialog("ssh");
-  };
-
   const openTerminal = useCallback((key: string) => {
     termPanel.current?.openByKey(key);
   }, []);
@@ -112,7 +81,7 @@ export default function App() {
 
   return (
     <ShellContext.Provider
-      value={{ openDialog, sshHosts, editSsh, openTerminal, toggleTermPanel }}
+      value={{ openDialog, sshHosts, openTerminal, toggleTermPanel }}
     >
       <div className="shell">
         <aside className="sidebar">
@@ -162,7 +131,7 @@ export default function App() {
         <main className="content">
           <Outlet />
         </main>
-        <TermPanel ref={termPanel} sshHosts={sshHosts} openSshManager={() => openDialog("ssh")} />
+        <TermPanel ref={termPanel} sshHosts={sshHosts} />
       </div>
 
       {dialog === "settings" && (
@@ -178,19 +147,6 @@ export default function App() {
         />
       )}
       {dialog === "about" && <AboutDialog version={version} onClose={() => setDialog(null)} />}
-      {dialog === "ssh" && (
-        <SshManagerDialog
-          hosts={sshHosts}
-          testOf={(id) => sshTests[id]}
-          onCommit={commitSsh}
-          onDelete={(h) => setDeleteSsh(h)}
-          onTest={(id) => {
-            setSshTests((t) => ({ ...t, [id]: "testing" }));
-            ws.sshTest(id);
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
       {dialog === "remote" && (
         <RemoteDialog
           input={remoteInput}
@@ -218,19 +174,6 @@ export default function App() {
               .catch(() => {});
           }}
           onCancel={() => setDialog(null)}
-        />
-      )}
-      {deleteSsh && (
-        <ConfirmDialog
-          title="删除 SSH 设备"
-          tone="danger"
-          confirmText="删除"
-          message={`删除「${deleteSsh.nickname || `${deleteSsh.username}@${deleteSsh.host}`}」？其活跃会话将被终结。`}
-          onConfirm={() => {
-            ws.sshSave(sshHosts.filter((h) => h.id !== deleteSsh.id));
-            setDeleteSsh(null);
-          }}
-          onCancel={() => setDeleteSsh(null)}
         />
       )}
     </ShellContext.Provider>
