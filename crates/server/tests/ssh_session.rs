@@ -173,11 +173,20 @@ async fn trust(mgr: &SshManager, host_id: &str) {
     assert!(fp.starts_with("SHA256:"), "指纹形态: {fp}");
 }
 
-#[tokio::test]
-async fn concurrent_first_open_keeps_shell_usable() {
+/// 并行测试共享同一配置目录:set_var 是进程级的,各测试各设各的路径会让
+/// trust/open/ssh_save 随机落到别的测试目录(本地多核下 set_var 风暴在开头
+/// 瞬间完成而侥幸;CI 2 核测试错峰启动,必现交错→指纹"丢失")。
+/// known_hosts/ssh_hosts 按 host:port / 设备 id 键控且测试各用随机端口,
+/// 共享目录互不冲突;mcp.rs 单测同范式。
+fn ensure_test_config_dir() {
     let dir = std::env::temp_dir().join(format!("ss-ssh-test-{}", std::process::id()));
     std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
     std::fs::create_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_first_open_keeps_shell_usable() {
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
@@ -219,9 +228,7 @@ async fn concurrent_first_open_keeps_shell_usable() {
 /// 多实例：shell 与 shell@2 两条独立 PTY,各写各读互不串流。
 #[tokio::test]
 async fn multiple_instances_isolated() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-multi-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
@@ -262,9 +269,7 @@ async fn multiple_instances_isolated() {
 /// 重信任(新 host:port 首连)后重开走第二台服务器。
 #[tokio::test]
 async fn update_registry_kills_changed_session() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-regsync-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host1, port1) = spawn_echo_ssh_server().await;
     let (host2, port2) = spawn_echo_ssh_server().await;
@@ -327,9 +332,7 @@ async fn update_registry_kills_changed_session() {
 /// 密码错误：open 回执带认证失败信息（不 panic,错误进 SerialError::OpenFailed）。
 #[tokio::test]
 async fn wrong_password_reports_auth_failure() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-auth-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mut rec = record("sshdev3", &host, port);
@@ -371,9 +374,7 @@ async fn wrong_password_reports_auth_failure() {
 /// resize 走通(回显服务器忽略 window_change;不崩即算过)。
 #[tokio::test]
 async fn resize_is_idempotent_noop() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-resize-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     let (host, port) = spawn_echo_ssh_server().await;
     let mgr = Arc::new(SshManager::empty());
@@ -421,6 +422,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// 起 server(空设备表 + 真 SshManager,无 opener 需要——SSH 动作不触 open)。
 /// 返回 (ws_url, ssh 管理器)——测试驱动注册表/别名。
 async fn boot_ws() -> (String, Arc<SshManager>) {
+    ensure_test_config_dir();
     let event_bus = Arc::new(EventBus::new(64));
     let manager = Arc::new(SerialManager::new(
         event_bus.clone(),
@@ -771,9 +773,7 @@ async fn ssh_nickname_resolves_in_addressing() {
 /// 同端口换 key:先 abort 旧 server 任务,再用新 key 在同端口起新 server。
 #[tokio::test]
 async fn host_key_lifecycle_unknown_then_changed() {
-    let dir = std::env::temp_dir().join(format!("ss-ssh-test-hk-{}", std::process::id()));
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
 
     // 起第一台(随机端口,key1,可中止——第三步同端口换 key 需要)
     let (host, port, server1) = spawn_echo_ssh_server_abortable().await;
@@ -950,10 +950,7 @@ async fn ws_ssh_test_preserves_confirmation_errors_without_opening_channels() {
         .unwrap()
     }
 
-    let dir = std::env::temp_dir().join(format!("ss-ssh-probe-{}", uuid::Uuid::new_v4()));
-    let previous = std::env::var_os("SERIAL_STUDIO_CONFIG_DIR");
-    std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    ensure_test_config_dir();
     let channels = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1001,9 +998,4 @@ async fn ws_ssh_test_preserves_confirmation_errors_without_opening_channels() {
     assert_eq!(channels.load(Ordering::SeqCst), 0);
     ws.close(None).await.unwrap();
     ssh_server.abort();
-    match previous {
-        Some(value) => std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", value),
-        None => std::env::remove_var("SERIAL_STUDIO_CONFIG_DIR"),
-    }
-    std::fs::remove_dir_all(dir).unwrap();
 }
