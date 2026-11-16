@@ -1,0 +1,36 @@
+name: CI
+
+# push(main)/PR 的测试验证——release.yml 只构建不测试,此前任何提交的
+# cargo test 从未被 CI 跑过(v0.21.0 发版时才发现两个 Windows 环境失败
+# 已潜伏多版)。本工作流补上这层:含 windows 矩阵(唯一曾暴露问题的平台)。
+# 只测 ss-core/ss-server(本地实测全套 ~10s);tauri-app 依赖前端产物,
+# 由 release 构建覆盖,不进测试矩阵。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ci-${{ matrix.os }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Run tests
+        run: cargo test -p ss-core -p ss-server --no-fail-fast
