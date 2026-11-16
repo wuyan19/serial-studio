@@ -156,9 +156,13 @@ claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mc
 
 ## 🔒 安全提示
 
-服务默认监听 `0.0.0.0` 且**无鉴权**。任何能访问到端口的人都能打开 / 发送数据到你的串口，
+服务默认监听 `0.0.0.0` 且**默认无鉴权**。任何能访问到端口的人都能打开 / 发送数据到你的串口，
 并读取其输出。超出可信局域网的范围时，请在 `settings.json` 改绑 `127.0.0.1`，或置于
 防火墙 / VPN 之后。
+
+**远程访问验证**（设置 → 远程访问验证，默认关闭）可为指定连接启用保护：远端客户端须输入
+轮换一次性验证码（默认 5 分钟刷新）才能访问受保护连接；HTTPS 默认启用，明文 HTTP 需显式
+允许；受保护连接禁止经 Telnet 与 MCP 访问，脚本库 / 共享库在保护模式下仅限本机编辑。
 
 远程 JS 脚本执行（WS `run_script` / MCP `serial_debug_script`、`serial_run_script`）受
 `settings.json` 的 `enable_scripting` 开关控制，**默认关闭**。开启后任何可达客户端都能对

@@ -167,9 +167,15 @@ board straight through MCP).
 
 ## 🔒 Security note
 
-The server binds `0.0.0.0` by default and carries **no authentication**. Anyone who can reach
-the port can open / send to your serial ports and read their output. Bind to `127.0.0.1` in
-`settings.json`, or sit behind a firewall / VPN, for anything beyond a trusted LAN.
+The server binds `0.0.0.0` by default and carries **no authentication by default**. Anyone who
+can reach the port can open / send to your serial ports and read their output. Bind to `127.0.0.1`
+in `settings.json`, or sit behind a firewall / VPN, for anything beyond a trusted LAN.
+
+**Remote access verification** (Settings → Remote access, off by default) protects selected
+connections: remote clients must enter a rotating one-time code (refreshed every 5 minutes by
+default) before opening them. HTTPS is on by default with explicit opt-in for plain HTTP;
+protected connections reject Telnet and MCP access, and the script / shared libraries become
+local-edit-only while protection is on.
 
 Remote JS scripting (WS `run_script` / MCP `serial_debug_script` + `serial_run_script`) is gated by `enable_scripting`
 in `settings.json`, **off by default**. When enabled, any reachable client can execute JS
