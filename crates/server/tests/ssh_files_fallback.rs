@@ -208,6 +208,7 @@ async fn spawn(
     });
     (
         SshHostRecord {
+            allow_legacy_mac: false,
             id: format!("fixture-{port}"),
             host: "127.0.0.1".into(),
             port,

@@ -838,6 +838,7 @@ function SshHostForm({
     initial?.auth.type === "key" ? initial.auth.keyPath : "~/.ssh/id_ed25519",
   );
   const [password, setPassword] = useState("");
+  const [allowLegacyMac, setAllowLegacyMac] = useState(initial?.allowLegacyMac ?? false);
   // 编辑且原认证为密码时才有已存密码；切到密码方式且无存货则必须输入
   const savedPassword = initial?.auth.type === "password" ? initial.auth.password : "";
   const others = existing.filter((h) => h.id !== initial?.id);
@@ -864,6 +865,7 @@ function SshHostForm({
       username: username.trim(),
       nickname: nickname.trim() || undefined,
       auth,
+      allowLegacyMac: allowLegacyMac || undefined,
       // 端点不随设备表单编辑（v1 只读）；编辑保留原值，新建给默认
       endpoints: initial?.endpoints ?? [{ name: "shell", type: "shell" }],
     });
@@ -971,6 +973,10 @@ function SshHostForm({
             <p className="dialog__hint">密码以明文保存，请确保存储位置受控。</p>
           </>
         )}
+        <label className="dlg-settings__check">
+          <input type="checkbox" checked={allowLegacyMac} onChange={(event) => setAllowLegacyMac(event.target.checked)} />
+          允许旧版 MAC（hmac-sha1）
+        </label>
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
             已存在相同设备 {username.trim()}@{host.trim()}:{port}，无需重复添加。

@@ -46,6 +46,12 @@ pub struct SshHostRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     pub auth: SshAuthRecord,
+    #[serde(
+        default,
+        rename = "allowLegacyMac",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub allow_legacy_mac: bool,
     #[serde(default)]
     pub endpoints: Vec<SshEndpointRecord>,
 }
@@ -160,6 +166,7 @@ mod tests {
 
     fn rec(id: &str, host: &str, auth: SshAuthRecord) -> SshHostRecord {
         SshHostRecord {
+            allow_legacy_mac: false,
             id: id.into(),
             host: host.into(),
             port: 22,
@@ -184,6 +191,26 @@ mod tests {
         assert_eq!(r.endpoints[0].alias.as_deref(), Some("控制台"));
         let back = serde_json::to_string(&r).unwrap();
         assert!(back.contains("\"keyPath\""), "序列化保持 camelCase: {back}");
+    }
+
+    #[test]
+    fn legacy_mac_is_opt_in_and_round_trips() {
+        let mut record = rec("legacy", "example.test", SshAuthRecord::Agent);
+        let saved = serde_json::to_value(&record).unwrap();
+        assert!(saved.get("allowLegacyMac").is_none());
+        assert!(
+            !serde_json::from_value::<SshHostRecord>(saved)
+                .unwrap()
+                .allow_legacy_mac
+        );
+        record.allow_legacy_mac = true;
+        let saved = serde_json::to_value(&record).unwrap();
+        assert_eq!(saved["allowLegacyMac"], true);
+        assert!(
+            serde_json::from_value::<SshHostRecord>(saved)
+                .unwrap()
+                .allow_legacy_mac
+        );
     }
 
     #[test]

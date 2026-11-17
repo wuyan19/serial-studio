@@ -192,6 +192,7 @@ export interface SshHost {
   /** 可选昵称；空则 UI 回退 user@host。 */
   nickname?: string;
   auth: SshAuth;
+  allowLegacyMac?: boolean;
   /** 端点列表（至少含 shell；空缺兜底在 server 侧 ensure_default_endpoints）。 */
   endpoints: SshEndpoint[];
 }

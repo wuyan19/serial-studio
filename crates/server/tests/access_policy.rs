@@ -188,6 +188,7 @@ impl Fixture {
 
 fn ssh_host(id: &str, alias: Option<&str>) -> SshHostRecord {
     SshHostRecord {
+        allow_legacy_mac: false,
         id: id.into(),
         nickname: None,
         host: "127.0.0.1".into(),
