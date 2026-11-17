@@ -562,6 +562,7 @@ mod tests {
     fn open_unknown_endpoint_rejected() {
         let m = SshManager::empty();
         m.update_registry(vec![SshHostRecord {
+            allow_legacy_mac: false,
             id: "h1".into(),
             host: "192.0.2.1".into(),
             port: 22,

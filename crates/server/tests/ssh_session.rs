@@ -91,7 +91,13 @@ async fn spawn_echo_ssh_server() -> (String, u16) {
 
 /// 可中止版:指纹变更测试需要停掉旧 server 再于同端口起新 key 的 server。
 async fn spawn_echo_ssh_server_abortable() -> (String, u16, tokio::task::AbortHandle) {
-    let config = Arc::new(server_config());
+    spawn_echo_ssh_server_with_config(server_config()).await
+}
+
+async fn spawn_echo_ssh_server_with_config(
+    config: server::Config,
+) -> (String, u16, tokio::task::AbortHandle) {
+    let config = Arc::new(config);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
@@ -125,6 +131,7 @@ fn server_config() -> server::Config {
 
 fn record(id: &str, host: &str, port: u16) -> SshHostRecord {
     SshHostRecord {
+        allow_legacy_mac: false,
         id: id.into(),
         host: host.into(),
         port,
@@ -182,6 +189,47 @@ fn ensure_test_config_dir() {
     let dir = std::env::temp_dir().join(format!("ss-ssh-test-{}", std::process::id()));
     std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
     std::fs::create_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn sha1_only_server_requires_per_host_compatibility() {
+    use ssh::SshOpenError;
+
+    ensure_test_config_dir();
+    let mut config = server_config();
+    // A non-AEAD cipher makes the handshake negotiate a separate MAC.
+    config.preferred.cipher = vec![russh::cipher::AES_128_CTR].into();
+    config.preferred.mac = vec![russh::mac::HMAC_SHA1].into();
+    let (host, port, server) = spawn_echo_ssh_server_with_config(config).await;
+    let mut device = record("legacy-mac", &host, port);
+
+    let error = ssh::session::test_connection(device.clone())
+        .await
+        .unwrap_err();
+    assert!(error.message().contains("No common Mac algorithm"));
+    assert!(error.message().contains("允许旧版 MAC"));
+
+    device.allow_legacy_mac = true;
+    assert!(matches!(
+        ssh::session::test_connection(device.clone()).await,
+        Err(SshOpenError::HostKeyUnknown { .. })
+    ));
+    let manager = Arc::new(SshManager::empty());
+    manager.update_registry(vec![device.clone()]);
+    trust(&manager, &device.id).await;
+    ssh::session::test_connection(device).await.unwrap();
+    let echoed = tokio::task::spawn_blocking(move || {
+        let mut io = manager
+            .open_blocking("legacy-mac", "shell", &SerialConfig::default())
+            .unwrap();
+        let input = b"legacy-mac\n";
+        io.write_all(input).unwrap();
+        read_until(&mut io, input.len(), Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(echoed, b"legacy-mac\n");
+    server.abort();
 }
 
 #[tokio::test]
@@ -710,6 +758,7 @@ async fn ssh_nickname_resolves_in_addressing() {
     ));
     let ssh = Arc::new(SshManager::empty());
     ssh.update_registry(vec![SshHostRecord {
+        allow_legacy_mac: false,
         id: "uuid-ssh-1".into(),
         host: "192.0.2.60".into(),
         port: 22,

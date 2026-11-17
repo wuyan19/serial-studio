@@ -126,6 +126,17 @@ fn key_type_of(pk: &PublicKeyOrCertificate) -> String {
     alg.as_str().to_string()
 }
 
+fn client_config(record: &SshHostRecord) -> Arc<client::Config> {
+    let mut config = client::Config {
+        inactivity_timeout: None,
+        ..Default::default()
+    };
+    if record.allow_legacy_mac {
+        config.preferred.mac.to_mut().push(russh::mac::HMAC_SHA1);
+    }
+    Arc::new(config)
+}
+
 /// 信任并记录服务器指纹(确认弹窗的"信任并连接"):无锁定直连一次,记录即断。
 /// 只做 KEX 阶段的 host key 交换,不认证、不开通道。返回指纹供回显。
 pub fn trust_host_key(record: SshHostRecord) -> Result<String, String> {
@@ -133,10 +144,7 @@ pub fn trust_host_key(record: SshHostRecord) -> Result<String, String> {
     let rt = tokio::runtime::Handle::try_current()
         .map_err(|_| "无 tokio 运行时(内部错误)".to_string())?;
     rt.block_on(async {
-        let config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            ..<_>::default()
-        });
+        let config = client_config(&record);
         let checker = TrustAndRecordChecker {
             seen: Arc::clone(&seen),
         };
@@ -238,10 +246,7 @@ pub(crate) async fn connect_and_auth(
 ) -> Result<Handle<HostKeyChecker>, SshOpenError> {
     let classified = Arc::new(std::sync::Mutex::new(None));
     let r = tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            ..<_>::default()
-        });
+        let config = client_config(record);
         let checker = HostKeyChecker {
             host: record.host.clone(),
             port: record.port,
@@ -249,9 +254,21 @@ pub(crate) async fn connect_and_auth(
         };
         let mut handle = client::connect(config, (record.host.as_str(), record.port), checker)
             .await
-            .map_err(|e| {
+            .map_err(|error| {
+                let hint = match &error {
+                    russh::Error::NoCommonAlgo {
+                        kind: russh::AlgorithmKind::Mac,
+                        theirs,
+                        ..
+                    } if !record.allow_legacy_mac
+                        && theirs.iter().any(|mac| mac == "hmac-sha1") =>
+                    {
+                        "。可在此 SSH 设备的编辑页面开启「允许旧版 MAC（hmac-sha1）」后重试。"
+                    }
+                    _ => "",
+                };
                 SshOpenError::into_freeform(format!(
-                    "连接 {}:{} 失败: {e}",
+                    "连接 {}:{} 失败: {error}{hint}",
                     record.host, record.port
                 ))
             })?;

@@ -1355,6 +1355,7 @@ mod ssh_display_tests {
         let m = SshManager::empty();
         m.update_registry(vec![
             SshHostRecord {
+                allow_legacy_mac: false,
                 id: "ssh-x1".into(),
                 host: "192.0.2.70".into(),
                 port: 22,
@@ -1370,6 +1371,7 @@ mod ssh_display_tests {
                 }],
             },
             SshHostRecord {
+                allow_legacy_mac: false,
                 id: "ssh-x2".into(),
                 host: "192.0.2.71".into(),
                 port: 22,
