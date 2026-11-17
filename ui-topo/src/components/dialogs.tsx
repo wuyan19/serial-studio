@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconAlert, IconCopy, IconGlobe, IconInfo, IconPlug, IconSsh } from "../icons";
 import { ConfigRow, useDialogA11y, useDialogKeys, useEscClose } from "../primitives";
-import { BAUD_RATES, copyText, REPO_URL } from "../lib";
+import { BAUD_RATES, copyText } from "../lib";
 import type { SerialConfig, SshHost, SshOpenError } from "../types";
 import type { PortView } from "../api";
 
@@ -149,40 +149,6 @@ export function SerialConfigDialog({
 }
 
 // ===== 关于 =====
-
-export function AboutDialog({ version, onClose }: { version: string; onClose: () => void }) {
-  useEscClose(onClose);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
-  return (
-    <div className="dialog-overlay" onMouseDown={(e) => overlayClose(e, onClose)}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="关于 topo-hub" className="dialog dialog--narrow" onClick={(e) => e.stopPropagation()}>
-        <div className="about">
-          <div className="about__mark">
-            <IconPlug />
-          </div>
-          <h3 className="about__name">topo-hub</h3>
-          <p className="about__version">版本 {version || "…"}</p>
-          <p className="about__tagline">
-            AI 设备调试的拓扑管理平台
-            <br />
-            拓扑 / 设备 / 租约 · 终端面板 · MCP & WebSocket
-            <br />
-            MCP Url http://IP:PORT/mcp
-          </p>
-          <p className="about__repo">
-            <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
-              {REPO_URL}
-            </a>
-          </p>
-          <button className="btn btn--primary" onClick={onClose}>
-            关闭
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ===== 添加远程设备 =====
 

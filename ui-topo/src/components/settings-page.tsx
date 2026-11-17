@@ -9,7 +9,7 @@ import { api, type ServerSettings } from "../api";
 import { useDialogA11y } from "../primitives";
 import { overlayClose } from "./dialogs";
 import { AccessSettings } from "./access-settings";
-import { IconCheck, IconClose, IconGear, IconInfo, IconLock, IconServer, IconShirt, IconWinMax, IconWinRestore } from "../icons";
+import { IconCheck, IconClose, IconGear, IconInfo, IconLock, IconServer, IconShirt, IconTopology, IconWinMax, IconWinRestore } from "../icons";
 import {
   buildSettingsCategories,
   filterSettings,
@@ -171,7 +171,7 @@ export function SettingsPage({
                   <div className="settings-about">
                     <div className="about">
                       <div className="about__mark">
-                        <IconLock />
+                        <IconTopology />
                       </div>
                       <h3 className="about__name">topo-hub</h3>
                       <p className="about__version">版本 {version || "…"}</p>

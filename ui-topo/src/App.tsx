@@ -5,14 +5,13 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
-import { getTheme, setTheme, subscribe, THEMES, type Theme } from "./theme";
-import { AboutDialog, RemoteDialog } from "./components/dialogs";
+import { RemoteDialog } from "./components/dialogs";
 import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
-import { IconGear, IconGlobe, IconInfo, IconLock, IconPlug, IconTopology } from "./icons";
+import { IconGear, IconGlobe, IconLock, IconPlug, IconTopology } from "./icons";
 import type { SshHost } from "./types";
 
-type DialogKind = null | "settings" | "about" | "remote";
+type DialogKind = null | "settings" | "remote";
 
 interface ShellCtx {
   openDialog: (k: Exclude<DialogKind, null>) => void;
@@ -38,7 +37,6 @@ const nav = [
 
 export default function App() {
   const [dialog, setDialog] = useState<DialogKind>(null);
-  const [theme, setThemeState] = useState<Theme>(getTheme());
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [version, setVersion] = useState("");
@@ -47,7 +45,6 @@ export default function App() {
   const [connUp, setConnUp] = useState(true);
   const termPanel = useRef<TermPanelHandle>(null);
 
-  useEffect(() => subscribe(setThemeState), []);
   useEffect(() => {
     ws.start();
     const offHosts = ws.on("sshHosts", (hosts) => setSshHosts(hosts));
@@ -111,23 +108,6 @@ export default function App() {
               <IconGear />
               <span className="nav-label">设置</span>
             </button>
-            <button className="tool-btn" onClick={() => openDialog("about")} title="关于">
-              <IconInfo />
-              <span className="nav-label">关于</span>
-            </button>
-            <select
-              className="theme-select"
-              value={theme}
-              onChange={(e) => setTheme(e.target.value as Theme)}
-              title="主题"
-              aria-label="主题"
-            >
-              {THEMES.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
           </div>
         </aside>
           <main className="content">
@@ -149,7 +129,6 @@ export default function App() {
       {dialog === "settings" && (
         <SettingsPage version={version} settings={settings} onClose={() => setDialog(null)} />
       )}
-      {dialog === "about" && <AboutDialog version={version} onClose={() => setDialog(null)} />}
       {dialog === "remote" && (
         <RemoteDialog
           input={remoteInput}

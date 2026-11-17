@@ -3419,6 +3419,259 @@ button {
    topo-hub 应用层（design tokens 之上；串口工具专属段到此为止）
    ============================================================ */
 
+/* ---------- 设置页基础样式（自 main styles.css 移植；覆盖层在 settings-page.css） ---------- */
+
+.dlg-settings {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+/* 还原态：居中卡片尺寸（显式覆盖同挂的 .dialog--max 四项，源码顺序在其后必胜） */
+.dlg-settings--compact {
+  width: min(880px, 76vw);
+  max-width: 76vw;
+  height: min(680px, 76vh);
+  max-height: min(680px, 76vh);
+}
+/* 标题条：交互色铺底（对照 VS Code 设置窗口的主题色标题栏），
+   标题居左、最大化/还原+关闭居右；按钮配色随条（on-accent），hover 白色浮层 */
+.dlg-settings__titlebar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  padding: 0 8px 0 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.dlg-settings__titlebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+.dlg-settings__titlebar-title svg {
+  width: 15px;
+  height: 15px;
+}
+.dlg-settings__titlebar .dlg-settings__btn {
+  color: color-mix(in srgb, var(--on-accent) 80%, transparent);
+}
+.dlg-settings__titlebar .dlg-settings__btn:hover {
+  color: var(--on-accent);
+  background: color-mix(in srgb, var(--on-accent) 16%, transparent);
+}
+.dlg-settings__toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+}
+/* 标题条右端操作区：最大化/还原 + 关闭（标题栏同款图标） */
+.dlg-settings__actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.dlg-settings__btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dlg-settings__btn:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.dlg-settings__btn svg {
+  width: 14px;
+  height: 14px;
+}
+.dlg-settings__search {
+  flex: 1;
+}
+/* 录制中的全局提示（工具栏右端，替代旧对话框的逐行键帽提示） */
+.dlg-settings__recording {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+}
+.dlg-settings__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.dlg-settings__toc {
+  flex: 0 0 176px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 8px;
+  border-right: 1px solid var(--hairline-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dlg-settings__toc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.dlg-settings__toc-item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.dlg-settings__toc-item[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--ink);
+}
+/* 搜索命中数徽标（清空搜索后消失） */
+.dlg-settings__toc-count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+}
+.dlg-settings__list {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 26px 36px;
+}
+/* 分类大标题 + 副描述（VS Code 的 "Commonly Used" 同位） */
+.dlg-settings__cat-title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  margin: 0;
+}
+.dlg-settings__cat-desc {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  margin: 4px 0 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.dlg-settings__cat + .dlg-settings__cat {
+  margin-top: 34px; /* 搜索态多分类纵排的分隔 */
+}
+/* 分类头右侧小工具位（快捷键「说明」按钮） */
+.dlg-settings__cat-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -26px 0 8px; /* 拉回到副描述行右端，不占独立行高 */
+  position: relative; /* 锚定快捷键说明浮层 */
+}
+/* 说明浮层锚在按钮行旁:按钮正下方右对齐(基础 .script-help 的 46px/14px
+   是脚本编辑器的固定锚,这里按按钮行实际位置定位) */
+.dlg-settings__cat-tools .script-help {
+  top: calc(100% + 6px);
+  right: 0;
+}
+/* 遮罩随浮层锚进行内后,absolute 只盖住按钮那行——改 fixed 盖全屏,点任意处关闭 */
+.dlg-settings__cat-tools .script-help__backdrop {
+  position: fixed;
+}
+/* 设置行：粗体名 + 说明 + 控件（VS Code 同构），hover 浅 wash */
+.settings-row {
+  padding: 12px 8px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast) var(--ease);
+}
+.settings-row:hover {
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.settings-row__name {
+  font-weight: 600;
+  font-size: var(--fs-base);
+}
+.settings-row__desc {
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+  margin-top: 2px;
+}
+.settings-row__control {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 控件宽度约束：下拉/文本 280，数字 160（VS Code 同款窄数字框） */
+.settings-row__control .field-select {
+  width: 280px;
+}
+.settings-row__control .dlg-settings__text {
+  width: 280px;
+}
+.settings-row__control .dlg-settings__num {
+  width: 160px;
+}
+.dlg-settings__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.dlg-settings__warn {
+  cursor: help;
+}
+/* 常驻行尾小按钮（打开日志目录），不挤占勾选标签 */
+.dlg-settings__minor-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+/* 连接分类加载失败/加载中 */
+.dlg-settings__srv-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-faint);
+  padding: 14px 8px;
+}
+.dlg-settings__srv-state button {
+  color: var(--ink);
+}
+/* 分类尾部应用区（服务器监听 / 前端连接 / 全部重置） */
+.dlg-settings__cat-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 8px 0;
+}
+
+/* 关于块在设置列表内的容器（收窄居中，原弹窗样式 .about* 全复用） */
+.settings-about {
+  max-width: 520px;
+  margin: 8px auto 0;
+}
+
+
+
 .shell {
   display: flex;
   flex-direction: column;
