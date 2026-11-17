@@ -14,10 +14,9 @@ import {
   subscribeChanged,
   type Device,
   type LeaseView,
-  type PortView,
   type Topology,
 } from "../api";
-import { ws } from "../ws";
+import { useLivePorts } from "../use-ports";
 import { useShell } from "../App";
 import { DeviceEditDialog } from "../components/device-edit";
 import { ConfirmDialog, DeviceDetailDialog } from "../components/dialogs";
@@ -27,11 +26,11 @@ export default function Devices() {
   const { openTerminal } = useShell();
   const [devices, setDevices] = useState<Device[]>([]);
   const [leases, setLeases] = useState<LeaseView[]>([]);
-  const [ports, setPorts] = useState<PortView[]>([]);
   const [topos, setTopos] = useState<Topology[]>([]);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Device | null>(null);
   const [creating, setCreating] = useState(false);
+  const ports = useLivePorts();
   const [deleting, setDeleting] = useState<Device | null>(null);
   const [detail, setDetail] = useState<Device | null>(null);
 
@@ -41,16 +40,12 @@ export default function Devices() {
       .then(setDevices)
       .catch((e) => setError(String(e.message ?? e)));
     api.leases().then(setLeases).catch(() => {});
-    api.ports().then(setPorts).catch(() => {});
     api.topologies().then(setTopos).catch(() => {});
   }, []);
 
   useEffect(() => {
     refresh();
-    const offPorts = ws.on("ports", setPorts);
-    return () => {
-      offPorts();
-    };
+    return subscribeChanged(refresh);
   }, [refresh]);
   useEffect(() => subscribeChanged(refresh), [refresh]);
 

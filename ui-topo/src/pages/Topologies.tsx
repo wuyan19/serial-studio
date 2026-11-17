@@ -12,9 +12,9 @@ import {
   subscribeChanged,
   type Device,
   type LeaseView,
-  type PortView,
   type Topology,
 } from "../api";
+import { useLivePorts } from "../use-ports";
 import { ConfirmDialog } from "../components/dialogs";
 import TopologyGraph from "./TopologyGraph";
 
@@ -22,7 +22,7 @@ export default function Topologies() {
   const [list, setList] = useState<Topology[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [leases, setLeases] = useState<LeaseView[]>([]);
-  const [ports, setPorts] = useState<PortView[]>([]);
+  const ports = useLivePorts();
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState<Topology | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -35,7 +35,6 @@ export default function Topologies() {
       .catch((e) => setError(String(e.message ?? e)));
     api.devices().then(setDevices).catch(() => {});
     api.leases().then(setLeases).catch(() => {});
-    api.ports().then(setPorts).catch(() => {});
   }, []);
 
   useEffect(() => {

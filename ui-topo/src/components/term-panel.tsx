@@ -15,6 +15,7 @@ import {
   useState,
 } from "react";
 import { useNavigate } from "react-router-dom";
+import { useLivePorts } from "../use-ports";
 import {
   api,
   channelPortKey,
@@ -75,7 +76,7 @@ const TermPanel = forwardRef<
   const navigate = useNavigate();
   const [layout, setLayout] = useState<PanelLayout>(loadLayout);
   const [devices, setDevices] = useState<Device[]>([]);
-  const [ports, setPorts] = useState<PortView[]>([]);
+  const ports = useLivePorts();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
@@ -94,7 +95,6 @@ const TermPanel = forwardRef<
   }, [layout]);
 
   useEffect(() => {
-    const offPorts = ws.on("ports", setPorts);
     // 数据回流：二进制帧 → 对应 tab 的 xterm
     const offData = ws.on("data", (port, data) => handles.current.get(port)?.write(data));
     const offClosed = ws.on("closed", (port) => {
@@ -103,10 +103,8 @@ const TermPanel = forwardRef<
     });
     const offConn = ws.on("connected", (on) => setConnLost(!on));
     // 初始拉取：WS 首次端口推送在面板挂载前已发生（壳启动即连即推），只靠订阅会漏
-    api.ports().then(setPorts).catch(() => {});
     api.devices().then(setDevices).catch(() => {});
     return () => {
-      offPorts();
       offData();
       offClosed();
       offConn();
@@ -159,8 +157,6 @@ const TermPanel = forwardRef<
       if (devs.length === 0 || prts.length === 0) {
         try {
           [devs, prts] = await Promise.all([api.devices(), api.ports()]);
-          setDevices(devs);
-          setPorts(prts);
         } catch {
           /* 用现有数据走兜底 */
         }
