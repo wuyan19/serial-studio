@@ -4,11 +4,11 @@
 
 use serde_json::Value;
 use std::sync::Arc;
-use topo_hub::mcp_topo::TopoTools;
-use topo_hub::test_support::{
+use devicerack::mcp_topo::TopoTools;
+use devicerack::test_support::{
     ensure_test_config_dir, make_state, reset_stores, unique_name, STORE_LOCK,
 };
-use topo_hub::TopoState;
+use devicerack::TopoState;
 
 fn state_with_tools() -> TopoState {
     ensure_test_config_dir();

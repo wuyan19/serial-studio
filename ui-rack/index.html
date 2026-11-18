@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>topo-hub</title>
+    <title>devicerack</title>
     <!-- 主题体系与 serial-studio 同源(首帧防闪烁内联脚本 + styles.css token 块) -->
     <style>
       html, body, #root { margin: 0; height: 100%; }
@@ -42,12 +42,12 @@
           root.setAttribute("data-lum", lightIds[t] ? "light" : "dark");
         }
         try {
-          var s = localStorage.getItem("topo-hub-theme");
+          var s = localStorage.getItem("devicerack-theme");
           var t;
           if (ids.indexOf(s) >= 0) t = s;
           else if (legacy[s]) {
             t = legacy[s];
-            try { localStorage.setItem("topo-hub-theme", t); } catch (e2) {}
+            try { localStorage.setItem("devicerack-theme", t); } catch (e2) {}
           } else {
             t =
               window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches

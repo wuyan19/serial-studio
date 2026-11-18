@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 
 /// 共享 tempdir 作为配置目录（幂等 set）；store 类测试用唯一拓扑名/串行锁避让。
 pub fn ensure_test_config_dir() {
-    let dir = std::env::temp_dir().join("topo-hub-test");
+    let dir = std::env::temp_dir().join("devicerack-test");
     std::env::set_var("SERIAL_STUDIO_CONFIG_DIR", &dir);
     std::fs::create_dir_all(&dir).unwrap();
 }

@@ -1,4 +1,4 @@
-/** 设置页声明式注册表（自 serial-studio ui 移植，条目换成 topo-hub 的设置面）。
+/** 设置页声明式注册表（自 serial-studio ui 移植，条目换成 devicerack 的设置面）。
  *  渲染在 settings-page.tsx 按 control 类型分发；状态全落在既有模块
  *  （theme + 服务器设置 props），注册表只描述「有什么」。
  *  新增设置项：在此加条目 + settings-page.tsx 的控件 switch 加分支即可被搜索和渲染。 */
@@ -64,7 +64,7 @@ export function buildSettingsCategories(): SettingsCategoryDef[] {
       label: "关于",
       description: "版本与接入地址。",
       keywords: ["about", "version", "版本", "mcp", "接入"],
-      items: [{ id: "about.block", label: "topo-hub", description: "版本信息与 MCP 接入地址", control: "about-block" }],
+      items: [{ id: "about.block", label: "devicerack", description: "版本信息与 MCP 接入地址", control: "about-block" }],
     },
   ];
 }

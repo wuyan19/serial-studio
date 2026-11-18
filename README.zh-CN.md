@@ -1,12 +1,12 @@
-# topo-hub
+# devicerack
 
 [English](README.md) · **简体中文**
 
 面向 AI 真实设备调试阶段的**网络设备管理平台**：以设备为中心组织调试资源——设备注册、拓扑管理、占用租约、Agent 工具面；串口/SSH/远端级联等连接能力整体复用同一 Rust 底座。
 
-与 Serial Studio 同底座、不同视角：Serial Studio 站在连接一侧（串口终端工具），topo-hub 站在设备一侧（连接只是设备的访问通道）。
+与 Serial Studio 同底座、不同视角：Serial Studio 站在连接一侧（串口终端工具），devicerack 站在设备一侧（连接只是设备的访问通道）。
 
-<p><img src="docs/screenshot-topo.png" width="720" alt="topo-hub 拓扑总览"></p>
+<p><img src="docs/screenshot-rack.png" width="720" alt="devicerack 拓扑总览"></p>
 
 ## ✨ 功能特性
 
@@ -24,10 +24,10 @@
 | `ss-core` | 串口引擎：端口生命周期、事件总线、脚本引擎（QuickJS） |
 | `ss-device` | 设备访问域：SSH 会话池、远端设备客户端、寻址解析、端口视图、SFTP 文件传输 |
 | `ss-server` | 数据面与组装根：WS/REST/MCP 基座、访问控制、宏与脚本库 |
-| `topo-hub` | 拓扑域：设备注册表、拓扑、租约、审计、设备本体论工具面、平台进程 |
+| `devicerack` | 拓扑域：设备注册表、拓扑、租约、审计、设备本体论工具面、平台进程 |
 | `ui-topo` | 控制台 SPA（React + React Flow） |
 
-依赖链 `topo-hub → ss-server → ss-device → ss-core`：平台复用工具的全部数据面（`/ws`、`/api/ports`、`/mcp`），在其上叠加设备/拓扑/租约域。
+依赖链 `devicerack → ss-server → ss-device → ss-core`：平台复用工具的全部数据面（`/ws`、`/api/ports`、`/mcp`），在其上叠加设备/拓扑/租约域。
 
 ## 🛠 技术栈
 
@@ -38,10 +38,10 @@ Rust + axum + tokio · React 18 + Vite + React Flow · rust-embed（单二进制
 ```bash
 # 构建前端 + release 二进制
 npm --prefix ui-topo install && npm --prefix ui-topo run build
-cargo build --release -p topo-hub
+cargo build --release -p devicerack
 
 # 运行（默认 0.0.0.0:18800，错开 serial-studio 的 18700；配置目录独立）
-./target/release/topo-hub
+./target/release/devicerack
 ```
 
 ## 📖 用法
@@ -65,7 +65,7 @@ get_topology（选拓扑/看成员）
 
 ## ⚙️ 配置
 
-配置目录独立于 serial-studio（`%APPDATA%/topo-hub` / `~/.config/topo-hub`）：`devices.json`（设备与通道）、`topologies.json`（拓扑）、`lease.json`（租约参数）、`settings.json`（服务设置）。
+配置目录独立于 serial-studio（`%APPDATA%/devicerack` / `~/.config/devicerack`）：`devices.json`（设备与通道）、`topologies.json`（拓扑）、`lease.json`（租约参数）、`settings.json`（服务设置）。
 
 ## 🔒 安全提示
 
@@ -77,9 +77,9 @@ get_topology（选拓扑/看成员）
 crates/core        ss-core 串口引擎
 crates/device      ss-device 设备访问域
 crates/server      ss-server 数据面与组装根
-crates/topo-hub    拓扑域 + 平台进程（端口 18800）
+crates/devicerack    拓扑域 + 平台进程（端口 18800）
 ui-topo/           控制台 SPA
-docs/              设计文档（topo-hub-design.md / mcp-tools-design.md 等）
+docs/              设计文档（devicerack-design.md / mcp-tools-design.md 等）
 ```
 
 ## 📄 许可证

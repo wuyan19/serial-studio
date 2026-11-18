@@ -1,4 +1,4 @@
-/** REST + SSE 封装。后端契约见 crates/topo-hub/src/api.rs。 */
+/** REST + SSE 封装。后端契约见 crates/devicerack/src/api.rs。 */
 import type { SerialConfig as SerialConfigT } from "./types";
 
 /** 被测设备（device.rs 注册表）：设备=身份，通道=接入方式（内联完整配置）。 */

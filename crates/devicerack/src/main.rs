@@ -1,10 +1,10 @@
-//! topo-hub 服务进程：组合 ss-server 数据面 + 拓扑域 + 控制台 SPA。
+//! devicerack 服务进程：组合 ss-server 数据面 + 设备/拓扑/租约域 + 控制台 SPA。
 
 use clap::Parser;
-use topo_hub::{create_router, TopoState};
+use devicerack::{create_router, TopoState};
 
 #[derive(Parser)]
-#[command(name = "topo-hub", version, about = "AI 设备调试的拓扑管理平台")]
+#[command(name = "devicerack", version, about = "AI 设备调试的网络设备管理平台")]
 struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
@@ -15,11 +15,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 配置目录默认独立于 serial-studio（topo-hub/ 子目录）：settings.json 的实例
+    // 配置目录默认独立于 serial-studio（devicerack/ 子目录）：settings.json 的实例
     // 身份、各 store 不与 serial-studio 进程互踩；显式 env 覆盖优先（测试/冒烟）。
+    // 旧名 devicerack 目录存在而 devicerack 不存在时回退旧目录（老用户数据迁移零成本）。
     if std::env::var(ss_server::config::CONFIG_DIR_ENV).is_err() {
         if let Some(dir) = dirs::config_dir() {
-            std::env::set_var(ss_server::config::CONFIG_DIR_ENV, dir.join("topo-hub"));
+            let name = if dir.join("devicerack").exists() && !dir.join("devicerack").exists() {
+                "devicerack" // 老目录回退
+            } else {
+                "devicerack"
+            };
+            std::env::set_var(ss_server::config::CONFIG_DIR_ENV, dir.join(name));
         }
     }
 
@@ -54,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
-        "topo-hub: http://{addr}/ · MCP http://{addr}/mcp · 配置目录 {}",
+        "devicerack: http://{addr}/ · MCP http://{addr}/mcp · 配置目录 {}",
         ss_server::config::config_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_else(|| "(未定位)".into())

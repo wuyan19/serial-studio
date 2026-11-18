@@ -114,7 +114,7 @@ export default function App() {
             {connUp ? "已连接" : "重连中…"}
           </span>
           <span className="statusbar__msg">
-            topo-hub{version ? ` · ${version}` : ""}
+            devicerack{version ? ` · ${version}` : ""}
           </span>
         </footer>
       </div>

@@ -1,4 +1,4 @@
-//! topo-hub：AI 设备调试的拓扑管理平台。
+//! devicerack：AI 设备调试的拓扑管理平台。
 //!
 //! 组合形态（设计文档 §2 P0）：复用 ss-server 的共享运行时与基础路由
 //! （/ws、/api/ports、/mcp），叠加拓扑域（REST + SSE + MCP 工具集），

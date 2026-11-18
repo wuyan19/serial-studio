@@ -26,6 +26,6 @@
 *.swp
 
 # topo-hub 前端
-/ui-topo/node_modules
-/ui-topo/dist
+/ui-rack/node_modules
+/ui-rack/dist
 /target-smoke

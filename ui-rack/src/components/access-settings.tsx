@@ -1,5 +1,5 @@
 /** 远程访问验证设置（自 serial-studio ui 移植，Tauri invoke 换 REST）。
- *  topo-hub 进程暂未接入 TLS 监听（supervisor 属桌面壳），启用验证走
+ *  devicerack 进程暂未接入 TLS 监听（supervisor 属桌面壳），启用验证走
  *  「允许 HTTP 验证」路径——底座闸与验证码逻辑即时生效。 */
 import { useEffect, useState } from "react";
 import { api, type PortView } from "../api";

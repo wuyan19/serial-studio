@@ -1,12 +1,12 @@
-# topo-hub
+# devicerack
 
 **English** · [简体中文](README.zh-CN.md)
 
 A **network device management platform** for AI-driven device debugging: devices, topologies, exclusive leases, and an Agent tool surface — with serial/SSH/remote-cascade connectivity provided by the same Rust core.
 
-topo-hub and Serial Studio share one core but take different views: Serial Studio stands on the connection side (a serial terminal tool); topo-hub stands on the device side (connections are just access channels to a device).
+devicerack and Serial Studio share one core but take different views: Serial Studio stands on the connection side (a serial terminal tool); devicerack stands on the device side (connections are just access channels to a device).
 
-<p><img src="docs/screenshot-topo.png" width="720" alt="topo-hub topology overview"></p>
+<p><img src="docs/screenshot-rack.png" width="720" alt="devicerack topology overview"></p>
 
 ## ✨ Features
 
@@ -24,10 +24,10 @@ topo-hub and Serial Studio share one core but take different views: Serial Studi
 | `ss-core` | Serial engine: port lifecycle, event bus, scripting (QuickJS) |
 | `ss-device` | Device access domain: SSH session pool, remote device clients, address resolution, port views, SFTP |
 | `ss-server` | Data plane & composition root: WS/REST/MCP base, access control, macro/script libraries |
-| `topo-hub` | Topology domain: device registry, topologies, leases, audit, device-ontology tools, platform binary |
+| `devicerack` | Topology domain: device registry, topologies, leases, audit, device-ontology tools, platform binary |
 | `ui-topo` | Console SPA (React + React Flow) |
 
-Dependency chain `topo-hub → ss-server → ss-device → ss-core`: the platform reuses the tool's entire data plane (`/ws`, `/api/ports`, `/mcp`) and layers the device/topology/lease domain on top.
+Dependency chain `devicerack → ss-server → ss-device → ss-core`: the platform reuses the tool's entire data plane (`/ws`, `/api/ports`, `/mcp`) and layers the device/topology/lease domain on top.
 
 ## 🛠 Tech stack
 
@@ -38,10 +38,10 @@ Rust + axum + tokio · React 18 + Vite + React Flow · rust-embed (SPA served fr
 ```bash
 # build frontend + release binary
 npm --prefix ui-topo install && npm --prefix ui-topo run build
-cargo build --release -p topo-hub
+cargo build --release -p devicerack
 
 # run (default 0.0.0.0:18800, distinct from serial-studio's 18700; isolated config dir)
-./target/release/topo-hub
+./target/release/devicerack
 ```
 
 ## 📖 Usage
@@ -66,7 +66,7 @@ Session output is cursor-addressable (`read_output` for catch-up / watching debu
 
 ## ⚙️ Configuration
 
-The config dir is isolated from serial-studio (`%APPDATA%/topo-hub` / `~/.config/topo-hub`): `devices.json` (devices & channels), `topologies.json`, `lease.json` (lease parameters), `settings.json`.
+The config dir is isolated from serial-studio (`%APPDATA%/devicerack` / `~/.config/devicerack`): `devices.json` (devices & channels), `topologies.json`, `lease.json` (lease parameters), `settings.json`.
 
 ## 🔒 Security note
 
@@ -78,9 +78,9 @@ Same premise as serial-studio: trusted intranet, no auth by default. When exposi
 crates/core        ss-core serial engine
 crates/device      ss-device device access domain
 crates/server      ss-server data plane & composition root
-crates/topo-hub    topology domain + platform binary (port 18800)
+crates/devicerack    topology domain + platform binary (port 18800)
 ui-topo/           console SPA
-docs/              design docs (topo-hub-design.md / mcp-tools-design.md, etc.)
+docs/              design docs (devicerack-design.md / mcp-tools-design.md, etc.)
 ```
 
 ## 📄 License

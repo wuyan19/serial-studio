@@ -295,7 +295,7 @@ export function themeDefOf(t: Theme): ThemeDef {
   return def;
 }
 
-const KEY = "topo-hub-theme";
+const KEY = "devicerack-theme";
 type Listener = (t: Theme) => void;
 const listeners = new Set<Listener>();
 

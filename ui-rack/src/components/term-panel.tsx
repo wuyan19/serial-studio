@@ -30,7 +30,7 @@ import { SerialConfigDialog, SshAuthDialog, SshTrustDialog } from "./dialogs";
 import { IconChevronsRight, IconExpand, IconSsh } from "../icons";
 import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenError } from "../types";
 
-const STORE_KEY = "topo-hub-term-panel";
+const STORE_KEY = "devicerack-term-panel";
 const WIDTH_MIN = 260;
 const WIDTH_MAX = 960;
 /** 有效上限再扣内容区最小可用宽（窗口窄时先于常量上限生效）。 */

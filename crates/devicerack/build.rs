@@ -11,7 +11,7 @@ fn main() {
         let _ = fs::create_dir_all(dist);
         let _ = fs::write(
             dist.join("index.html"),
-            "<!doctype html><meta charset=\"utf-8\"><title>topo-hub</title>\
+            "<!doctype html><meta charset=\"utf-8\"><title>devicerack</title>\
              <p>ui-topo 未构建：npm install --prefix ui-topo && npm run build --prefix ui-topo</p>",
         );
     }

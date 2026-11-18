@@ -19,7 +19,7 @@ use ss_server::PortView;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// topo-hub 组装状态：ss-server 共享运行时 + 拓扑/租约两条变更广播 + 租约管理器
+/// devicerack 组装状态：ss-server 共享运行时 + 拓扑/租约两条变更广播 + 租约管理器
 /// + I/O 会话管理器（设备本体论工具面的连接/影子缓冲）。
 /// bus 是空通道语义（收发双方只关心"变了"，不传载荷）。
 #[derive(Clone)]
@@ -30,7 +30,7 @@ pub struct TopoState {
     pub leases: Arc<lease::LeaseManager>,
     pub sessions: Arc<crate::session::SessionManager>,
     /// 实际监听地址/端口（启动参数决定）。settings.json 的 ws_host/ws_port
-    /// 是 serial-studio 底座字段（supervisor 用），topo-hub 不读——设置视图
+    /// 是 serial-studio 底座字段（supervisor 用），devicerack 不读——设置视图
     /// 用运行时事实覆盖展示，写入侧忽略，防止 18700 默认值误导。
     pub listen: (String, u16),
 }
@@ -137,7 +137,7 @@ pub fn routes() -> Router<TopoState> {
         .route("/api/remotes", get(remotes_list).put(remotes_save))
         .route("/api/settings", get(settings_get).put(settings_put))
         // 访问验证管理面（底座 AccessManager 的 REST 投影；serial-studio 桌面端
-        // 走 Tauri invoke，topo-hub 无壳故自给管理端点。返回体含验证码明文——
+        // 走 Tauri invoke，devicerack 无壳故自给管理端点。返回体含验证码明文——
         // 管理面与底座同前提：可信内网）
         .route("/api/access/config", get(access_config_get).put(access_config_put))
         .route("/api/access/code", post(access_code_rotate))
@@ -294,7 +294,7 @@ pub struct SettingsView {
 async fn settings_get(State(state): State<TopoState>) -> Json<SettingsView> {
     let mut server = ss_server::settings::load();
     // 监听参数展示运行时事实（启动参数 --host/--port），不展示 settings.json
-    // 的底座默认值（18700 会误导——topo-hub 进程不读它）
+    // 的底座默认值（18700 会误导——devicerack 进程不读它）
     server.ws_host = state.listen.0.clone();
     server.ws_port = state.listen.1;
     Json(SettingsView {
@@ -320,7 +320,7 @@ async fn settings_put(
     Json(body): Json<SettingsBody>,
 ) -> Result<Json<SettingsView>, ApiError> {
     let mut s = ss_server::settings::load();
-    // ws_host/ws_port 忽略：topo-hub 的监听由启动参数决定（--host/--port），
+    // ws_host/ws_port 忽略：devicerack 的监听由启动参数决定（--host/--port），
     // 写 settings.json 只会让底座字段与本进程事实漂移
     if let Some(v) = body.telnet_port {
         s.telnet_port = v;
@@ -464,7 +464,7 @@ async fn devices_delete(
 
 // ===== 访问验证管理面 =====
 // 说明：配置立即生效于闸与验证逻辑；TLS 监听的生命周期管理（supervisor 重绑
-// HTTPS/Telnet）是 serial-studio 桌面壳的能力，topo-hub 进程暂未接入——启用
+// HTTPS/Telnet）是 serial-studio 桌面壳的能力，devicerack 进程暂未接入——启用
 // 验证时走「允许 HTTP 验证」路径（配置校验允许无证书 + allow_http）。
 
 async fn access_config_get(State(state): State<TopoState>) -> Json<ss_server::access::AccessStatus> {

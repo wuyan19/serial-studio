@@ -1273,6 +1273,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "devicerack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "dirs",
+ "futures-util",
+ "mime_guess",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "ss-core",
+ "ss-server",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "devicerack-desktop"
+version = "0.21.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "devicerack",
+ "dirs",
+ "rfd",
+ "ss-server",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6308,47 +6350,6 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
-
-[[package]]
-name = "topo-hub"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "dirs",
- "futures-util",
- "mime_guess",
- "rust-embed",
- "serde",
- "serde_json",
- "ss-core",
- "ss-server",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "topo-hub-desktop"
-version = "0.21.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "dirs",
- "rfd",
- "ss-server",
- "tauri",
- "tauri-build",
- "tokio",
- "topo-hub",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "tower"

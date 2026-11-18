@@ -1,4 +1,4 @@
-# topo-hub 设计：AI 设备调试的拓扑管理平台
+# devicerack 设计：AI 设备调试的网络设备管理平台（原名 topo-hub，2026-11-18 更名）
 
 读者为本项目研发与评审者；评审通过后据此实施 P0/P1。布局现状评估见 [crate-layout-review.md](crate-layout-review.md)，本文不重复其论证。
 

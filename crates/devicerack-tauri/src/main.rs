@@ -1,7 +1,7 @@
-//! topo-hub 桌面壳：进程内起 topo-hub 服务（axum），Tauri 窗口加载本机 URL。
+//! devicerack 桌面壳：进程内起 devicerack 服务（axum），Tauri 窗口加载本机 URL。
 //!
 //! 与 serial-studio 桌面壳（重 IPC 命令层：端口数据/命令/文件全走 invoke）不同，
-//! topo-hub 前端是纯 Web 架构（WS/REST/SSE 同源直连本地服务）——桌面化=窗口壳，
+//! devicerack 前端是纯 Web 架构（WS/REST/SSE 同源直连本地服务）——桌面化=窗口壳，
 //! 唯一的 IPC 是自绘标题栏的右键系统菜单（show_system_menu，仅 Windows 生效）。
 //!
 //! 端口先同步 bind 再开窗：窗口加载时服务必然已在监听，无竞态白屏。
@@ -9,7 +9,7 @@
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "topo-hub-desktop", version, about = "topo-hub 桌面壳")]
+#[command(name = "devicerack-desktop", version, about = "devicerack 桌面壳")]
 struct Args {
     /// HTTP 端口（REST/WS/MCP 同端口；与 headless bin 同默认）
     #[arg(long, default_value_t = 18800)]
@@ -21,10 +21,16 @@ struct Args {
 }
 
 fn main() {
-    // 配置目录默认与 headless bin 一致（%APPDATA%/topo-hub），两形态共用同一份数据
+    // 配置目录默认与 headless bin 一致（%APPDATA%/devicerack；老 devicerack 目录
+    // 存在则回退沿用），两形态共用同一份数据
     if std::env::var(ss_server::config::CONFIG_DIR_ENV).is_err() {
         if let Some(dir) = dirs::config_dir() {
-            std::env::set_var(ss_server::config::CONFIG_DIR_ENV, dir.join("topo-hub"));
+            let name = if dir.join("devicerack").exists() && !dir.join("devicerack").exists() {
+                "devicerack" // 老目录回退
+            } else {
+                "devicerack"
+            };
+            std::env::set_var(ss_server::config::CONFIG_DIR_ENV, dir.join(name));
         }
     }
 
@@ -49,7 +55,8 @@ fn main() {
             let listener = tauri::async_runtime::block_on(async {
                 let base = ss_server::create_state();
                 base.devices.start();
-                let state = topo_hub::TopoState::create(base);
+                let mut state = devicerack::TopoState::create(base);
+                state.listen = (host.clone(), port);
                 {
                     let leases = std::sync::Arc::clone(&state.leases);
                     let base = std::sync::Arc::new(state.base.clone());
@@ -61,7 +68,7 @@ fn main() {
                         }
                     });
                 }
-                let router = topo_hub::create_router(state);
+                let router = devicerack::create_router(state);
                 let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await;
                 listener.map(|l| (l, router))
             });
@@ -70,7 +77,7 @@ fn main() {
                 Err(e) => {
                     let msg = format!("端口 {port} 被占用或不可用：{e}\n\n用 --port 换一个端口重试。");
                     rfd::MessageDialog::new()
-                        .set_title("topo-hub 启动失败")
+                        .set_title("devicerack 启动失败")
                         .set_level(rfd::MessageLevel::Error)
                         .set_description(&msg)
                         .show();
@@ -94,7 +101,7 @@ fn main() {
                 "main",
                 tauri::WebviewUrl::External(url.parse().expect("本机 URL 解析失败")),
             )
-            .title("topo-hub")
+            .title("devicerack")
             .inner_size(1440.0, 900.0)
             .min_inner_size(900.0, 600.0);
             #[cfg(target_os = "windows")]
@@ -111,7 +118,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("topo-hub 桌面壳运行失败");
+        .expect("devicerack 桌面壳运行失败");
 }
 
 /// 自绘标题栏右键 → 原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。

@@ -1,6 +1,6 @@
 /**
  * 设置页（自 serial-studio ui 的 VS Code 式设置移植：搜索 + 分类目录 + 声明式条目）。
- * topo-hub 裁剪：无快捷键/更新器/前端连接模式；新增租约条目；服务设置走 /api/settings。
+ * devicerack 裁剪：无快捷键/更新器/前端连接模式；新增租约条目；服务设置走 /api/settings。
  * Escape 优先级链（VS Code 语义）：先清搜索词，再关页。
  */
 import { useEffect, useRef, useState } from "react";
@@ -173,7 +173,7 @@ export function SettingsPage({
                       <div className="about__mark">
                         <IconTopology />
                       </div>
-                      <h3 className="about__name">topo-hub</h3>
+                      <h3 className="about__name">devicerack</h3>
                       <p className="about__version">版本 {version || "…"}</p>
                       <p className="about__tagline">
                         网络设备管理平台 · 设备/拓扑/占用
