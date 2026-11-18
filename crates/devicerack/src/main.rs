@@ -6,11 +6,12 @@ use devicerack::{create_router, TopoState};
 #[derive(Parser)]
 #[command(name = "devicerack", version, about = "AI 设备调试的网络设备管理平台")]
 struct Args {
-    #[arg(long, default_value = "0.0.0.0")]
-    host: String,
-    /// 默认 18800，错开 serial-studio 的 18700（两进程并行时互不干扰）
-    #[arg(long, default_value_t = 18800)]
-    port: u16,
+    /// 监听地址；缺省读 settings.json（其缺省 0.0.0.0）
+    #[arg(long)]
+    host: Option<String>,
+    /// 监听端口；缺省读 settings.json（其缺省 18800，错开 serial-studio 的 18700）
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
@@ -37,11 +38,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    // 监听解析须在 create_state 之前（instance_id 首启会以底座默认建
+    // settings.json，先把 devicerack 默认定型进去）
+    let (host, port) = devicerack::listen::resolve_listen(args.host, args.port, "0.0.0.0");
     let base = ss_server::create_state();
     base.devices.start();
 
-    let mut state = TopoState::create(base);
-    state.listen = (args.host.clone(), args.port);
+    let state = TopoState::create(base);
     // 租约定时清扫：读路径已惰性清扫，这里是无人访问时的兜底（崩溃客户端的
     // 租约最多多活到下一个整分钟 tick）。
     {
@@ -57,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = create_router(state);
 
-    let addr = format!("{}:{}", args.host, args.port);
+    let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         "devicerack: http://{addr}/ · MCP http://{addr}/mcp · 配置目录 {}",

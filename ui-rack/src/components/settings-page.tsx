@@ -42,6 +42,9 @@ export function SettingsPage({
 
   const apply = () => {
     if (!srv) return;
+    // 监听参数非法（地址空/端口越界）不落盘——后端也会拦，这里拦掉避免
+    // 静默失败后表单停在非法值（错误提示待接状态栏消息，与既有 TODO 同）
+    if (!srv.ws_host.trim() || srv.ws_port < 1 || srv.ws_port > 65535) return;
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
     void apiSave(srv);
@@ -215,19 +218,31 @@ export function SettingsPage({
             ))}
           </div>
         );
-      case "srv-readonly":
+      case "srv-text":
         return (
           <input
-            readOnly
-            value={
-              item.id === "srv.ws_host"
-                ? srv?.ws_host ?? ""
-                : String(srv?.ws_port ?? "")
-            }
+            value={srv?.ws_host ?? ""}
+            onChange={(e) => srv && setSrv({ ...srv, ws_host: e.target.value })}
             className="field dlg-settings__text"
             autoCapitalize="off"
             spellCheck={false}
-            title="监听参数由进程启动时的 --host/--port 决定"
+            title="保存后重启进程生效"
+          />
+        );
+      case "srv-number":
+        return (
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={srv?.ws_port ?? ""}
+            onChange={(e) =>
+              srv && setSrv({ ...srv, ws_port: Number(e.target.value) })
+            }
+            className="field dlg-settings__num"
+            autoCapitalize="off"
+            spellCheck={false}
+            title="保存后重启进程生效"
           />
         );
       case "srv-checkbox-scripting":

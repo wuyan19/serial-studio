@@ -11,13 +11,14 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "devicerack-desktop", version, about = "devicerack 桌面壳")]
 struct Args {
-    /// HTTP 端口（REST/WS/MCP 同端口；与 headless bin 同默认）
-    #[arg(long, default_value_t = 18800)]
-    port: u16,
-    /// 绑定地址：默认仅本机（GUI 程序保守默认——服务无认证，静默暴露到
-    /// 局域网不负责任）；要局域网访问显式 --host 0.0.0.0（headless 同参）
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    /// HTTP 端口（REST/WS/MCP 同端口）；缺省读 settings.json（其缺省 18800）
+    #[arg(long)]
+    port: Option<u16>,
+    /// 绑定地址：缺省读 settings.json（其缺省仅本机——GUI 保守默认，服务
+    /// 无认证，静默暴露到局域网不负责任）；要局域网访问显式 --host 0.0.0.0
+    /// 或在设置页改（headless 同参）
+    #[arg(long)]
+    host: Option<String>,
 }
 
 fn main() {
@@ -42,8 +43,9 @@ fn main() {
         .init();
 
     let args = Args::parse();
-    let port = args.port;
-    let host = args.host;
+    // 监听解析须在 create_state 之前（instance_id 首启会以底座默认建
+    // settings.json，先把 devicerack 默认定型进去）；桌面形态默认仅本机
+    let (host, port) = devicerack::listen::resolve_listen(args.host, args.port, "127.0.0.1");
 
     tauri::Builder::default()
         // 自绘标题栏的系统菜单（仅 Windows 有实现；mac/Linux stub no-op）
@@ -55,8 +57,7 @@ fn main() {
             let listener = tauri::async_runtime::block_on(async {
                 let base = ss_server::create_state();
                 base.devices.start();
-                let mut state = devicerack::TopoState::create(base);
-                state.listen = (host.clone(), port);
+                let state = devicerack::TopoState::create(base);
                 {
                     let leases = std::sync::Arc::clone(&state.leases);
                     let base = std::sync::Arc::new(state.base.clone());

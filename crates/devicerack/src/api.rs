@@ -29,10 +29,6 @@ pub struct TopoState {
     pub lease_bus: Arc<broadcast::Sender<()>>,
     pub leases: Arc<lease::LeaseManager>,
     pub sessions: Arc<crate::session::SessionManager>,
-    /// 实际监听地址/端口（启动参数决定）。settings.json 的 ws_host/ws_port
-    /// 是 serial-studio 底座字段（supervisor 用），devicerack 不读——设置视图
-    /// 用运行时事实覆盖展示，写入侧忽略，防止 18700 默认值误导。
-    pub listen: (String, u16),
 }
 
 impl TopoState {
@@ -50,8 +46,6 @@ impl TopoState {
             lease_bus: Arc::new(ltx),
             leases,
             sessions,
-            // 默认占位（生产路径在 main 里被启动参数覆盖；测试用）
-            listen: ("127.0.0.1".into(), 18800),
         }
     }
 }
@@ -292,27 +286,20 @@ pub struct SettingsView {
 }
 
 async fn settings_get(State(state): State<TopoState>) -> Json<SettingsView> {
-    let mut server = ss_server::settings::load();
-    // 监听参数展示运行时事实（启动参数 --host/--port），不展示 settings.json
-    // 的底座默认值（18700 会误导——devicerack 进程不读它）
-    server.ws_host = state.listen.0.clone();
-    server.ws_port = state.listen.1;
+    // 监听参数（ws_host/ws_port）照 serial-studio 语义直读 settings.json——
+    // 它就是持久真相源（启动 resolve_listen 读它；改后重启生效）
     Json(SettingsView {
-        server,
+        server: ss_server::settings::load(),
         lease: state.leases.cfg.clone(),
     })
 }
 
 /// 提供的字段才更新（instance_id 永不覆盖）；enable_scripting 热生效（刷新
-/// AppState 缓存的原子开关）；监听参数写盘后重启生效；lease.json 重启生效。
+/// AppState 缓存的原子开关）；监听参数/telnet 端口/lease.json 写盘后重启生效。
 #[derive(Deserialize)]
 pub struct SettingsBody {
-    /// 监听参数显式忽略（topo-hub 时代起监听就由启动参数决定）——保留字段
-    /// 吞掉前端/脚本误传值，不回写 settings.json（避免底座字段与本进程漂移）
-    #[serde(default)]
-    _ws_host: Option<String>,
-    #[serde(default)]
-    _ws_port: Option<u16>,
+    ws_host: Option<String>,
+    ws_port: Option<u16>,
     telnet_port: Option<u16>,
     enable_scripting: Option<bool>,
     script_log_to_disk: Option<bool>,
@@ -324,8 +311,18 @@ async fn settings_put(
     Json(body): Json<SettingsBody>,
 ) -> Result<Json<SettingsView>, ApiError> {
     let mut s = ss_server::settings::load();
-    // ws_host/ws_port 忽略：devicerack 的监听由启动参数决定（--host/--port），
-    // 写 settings.json 只会让底座字段与本进程事实漂移
+    if let Some(v) = body.ws_host {
+        if v.trim().is_empty() {
+            return Err(bad("监听地址不能为空".to_string()));
+        }
+        s.ws_host = v;
+    }
+    if let Some(v) = body.ws_port {
+        if v == 0 {
+            return Err(bad("监听端口不能为 0".to_string()));
+        }
+        s.ws_port = v;
+    }
     if let Some(v) = body.telnet_port {
         s.telnet_port = v;
     }
@@ -343,10 +340,7 @@ async fn settings_put(
     if let Some(cfg) = &body.lease {
         lease::save_config(cfg).map_err(bad)?;
     }
-    // 返回视图同样用运行时监听事实覆盖（与 GET 同口径——PUT 的返回值
-    // 就是前端设置页的下一次显示态）
-    s.ws_host = state.listen.0.clone();
-    s.ws_port = state.listen.1;
+    // 返回视图回显落盘后的 settings.json（s 已合并写入值；监听改动重启生效）
     Ok(Json(SettingsView {
         server: s,
         lease: body.lease.unwrap_or_else(|| state.leases.cfg.clone()),
