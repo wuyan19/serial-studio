@@ -164,7 +164,6 @@ button {
   height: 34px;
   flex-shrink: 0;
   background: var(--bg);
-  border-bottom: 1px solid var(--hairline-soft);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -3678,15 +3677,13 @@ button {
   height: 100vh;
   background: var(--bg);
 }
-/* 三栏横排容器：画布上的一行卡片（侧栏/内容区/终端面板）。
-   缝隙对齐 main .app__body（8px）——缝太小会把卡片顶边描边贴到标题栏上，
-   被读成标题栏的分隔下划线 */
+/* 三栏横排容器：画布上的一行卡片（侧栏/内容区/终端面板），4px 画布缝 */
 .shell-row {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 8px;
-  padding: 8px;
+  gap: 4px;
+  padding: 4px;
 }
 /* ---------- 自绘标题栏（仅桌面壳渲染；Windows 去系统装饰后由它接管窗口头） ---------- */
 .titlebar {
