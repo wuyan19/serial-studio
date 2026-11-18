@@ -23,9 +23,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use rust_embed::RustEmbed;
 
-/// 内嵌前端（ui-topo/dist，编译期打入；build.rs 保证目录存在——未构建时为占位页）。
+/// 内嵌前端（ui-rack/dist，编译期打入；build.rs 保证目录存在——未构建时为占位页）。
 #[derive(RustEmbed)]
-#[folder = "../../ui-topo/dist"]
+#[folder = "../../ui-rack/dist"]
 struct WebAsset;
 
 /// 静态资源 + SPA 回退（同 ss-server 模式）。
