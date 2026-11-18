@@ -459,6 +459,13 @@ pub(crate) fn create_secure_router(state: AppState) -> Router {
     create_router(state).layer(axum::Extension(access_http::SecureTransport))
 }
 
+/// 二次宿主的 TLS 安全路由适配：给任意组合路由打 SecureTransport 标记
+/// （与内置 create_secure_router 同构——访问验证按「请求来自 TLS 监听」放行
+/// 敏感操作）。注入 supervisor router_factory 的宿主给 secure 侧套本层。
+pub fn mark_secure(router: Router) -> Router {
+    router.layer(axum::Extension(access_http::SecureTransport))
+}
+
 /// REST: 列出端口（带别名）。WS 客户端也可通过 `{"action":"list"}` 获取。
 async fn list_ports(
     State(state): State<AppState>,

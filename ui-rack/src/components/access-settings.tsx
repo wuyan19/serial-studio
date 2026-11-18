@@ -186,7 +186,7 @@ export function AccessSettings() {
             )}
             <p className="dialog__hint">受保护的连接禁止经 Telnet 与 MCP 访问；应用保护设置会结束受影响的远程会话。</p>
             <p className="dialog__hint">
-              本进程暂未启用 HTTPS 监听，请保持勾选「允许通过 HTTP 验证」，否则远端将无法完成验证。
+              配置 HTTPS 证书并重启进程后，验证可走加密通道（TLS 端口见上方）；未配置证书时保持勾选「允许通过 HTTP 验证」，否则远端将无法完成验证。
             </p>
             <label className="access-settings__field">
               <span>验证码刷新时间</span>

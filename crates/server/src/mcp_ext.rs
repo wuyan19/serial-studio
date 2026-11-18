@@ -32,6 +32,13 @@ pub trait McpExtension: Send + Sync + 'static {
         true
     }
 
+    /// initialize 返回的 serverInfo.name（产品自报家门）。分叉产品声明自己的
+    /// 名字，客户端日志/连接列表里不至于把 devicerack 认成 serial-studio。
+    /// 默认 None = "serial-studio"（主产品行为不变）。
+    fn server_name(&self) -> Option<String> {
+        None
+    }
+
     /// 处理 tools/call。返回 None 表示"非本扩展的工具名"，交回调度链；
     /// 返回 Some 则是完整 MCP 工具结果（content 数组），与内置工具同构。
     ///

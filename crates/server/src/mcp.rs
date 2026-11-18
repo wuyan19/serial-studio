@@ -71,7 +71,7 @@ pub async fn handle_request_with(session: Option<&str>, body: &str, state: &AppS
     let params = request.get("params").cloned().unwrap_or(json!({}));
 
     let result = match method {
-        "initialize" => json!(handle_initialize()),
+        "initialize" => json!(handle_initialize(&state.mcp_extensions)),
         "notifications/initialized" => return json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "tools/list" => json!(handle_tools_list(&state.mcp_extensions)),
         "tools/call" => handle_tools_call(&params, session, state).await,
@@ -89,14 +89,20 @@ pub async fn handle_request_with(session: Option<&str>, body: &str, state: &AppS
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn handle_initialize() -> Value {
+fn handle_initialize(extensions: &[std::sync::Arc<dyn crate::mcp_ext::McpExtension>]) -> Value {
+    // serverInfo.name 默认 serial-studio；分叉产品经扩展声明自己的名字
+    // （谁分叉谁声明，同 builtin_tools_visible 范式）
+    let server_name = extensions
+        .iter()
+        .find_map(|e| e.server_name())
+        .unwrap_or_else(|| "serial-studio".into());
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
             "tools": { "listChanged": false },
             "prompts": { "listChanged": false }
         },
-        "serverInfo": { "name": "serial-studio", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": server_name, "version": env!("CARGO_PKG_VERSION") },
         // 会话令牌：调用方身份的凭据（租约持有/释放等扩展语义绑定它）。
         // 每次 initialize 新签；标准客户端回传 Mcp-Session-Id 头（handler 已回签），
         // 其余客户端可显式传工具的 token 参数。
@@ -1261,6 +1267,9 @@ mod tests {
             fn builtin_tools_visible(&self) -> bool {
                 false
             }
+            fn server_name(&self) -> Option<String> {
+                Some("fork-product".into())
+            }
             fn call<'a>(
                 &'a self,
                 name: &'a str,
@@ -1275,6 +1284,10 @@ mod tests {
 
         let mut state = make_state();
         state.mcp_extensions = vec![std::sync::Arc::new(ForkExt)];
+
+        // initialize：serverInfo.name 报分叉产品自己的名字
+        let resp = handle_request(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#, &state).await;
+        assert_eq!(resp["result"]["serverInfo"]["name"], "fork-product");
 
         // tools/list：内置隐藏 + 管理面隐藏 = 只剩 fork_tool
         let resp =

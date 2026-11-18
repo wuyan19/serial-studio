@@ -74,6 +74,14 @@ pub struct ServiceStatus {
 pub struct ServiceSupervisor {
     state: AppState,
     current: Mutex<Option<ServiceInstance>>,
+    /// 路由工厂（返回 plain/secure 一对）。缺省 None = 内置 create_router /
+    /// create_secure_router；二次宿主（devicerack）注入自己的组合路由
+    /// （拓扑域 + 自家 SPA fallback）——服务生命周期共享，路由归属各产品。
+    router_factory: Option<std::sync::Arc<dyn Fn() -> (axum::Router, axum::Router) + Send + Sync>>,
+    /// Telnet 通道服务开关。连接侧产品（serial-studio）开；设备侧平台
+    /// （devicerack）不开——Telnet 是串口工具的访问通道，且默认端口与
+    /// serial-studio 常同机冲突。
+    telnet_enabled: bool,
 }
 
 impl ServiceSupervisor {
@@ -81,7 +89,25 @@ impl ServiceSupervisor {
         Self {
             state,
             current: Mutex::new(None),
+            router_factory: None,
+            telnet_enabled: true,
         }
+    }
+
+    /// 注入产品路由工厂（plain, secure 各一）。工厂闭包自持产品状态
+    /// （supervisor 只管 AppState 生命周期，不碰产品域）。
+    pub fn with_router_factory(
+        mut self,
+        factory: impl Fn() -> (axum::Router, axum::Router) + Send + Sync + 'static,
+    ) -> Self {
+        self.router_factory = Some(std::sync::Arc::new(factory));
+        self
+    }
+
+    /// 关闭 Telnet 通道服务（设备侧平台用）。
+    pub fn without_telnet(mut self) -> Self {
+        self.telnet_enabled = false;
+        self
     }
 
     pub fn state(&self) -> &AppState {
@@ -130,7 +156,9 @@ impl ServiceSupervisor {
             .await
             .map_err(|e| format!("WS 绑定 {} 失败: {}", ws_addr, e))?;
 
-        let (telnet_addr, telnet) = if access.enabled && access.scope == AccessScope::All {
+        let (telnet_addr, telnet) = if !self.telnet_enabled
+            || (access.enabled && access.scope == AccessScope::All)
+        {
             (None, None)
         } else {
             let addr = format!("{}:{}", settings.ws_host, settings.telnet_port);
@@ -144,7 +172,10 @@ impl ServiceSupervisor {
             }
         };
 
-        let app = create_router(self.state.clone());
+        let app = match &self.router_factory {
+            Some(f) => f().0,
+            None => create_router(self.state.clone()),
+        };
         let (ws_shutdown, ws_shutdown_rx) = oneshot::channel();
         let ws_addr_for_log = ws_addr.clone();
         let ws_join = tokio::spawn(async move {
@@ -177,7 +208,10 @@ impl ServiceSupervisor {
     }
 
     fn serve_https(&self, listener: TcpListener, port: u16, acceptor: TlsAcceptor) -> HttpsHandle {
-        let app = create_secure_router(self.state.clone());
+        let app = match &self.router_factory {
+            Some(f) => f().1,
+            None => create_secure_router(self.state.clone()),
+        };
         let (shutdown, receiver) = oneshot::channel();
         let (acceptor, acceptor_rx) = watch::channel(acceptor);
         tracing::info!("HTTPS/WSS listening on port {port}");
@@ -214,7 +248,8 @@ impl ServiceSupervisor {
             None
         };
 
-        let telnet_enabled = !config.enabled || config.scope != AccessScope::All;
+        let telnet_enabled =
+            self.telnet_enabled && (!config.enabled || config.scope != AccessScope::All);
         let new_telnet = if telnet_enabled && instance.telnet.is_none() {
             let addr = format!("{}:{}", instance.host, instance.telnet_port);
             let handle = crate::telnet::start_telnet(addr.clone(), self.state.clone())

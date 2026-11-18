@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "devicerack-desktop"
-version = "0.21.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "ss-device"
-version = "0.21.0"
+version = "0.22.1"
 dependencies = [
  "dirs",
  "futures-util",

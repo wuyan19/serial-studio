@@ -812,6 +812,11 @@ impl McpExtension for TopoTools {
         false
     }
 
+    /// 产品自报家门：initialize 的 serverInfo.name 报 devicerack。
+    fn server_name(&self) -> Option<String> {
+        Some("devicerack".into())
+    }
+
     /// 管理面（设备/拓扑 CRUD）：tools/list 隐藏；tools/call 可用（已建立的自动化不受影响）。
     fn is_admin_tool(&self, name: &str) -> bool {
         matches!(

@@ -7,6 +7,7 @@
 //! 端口先同步 bind 再开窗：窗口加载时服务必然已在监听，无竞态白屏。
 
 use clap::Parser;
+use tauri::Manager;
 
 #[derive(Parser)]
 #[command(name = "devicerack-desktop", version, about = "devicerack 桌面壳")]
@@ -26,8 +27,10 @@ fn main() {
     // 存在则回退沿用），两形态共用同一份数据
     if std::env::var(ss_server::config::CONFIG_DIR_ENV).is_err() {
         if let Some(dir) = dirs::config_dir() {
-            let name = if dir.join("devicerack").exists() && !dir.join("devicerack").exists() {
-                "devicerack" // 老目录回退
+            // 旧名 topo-hub 目录存在而 devicerack 不存在时回退旧目录（与
+            // headless bin 同规则；字面量是历史目录名，勿被改名扫词误伤）
+            let name = if dir.join("topo-hub").exists() && !dir.join("devicerack").exists() {
+                "topo-hub" // 老目录回退
             } else {
                 "devicerack"
             };
@@ -53,10 +56,9 @@ fn main() {
         .setup(move |app| {
             // 组装状态 + 租约定时清扫（与 headless bin 的 main 相同），服务
             // 跑在 tauri 自带的 tokio 运行时上；bind 同步完成——失败（端口
-            // 被占用）直接弹窗退出，不开一个白屏窗口。
-            let listener = tauri::async_runtime::block_on(async {
+            // 被占用/证书无效）直接弹窗退出，不开一个白屏窗口。
+            let started = tauri::async_runtime::block_on(async {
                 let base = ss_server::create_state();
-                base.devices.start();
                 let state = devicerack::TopoState::create(base);
                 {
                     let leases = std::sync::Arc::clone(&state.leases);
@@ -69,14 +71,35 @@ fn main() {
                         }
                     });
                 }
-                let router = devicerack::create_router(state);
-                let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await;
-                listener.map(|l| (l, router))
+                // 服务生命周期走共享 ServiceSupervisor（WS/REST/MCP + 访问
+                // 验证 TLS 监听）；路由注入 devicerack 组合（拓扑域 + ui-rack
+                // SPA），Telnet 关闭（与 headless bin 相同）
+                let ts = state.clone();
+                let supervisor = std::sync::Arc::new(
+                    ss_server::supervisor::ServiceSupervisor::new(state.base.clone())
+                        .without_telnet()
+                        .with_router_factory(move || {
+                            let plain = devicerack::create_router(ts.clone());
+                            (plain.clone(), ss_server::mark_secure(plain))
+                        }),
+                );
+                let settings = ss_server::settings::Settings {
+                    ws_host: host.clone(),
+                    ws_port: port,
+                    ..ss_server::settings::load()
+                };
+                supervisor
+                    .start(&settings)
+                    .await
+                    .map(move |()| supervisor)
             });
-            let (listener, router) = match listener {
-                Ok(pair) => pair,
+            let supervisor = match started {
+                Ok(s) => s,
                 Err(e) => {
-                    let msg = format!("端口 {port} 被占用或不可用：{e}\n\n用 --port 换一个端口重试。");
+                    let msg = format!(
+                        "服务启动失败：{e}\n\n端口被占用时用 --port 换一个；\
+                         HTTPS 证书问题检查访问验证配置。"
+                    );
                     rfd::MessageDialog::new()
                         .set_title("devicerack 启动失败")
                         .set_level(rfd::MessageLevel::Error)
@@ -85,11 +108,9 @@ fn main() {
                     return Err(Box::new(std::io::Error::other(msg)));
                 }
             };
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = axum::serve(listener, router).await {
-                    tracing::error!("HTTP 服务异常退出: {e}");
-                }
-            });
+            // supervisor 挂进 tauri state 随 app 存续（进程退出即止；后续
+            // 状态查询/热重启等控制面按需取用）
+            app.manage(supervisor);
 
             // 窗口加载本机服务 URL（同源直连，Web/桌面同一份前端；
             // 窗口恒走 127.0.0.1——host 是给局域网浏览器用的，与窗口无关）。
