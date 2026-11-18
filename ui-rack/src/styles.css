@@ -5346,9 +5346,12 @@ table tbody tr:hover td {
   cursor: row-resize !important;
 }
 
-/* 布局菜单（标题栏钮下挂） */
+/* 布局菜单（标题栏钮下挂）：包裹层须与窗口钮同形态（stretch 撑满高度），
+   否则里面的按钮脱离三钮的水平线 */
 .titlebar__layout {
   position: relative;
+  display: flex;
+  align-self: stretch;
 }
 
 .layout-menu {
