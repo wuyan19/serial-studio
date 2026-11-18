@@ -101,6 +101,17 @@ export function IconSsh({ className }: IconProps) {
 }
 
 /** Manage / settings (sliders). */
+/** 自定义布局：外框内左列两行 + 右侧通高块（面板布局语义）。 */
+export function IconLayout({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+      <path d="M12 4v16" />
+      <path d="M12 12H3.5" />
+    </Svg>
+  );
+}
+
 export function IconSliders({ className }: IconProps) {
   return (
     <Svg className={className}>

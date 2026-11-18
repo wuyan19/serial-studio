@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauri, tauriInvoke } from "../lib";
-import { IconClose, IconSliders, IconWinMax, IconWinMin, IconWinRestore } from "../icons";
+import { IconClose, IconLayout, IconWinMax, IconWinMin, IconWinRestore } from "../icons";
 
 /** mac 判定：desktop 壳内 navigator.platform 足够（无需 plugin-os 精确平台）。 */
 function isMacPlatform(): boolean {
@@ -69,7 +69,7 @@ function TitleBarInner() {
             aria-label="自定义布局"
             onMouseDown={(e) => e.preventDefault()}
           >
-            <IconSliders className="titlebar__btn-icon" />
+            <IconLayout className="titlebar__btn-icon" />
           </button>
           {/* mousedown 不抢焦点：点了最小化/最大化后焦点保持原地 */}
           <button
