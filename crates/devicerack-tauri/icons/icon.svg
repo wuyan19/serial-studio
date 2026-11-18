@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512">
+
+  <title>NEXUS - Glacier Edition</title>
+
+  <!-- Glacier background -->
+  <rect width="512"
+        height="512"
+        rx="112"
+        fill="#EAF3F5"/>
+
+  <!-- Enlarged geometric symbol -->
+  <g transform="translate(256 256) scale(1.12) translate(-256 -256)">
+
+    <!-- Unified device management symbol -->
+    <path
+      d="
+        M256 91
+        L316 151
+        H352
+        Q392 151 392 191
+        V224
+        L424 256
+        L392 288
+        V321
+        Q392 361 352 361
+        H316
+        L256 421
+        L196 361
+        H160
+        Q120 361 120 321
+        V288
+        L88 256
+        L120 224
+        V191
+        Q120 151 160 151
+        H196
+        Z"
+      fill="#294A56"/>
+
+    <!-- Central negative space -->
+    <path
+      d="
+        M256 177
+        L335 256
+        L256 335
+        L177 256
+        Z"
+      fill="#EAF3F5"/>
+
+    <!-- Management core -->
+    <path
+      d="
+        M256 218
+        L294 256
+        L256 294
+        L218 256
+        Z"
+      fill="#C9A46C"/>
+
+  </g>
+
+</svg>
