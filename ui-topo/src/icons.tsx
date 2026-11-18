@@ -101,13 +101,13 @@ export function IconSsh({ className }: IconProps) {
 }
 
 /** Manage / settings (sliders). */
-/** 自定义布局：外框内左列两行 + 右侧通高块（面板布局语义）。 */
+/** 自定义布局：左通高面板 + 右侧上下两块（无外框，纯面板矩形）。 */
 export function IconLayout({ className }: IconProps) {
   return (
     <Svg className={className}>
-      <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-      <path d="M12 4v16" />
-      <path d="M12 12H3.5" />
+      <rect x="4" y="4" width="6.5" height="16" rx="1.5" />
+      <rect x="13.5" y="4" width="6.5" height="7" rx="1.5" />
+      <rect x="13.5" y="13" width="6.5" height="7" rx="1.5" />
     </Svg>
   );
 }
