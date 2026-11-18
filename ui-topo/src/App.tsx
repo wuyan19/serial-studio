@@ -84,12 +84,6 @@ export default function App() {
       <div className="shell">
         <div className="shell-row">
         <aside className="sidebar">
-          <div
-            className="brand"
-            title={connUp ? "已连接服务器" : "连接断开，重连中…"}
-          >
-            <span className={`brand__dot${connUp ? "" : " brand__dot--off"}`} />
-          </div>
           <nav>
             {nav.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.to === "/"} title={n.label}>

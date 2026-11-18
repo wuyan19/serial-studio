@@ -3676,16 +3676,16 @@ button {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 4px;
-  gap: 4px;
   background: var(--bg);
 }
-/* 三栏横排容器：画布上的一行卡片（侧栏/内容区/终端面板） */
+/* 三栏横排容器：画布上的一行卡片（侧栏/内容区/终端面板）；
+   4px 画布缝在行上——状态栏在行外贴底，平底条样式（main 同款） */
 .shell-row {
   flex: 1;
   min-height: 0;
   display: flex;
   gap: 4px;
+  padding: 4px;
 }
 /* ---------- 底部状态栏：连接胶囊 + 实例信息（main 同语言） ---------- */
 .statusbar {
@@ -3697,8 +3697,7 @@ button {
   padding: 0 14px;
   background: var(--surface);
   color: var(--ink-dim);
-  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
-  border-radius: var(--workspace-shell-radius);
+  border-top: 1px solid var(--hairline-soft);
   font-size: var(--fs-sm);
   user-select: none;
 }
