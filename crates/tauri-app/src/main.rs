@@ -577,9 +577,9 @@ async fn ssh_files(
     operation: ss_server::ssh::files::FileOperation,
 ) -> Result<ss_server::ssh::files::FileResult, String> {
     let owner = format!("window:{}", window.label());
-    let result = ss_server::ssh::files::execute(&state, &owner, &host_id, operation).await;
+    let result = ss_server::ssh::files::execute(&state.ssh, &state.devices, &owner, &host_id, operation).await;
     if window.app_handle().get_webview_window(window.label()).is_none() {
-        ss_server::ssh::files::release_owner(&state, &owner).await;
+        ss_server::ssh::files::release_owner(&state.ssh, &owner).await;
         return Err("窗口已关闭".into());
     }
     result
@@ -871,6 +871,7 @@ async fn run_script(
             None, // GUI 日志走 EventBus 实时推(按 run_id 路由),无需 sink
             // 落盘策略唯一在 script_logs(开关开才 Some);日志文件经设置页「打开目录」查看
             ss_server::script_logs::log_file_for(&port, Some(&name)),
+            None, // Tauri GUI 非 MCP 来源,写闸不适用
         )
         .await;
         script_runs.lock().unwrap().remove(&run_id_for_cleanup);
@@ -1180,7 +1181,7 @@ fn run_gui() {
                     let state = state.inner().clone();
                     let owner = format!("window:{label}");
                     tauri::async_runtime::spawn(async move {
-                        ss_server::ssh::files::release_owner(&state, &owner).await;
+                        ss_server::ssh::files::release_owner(&state.ssh, &owner).await;
                     });
                 }
                 let mgr = app.try_state::<AppState>().map(|s| s.manager.clone());

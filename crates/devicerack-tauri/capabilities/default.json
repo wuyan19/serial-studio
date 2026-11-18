@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认权限：窗口加载本机服务 URL（remote 命中 127.0.0.1/localhost 任意端口），仅开放自绘标题栏所需的核心窗口能力",
+  "windows": ["*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized"
+  ]
+}

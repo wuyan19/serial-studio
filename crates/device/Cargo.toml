@@ -1,0 +1,22 @@
+[package]
+name = "ss-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serial Studio 设备访问域：SSH/远端设备/寻址/端口视图/设备存储"
+
+[dependencies]
+ss-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1.24", features = ["v4"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.21"
+russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh-sftp = "3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
+dirs = "6"
+hex = "0.4"

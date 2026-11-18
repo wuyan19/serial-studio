@@ -257,7 +257,14 @@ pub(crate) async fn logout(
         .into_response()
 }
 
-pub(crate) async fn mcp(State(state): State<AppState>, body: String) -> Response {
+/// MCP HTTP 入口（access 保护之上的标准 Streamable HTTP 会话头）：
+/// 读入站 `Mcp-Session-Id` 头（principal 来源之一），initialize 时回签同名头
+/// （结果体同带一份 `session_token` 供不读头的客户端显式传工具 token 参数）。
+pub(crate) async fn mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if state.access.blocked_all() {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -266,10 +273,28 @@ pub(crate) async fn mcp(State(state): State<AppState>, body: String) -> Response
     if state.access.blocked_all() {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let incoming = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let result = tokio::select! {
         biased;
         _ = policy.wait_for(|r| *r != revision) => return StatusCode::FORBIDDEN.into_response(),
-        result = crate::mcp::handle_request(&body, &state) => result,
+        result = crate::mcp::handle_request_with(incoming.as_deref(), &body, &state) => result,
     };
-    Json(result).into_response()
+    let is_init = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
+        .as_deref()
+        == Some("initialize");
+    let token = is_init
+        .then(|| result["result"]["session_token"].as_str().map(str::to_string))
+        .flatten();
+    let mut out = Json(result).into_response();
+    if let Some(token) = token {
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&token) {
+            out.headers_mut().insert("mcp-session-id", hv);
+        }
+    }
+    out
 }

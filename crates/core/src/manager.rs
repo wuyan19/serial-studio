@@ -387,10 +387,16 @@ impl SerialManager {
                 return Err(SerialError::NotOpen(port.clone()));
             }
         };
-        // Opened(open 首开 / reopen 重连)→ 发 PortOpened(前端据此清断开红标)
-        if matches!(result, AcquireResult::Opened { .. }) {
+        // Opened(open 首开 / reopen 重连)→ 发 PortOpened(前端据此清断开红标)。
+        // 持有者数 0→1（首开）/保留 N（reopen）同样是持有变化，与附加/释放
+        // 同发 HoldersChanged——否则其它客户端的端口表要等重拉才见在线人数。
+        if let AcquireResult::Opened { holders, .. } = &result {
             self.event_bus
                 .publish(SerialEvent::PortOpened { port: port.clone() });
+            self.event_bus.publish(SerialEvent::HoldersChanged {
+                port: port.clone(),
+                holders: *holders,
+            });
         }
         Ok(result)
     }
@@ -934,16 +940,24 @@ mod tests {
         let s2 = SessionId::next();
         m.acquire("COM7".into(), cfg(115200), s1).await.unwrap();
         m.acquire("COM7".into(), cfg(115200), s2).await.unwrap();
-        // 附加应发布 HoldersChanged{holders:2}
+        // 事件流（自 manager 起）：首开 HoldersChanged{1}（0→1 同为持有变化，
+        // 与附加/释放一致——其它客户端的端口表才能即时见在线人数）→
+        // 附加 HoldersChanged{2}
+        let mut seen_first = false;
         let mut found = false;
         let deadline = std::time::Instant::now() + Duration::from_millis(200);
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(SerialEvent::HoldersChanged { port, holders }) => {
                     assert_eq!(port, "COM7", "事件端口应为 map 键(本机=裸名)");
-                    assert_eq!(holders, 2);
-                    found = true;
-                    break;
+                    if !seen_first {
+                        assert_eq!(holders, 1, "首开应发布 HoldersChanged{{1}}");
+                        seen_first = true;
+                    } else {
+                        assert_eq!(holders, 2);
+                        found = true;
+                        break;
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,

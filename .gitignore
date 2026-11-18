@@ -24,3 +24,8 @@
 
 .zcode/
 *.swp
+
+# topo-hub 前端
+/ui-rack/node_modules
+/ui-rack/dist
+/target-smoke

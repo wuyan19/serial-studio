@@ -109,7 +109,7 @@ impl SshOpenError {
 
 /// SSH 设备管理器。挂在 AppState(跨 ServiceSupervisor 热重启保留)。
 pub struct SshManager {
-    pub(crate) files: files::FileStore,
+    pub files: files::FileStore,
     /// 内存权威注册表(构造时读盘;save/remove 后同步)。
     registry: Mutex<Vec<SshHostRecord>>,
     /// hostId → 会话(懒建;dead 会话在下次 open 时替换)。

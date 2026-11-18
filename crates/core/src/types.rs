@@ -5,8 +5,10 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 串口配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 串口配置。容器级 serde(default)：允许部分字段缺省（设备通道内联配置等
+/// 场景按 Default 补全）——完整字段的既有线格式不受影响（解析更宽容，additive）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct SerialConfig {
     pub baud_rate: u32,
     #[serde(default = "default_data_bits")]

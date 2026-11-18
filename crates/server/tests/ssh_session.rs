@@ -489,6 +489,7 @@ async fn boot_ws() -> (String, Arc<SshManager>) {
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
+        mcp_extensions: Vec::new(),
         manager,
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -655,6 +656,7 @@ async fn instance_rows_visible_in_list() {
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

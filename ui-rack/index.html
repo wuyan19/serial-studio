@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh" data-theme="linear" data-lum="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>devicerack</title>
+    <!-- 主题体系与 serial-studio 同源(首帧防闪烁内联脚本 + styles.css token 块) -->
+    <style>
+      html, body, #root { margin: 0; height: 100%; }
+      html { background: #0a0b0d; color-scheme: dark; }
+      html[data-theme="linear-light"] { background: #f4f5f6; color-scheme: light; }
+      html[data-theme="apple"] { background: #161617; }
+      html[data-theme="apple-light"] { background: #f5f5f7; color-scheme: light; }
+      html[data-theme="raycast"] { background: #07080a; }
+      html[data-theme="raycast-light"] { background: #fafafa; color-scheme: light; }
+      html[data-theme="superhuman"] { background: #0e0c1f; }
+      html[data-theme="superhuman-light"] { background: #fafaf8; color-scheme: light; }
+      html[data-theme="claude"] { background: #181715; }
+      html[data-theme="claude-light"] { background: #f5f0e8; color-scheme: light; }
+      html[data-theme="cursor"] { background: #fafaf7; color-scheme: light; }
+      html[data-theme="stripe"] { background: #f6f9fc; color-scheme: light; }
+      html[data-theme="sentry"] { background: #150f23; }
+    </style>
+    <script>
+      (function () {
+        var ids = [
+          "linear", "linear-light",
+          "apple", "apple-light",
+          "raycast", "raycast-light",
+          "superhuman", "superhuman-light",
+          "claude", "claude-light",
+          "cursor", "stripe", "sentry",
+        ];
+        var legacy = { dark: "linear", light: "linear-light" };
+        var lightIds = {
+          "linear-light": 1, "apple-light": 1, "raycast-light": 1,
+          "superhuman-light": 1, "claude-light": 1, "cursor": 1, "stripe": 1,
+        };
+        function apply(t) {
+          var root = document.documentElement;
+          root.setAttribute("data-theme", t);
+          root.setAttribute("data-lum", lightIds[t] ? "light" : "dark");
+        }
+        try {
+          var s = localStorage.getItem("devicerack-theme");
+          var t;
+          if (ids.indexOf(s) >= 0) t = s;
+          else if (legacy[s]) {
+            t = legacy[s];
+            try { localStorage.setItem("devicerack-theme", t); } catch (e2) {}
+          } else {
+            t =
+              window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "linear-light"
+                : "linear";
+          }
+          apply(t);
+        } catch (e) {
+          apply("linear");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

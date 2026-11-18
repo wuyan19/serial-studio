@@ -1,0 +1,25 @@
+[package]
+name = "devicerack"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "AI 设备调试的网络设备管理平台（组合 ss-server 后端 + 设备/拓扑/租约域 + 自嵌控制台）"
+
+[dependencies]
+ss-core = { workspace = true }
+ss-server = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid = { version = "1.24", features = ["v4"] }
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+rust-embed = "8"
+mime_guess = "2"
+dirs = "6"

@@ -315,7 +315,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, grant: Grant, show_lo
     script_task.abort();
     device_task.abort();
     state.closers.lock().unwrap().remove(&session);
-    crate::ssh::files::release_owner(&state, &format!("ws:{session:?}")).await;
+    crate::ssh::files::release_owner(&state.ssh, &format!("ws:{session:?}")).await;
     // 本 session 启动的脚本跟着停(防 orphan:客户端断连后脚本继续占并发槽,无超时后变无界)
     let orphan_aborts: Vec<Arc<AtomicBool>> = state
         .script_runs
@@ -481,7 +481,7 @@ async fn handle_client_msg(
             let response = if host_blocked(state, grant, &host_id) {
                 Err("此连接需要授权，或仅允许在本机使用".into())
             } else {
-                crate::ssh::files::execute(state, &owner, &host_id, operation).await
+                crate::ssh::files::execute(&state.ssh, &state.devices, &owner, &host_id, operation).await
             };
             let (result, error) = match response {
                 Ok(value) => (Some(value), None),
@@ -496,7 +496,7 @@ async fn handle_client_msg(
                 .await
                 .is_err()
             {
-                crate::ssh::files::release_owner(state, &owner).await;
+                crate::ssh::files::release_owner(&state.ssh, &owner).await;
             }
         }
         ClientMsg::LibraryGet { request_id, kind } => {
@@ -874,6 +874,7 @@ async fn handle_client_msg(
                     // 落盘策略唯一在 script_logs(开关开才 Some);远程 GUI 无服务端目录入口,
                     // 路径不进 WS 协议,仅供服务端侧排查时按目录定位
                     crate::script_logs::log_file_for(&port, Some(&name)),
+                    None, // WS 客户端非 MCP 来源,写闸不适用
                 )
                 .await;
                 script_runs.lock().unwrap().remove(&run_id_for_cleanup);

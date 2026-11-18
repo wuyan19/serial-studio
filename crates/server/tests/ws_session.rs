@@ -69,6 +69,7 @@ async fn boot() -> (String, Arc<SerialManager>) {
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),
@@ -380,6 +381,7 @@ async fn open_by_alias_resolves_via_injected_resolver() {
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

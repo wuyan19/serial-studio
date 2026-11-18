@@ -99,7 +99,7 @@ impl DeviceClientManager {
         }
     }
 
-    pub(crate) fn is_private(&self, id: &str) -> bool {
+    pub fn is_private(&self, id: &str) -> bool {
         self.devices
             .lock()
             .unwrap()
@@ -107,7 +107,7 @@ impl DeviceClientManager {
             .is_some_and(|c| c.device().requires_verification())
     }
 
-    pub(crate) fn has_private_devices(&self) -> bool {
+    pub fn has_private_devices(&self) -> bool {
         self.devices
             .lock()
             .unwrap()
@@ -115,7 +115,7 @@ impl DeviceClientManager {
             .any(|c| c.device().requires_verification())
     }
 
-    pub(crate) fn has_port(&self, canonical: &str) -> bool {
+    pub fn has_port(&self, canonical: &str) -> bool {
         let (id, name) = ss_core::split_port_key(canonical);
         self.devices.lock().unwrap().get(id).is_some_and(|c| {
             c.cached_ports_snapshot()

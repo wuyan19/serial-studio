@@ -1,31 +1,10 @@
-//! Shared macro and script libraries backed by the existing configuration files.
+//! 共享宏/脚本库编排:载荷类型在 ss-device(线协议词典消费),读写委托本仓 store。
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    Macros,
-    Scripts,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Change {
-    pub before: Option<Value>,
-    pub after: Option<Value>,
-}
-
-pub type Changes = BTreeMap<String, Change>;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Snapshot {
-    pub items: Value,
-    pub server_id: String,
-}
+pub use ss_device::libraries::{Change, Changes, Kind, Snapshot};
 
 pub fn get(kind: Kind, server_id: &str) -> Result<Snapshot, String> {
     let items = match kind {
@@ -126,6 +105,8 @@ pub(crate) fn patch_locked<T: DeserializeOwned + Serialize>(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     fn directory() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ss-libraries-{}", uuid::Uuid::new_v4()));

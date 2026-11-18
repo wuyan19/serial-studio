@@ -112,6 +112,7 @@ async fn boot_as(echo: bool, inst: &'static str) -> Instance {
         port_groups: Arc::new(ss_server::port_groups::PortGroupsStore::memory(
             "test-server",
         )),
+        mcp_extensions: Vec::new(),
         manager: manager.clone(),
         event_bus,
         meta_bus: Arc::new(meta_tx.clone()),

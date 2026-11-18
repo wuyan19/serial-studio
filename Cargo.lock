@@ -1273,6 +1273,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "devicerack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "dirs",
+ "futures-util",
+ "mime_guess",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "ss-core",
+ "ss-server",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "devicerack-desktop"
+version = "0.21.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "devicerack",
+ "dirs",
+ "rfd",
+ "ss-server",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5272,6 +5314,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss-device"
+version = "0.21.0"
+dependencies = [
+ "dirs",
+ "futures-util",
+ "hex",
+ "russh",
+ "russh-sftp",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "ss-core",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ss-server"
 version = "0.22.1"
 dependencies = [
@@ -5288,12 +5350,12 @@ dependencies = [
  "mime_guess",
  "rand 0.10.3",
  "russh",
- "russh-sftp",
  "rust-embed",
  "rustls-native-certs",
  "serde",
  "serde_json",
  "ss-core",
+ "ss-device",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.21.0",
@@ -6117,6 +6179,18 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

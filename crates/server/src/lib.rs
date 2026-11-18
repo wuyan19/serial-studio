@@ -2,23 +2,32 @@
 //!
 //! 抽成 lib 是为了让 Tauri app（GUI 模式）和独立 ss-server bin（headless 模式）
 //! 共用同一套路由——方案 B 的核心：一份后端，两种宿主。
+//!
+//! 设备访问域（ssh/device/address/protocol/设备存储/PortView）已拆出至
+//! `ss-device` crate（crate 布局审核 P1 落地）；本 crate 保留适配器层（ws/mcp/
+//! telnet）、组合逻辑（list_ports_with_meta/set_alias）、其余存储与组装根，
+//! 经 `pub use` 重导出设备域模块——下游（tauri-app/topo-hub）零改动。
+
+// 设备域重导出（ss-device 的模块原路径在 ss-server 命名空间可见）
+pub use ss_device::{address, device, port_groups, port_meta_store, protocol, remotes_store, ssh};
+pub use ss_device::{
+    bare_name_of, endpoint_kind, instance_no, legacy_origin_view, local_device_view,
+    passthrough_port_key, rewrite_remote_device, ssh_device_view, DeviceView, PortView,
+    MAX_PASSTHROUGH_SEGMENTS,
+};
 
 pub mod access;
 mod access_http;
-pub mod address;
 pub mod config;
-pub mod device;
 pub mod macros_store;
+/// MCP JSON-RPC 层。pub 供二次宿主（topo-hub）的扩展工具做集成测试——
+/// 经 handle_request 走完整调度链（内置 + 扩展），绕过 axum 更轻。
+pub mod mcp;
 pub mod libraries;
-mod mcp;
-pub mod port_groups;
-pub mod port_meta_store;
-pub mod protocol;
-pub mod remotes_store;
+pub mod mcp_ext;
 pub mod script_logs;
 pub mod scripts_store;
 pub mod settings;
-pub mod ssh;
 pub mod supervisor;
 pub mod telnet;
 mod ws;
@@ -33,9 +42,8 @@ use axum::{
     Json, Router,
 };
 use rust_embed::RustEmbed;
-use serde::{Deserialize, Serialize};
 use ss_core::{EventBus, SerialManager, SessionId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -105,6 +113,9 @@ pub struct AppState {
     /// 本实例全局身份(段名=实例 id 的根基)。settings 首启生成落盘,跨重启稳定;
     /// 测试注入固定值不落盘。列表合并与别名索引的环检测语义判据用它。
     pub instance_id: Arc<str>,
+    /// MCP 工具集扩展(topo-hub 等二次宿主注入;串口工具自身不用)。
+    /// create_state 置空,宿主组装时直接改写本字段再进 router。
+    pub mcp_extensions: Vec<Arc<dyn mcp_ext::McpExtension>>,
 }
 
 /// 同时允许执行的脚本数（远程 DoS 防护:每脚本一个 OS 线程 + QuickJS runtime）。
@@ -158,151 +169,12 @@ pub fn create_state() -> AppState {
         ssh,
         addresses,
         instance_id,
+        mcp_extensions: Vec::new(),
     }
 }
 
-/// 端口行的属主设备视图(结构化元数据,列表合并每行内嵌)。id=稳定主键，
-/// label=已解析展示名(昵称优先)，detail=完整地址(悬停/详情用)，via=hub 够到
-/// 该设备的途径，online 仅 via="remote" 有值(hub 知道连接状态；SSH 懒连接、
-/// 本机恒在)。via 用字符串枚举而非 Rust enum:新版对端上报的新值不得让旧版
-/// 反序列化失败(kind 同理)。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DeviceView {
-    pub id: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub via: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub online: Option<bool>,
-}
+// ===== PortView/DeviceView 及纯函数已移至 ss-device；本文件经 pub use 重导出 =====
 
-/// 面向客户端的端口视图：core 的运行时事实(`PortInfo`) + server 层结构化元数据。
-/// serde(flatten) 把 PortInfo 内联；alias/kind/instance/device 均可缺省——
-/// 旧版对端解析新版上报得 None(平滑降级)，新版自身输出恒填充。
-/// name 复合键仍是唯一寻址键(降级为不透明句柄)，语义消费走结构化字段，
-/// UI 不再解析字符串猜属主/类别。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PortView {
-    #[serde(flatten)]
-    pub info: ss_core::PortInfo,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    /// 端点类别："serial"|"ssh"(字符串枚举，为 exec/tcp 等新端点类型留空间)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// 运行实例序号(Some(n)=shell@N 实例行；缺省=端点定义行/串口行)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instance: Option<u32>,
-    /// 属主设备(原始属主，非连接桶；远端桶经改写规则维持绝对属主)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device: Option<DeviceView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locked: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_tls_port: Option<u16>,
-}
-
-/// 本机设备视图(本地串口行的 device)。
-fn local_device_view() -> DeviceView {
-    DeviceView {
-        id: ss_core::LOCAL_DEVICE_ID.into(),
-        label: "本地".into(),
-        detail: None,
-        via: "local".into(),
-        online: None,
-    }
-}
-
-/// SSH 设备视图(注册表记录 → 结构化属主)。label 复用记录的解析规则(昵称回退 user@host)。
-fn ssh_device_view(rec: &ssh::SshHostRecord) -> DeviceView {
-    DeviceView {
-        id: rec.id.clone(),
-        label: rec.label(),
-        detail: Some(format!("{}@{}:{}", rec.username, rec.host, rec.port)),
-        via: "ssh".into(),
-        online: None,
-    }
-}
-
-/// 端点 type → 线上 kind。v1 仅 shell(→ssh)；未知值透传(字符串枚举，新旧互不炸)。
-fn endpoint_kind(t: &str) -> String {
-    if t == "shell" {
-        "ssh".into()
-    } else {
-        t.to_string()
-    }
-}
-
-/// 实例行名(shell@N)→ 序号；无 `@` 或尾段非数字 → None(端点定义行)。
-fn instance_no(rest: &str) -> Option<u32> {
-    rest.rsplit_once('@').and_then(|(_, n)| n.parse().ok())
-}
-
-/// 远端桶行的 device 改写(纯函数)：行的 device 缺失(旧版对端)或 via=local
-/// (对端自称本机的串口)时，改写为本机注册的直连设备视角；其余(对端的 SSH/
-/// 远端设备)原样保留。维持不变量：行上 device 恒为绝对属主——多级级联的口
-/// (devB::devC::COM3)归 origin 设备 devC，不归直连中转 devB。
-fn rewrite_remote_device(device: &mut Option<DeviceView>, direct: &DeviceView) {
-    let take = match device.as_ref() {
-        Some(d) => d.via == "local",
-        None => true,
-    };
-    if take {
-        *device = Some(direct.clone());
-    }
-}
-
-/// 旧版对端透传的多级行(线名自身含 `::`)不带 device 字段，而 origin 恰在线名
-/// 首段——合成最小属主视图(id=首段，via=remote，无昵称/地址)，不归直连中转
-/// (None 若直接走直连改写会把 origin 标成中转设备)。裸名返回 None(对端自家
-/// 串口，走直连改写)。新对端自带 device，不经此函数。
-fn legacy_origin_view(wire: &str) -> Option<DeviceView> {
-    let (origin, _) = ss_core::split_port_key(wire);
-    (origin != ss_core::LOCAL_DEVICE_ID).then(|| DeviceView {
-        id: origin.into(),
-        label: origin.into(),
-        detail: None,
-        via: "remote".into(),
-        online: None,
-    })
-}
-
-/// 端口键的裸名部分(剥设备前缀)。ports.json 按裸名存本机端口的别名——
-/// 本机端口键本就是裸名(遗留 `local::` 输入经 normalize 剥除),此函数对本机口
-/// 恒等;远端口别名随远端 PortView 透传,不走本地 ports.json。
-pub fn bare_name_of(port: &str) -> &str {
-    ss_core::split_port_key(port).1
-}
-
-/// 列表透传深度上限(段数,含末段端口名):4 段 = 三跳级联。病态长链的兜底,
-/// 非功能开关——真实深度受物理注册关系约束(每跳首段须为该机已注册设备)。
-pub(crate) const MAX_PASSTHROUGH_SEGMENTS: usize = 4;
-
-/// 远端桶条目透传判定(纯函数,列表合并与别名索引共用):组装候选键后按段链
-/// 双层检查——
-/// 1. **语义判据**(段名=实例 id 后生效):非首段含本机实例 id = 绕回路径
-///    (互注册幽灵 `instB::instA::COM7`,A 收到即知是自己的口绕回来的)→ 丢弃;
-///    首段豁免——首段是本机 compose 产生的直连段,自连镜像 `selfId::COM7` 合法;
-/// 2. **结构判据**(永在,兜底旧版对端——其段名仍是本地 uuid,语义判据失明):
-///    段重复 = 环(自连第二轮 `me::me::COM7`、互注册绕回 `ab::ba::ab::…`)→ 丢弃。
-///    段数超上限丢弃;否则返回透传键(多级级联口在直连设备的 UI 可见,归其分组平铺)。
-pub(crate) fn passthrough_port_key(dev_id: &str, wire: &str, self_id: &str) -> Option<String> {
-    let key = ss_core::compose_port_key(dev_id, wire);
-    let mut seen = HashSet::with_capacity(MAX_PASSTHROUGH_SEGMENTS + 1);
-    for (i, seg) in key.split(ss_core::PORT_KEY_SEP).enumerate() {
-        if i > 0 && seg == self_id {
-            return None; // 非首段含本机实例 id → 绕回(幽灵),不透传
-        }
-        if !seen.insert(seg) {
-            return None; // 段重复 → 环,不透传
-        }
-    }
-    if seen.len() > MAX_PASSTHROUGH_SEGMENTS {
-        return None; // 超深 → 病态长链,不透传
-    }
-    Some(key)
-}
 
 /// 列出端口并组合别名，返回面向客户端的 PortView。三条 list 路径（REST / WS / Tauri）共用。
 ///
@@ -564,8 +436,10 @@ fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     res
 }
 
-/// 构造 axum 路由。GUI/headless 共用。
-pub fn create_router(state: AppState) -> Router {
+/// 基础路由（/ws、/api/ports、/mcp），无 fallback。二次宿主（topo-hub）以
+/// base_router 起拼，追加自己的路由并替换 SPA fallback；本仓两个宿主
+/// （Tauri GUI、headless bin）仍走 create_router。
+pub fn base_router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/ports", get(list_ports))
@@ -573,8 +447,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/access/verify", post(access_http::verify))
         .route("/api/access/logout", post(access_http::logout))
         .route("/mcp", post(access_http::mcp))
-        .fallback(serve_web)
         .with_state(state)
+}
+
+/// 构造 axum 路由。GUI/headless 共用。
+pub fn create_router(state: AppState) -> Router {
+    base_router(state).fallback(serve_web)
 }
 
 pub(crate) fn create_secure_router(state: AppState) -> Router {
