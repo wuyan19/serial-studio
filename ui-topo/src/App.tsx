@@ -89,24 +89,20 @@ export default function App() {
             title={connUp ? "已连接服务器" : "连接断开，重连中…"}
           >
             <span className={`brand__dot${connUp ? "" : " brand__dot--off"}`} />
-            <span className="brand-text">topo-hub</span>
           </div>
           <nav>
             {nav.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.to === "/"} title={n.label}>
                 {n.icon}
-                <span className="nav-label">{n.label}</span>
               </NavLink>
             ))}
           </nav>
           <div className="sidebar__tools">
             <button className="tool-btn" onClick={() => openDialog("remote")} title="添加远程设备">
               <IconGlobe />
-              <span className="nav-label">添加远端</span>
             </button>
             <button className="tool-btn" onClick={() => openDialog("settings")} title="设置">
               <IconGear />
-              <span className="nav-label">设置</span>
             </button>
           </div>
         </aside>

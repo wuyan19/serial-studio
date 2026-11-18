@@ -31,8 +31,10 @@ import { IconChevronsRight, IconExpand, IconSsh } from "../icons";
 import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenError } from "../types";
 
 const STORE_KEY = "topo-hub-term-panel";
-const WIDTH_MIN = 320;
-const WIDTH_MAX = 720;
+const WIDTH_MIN = 260;
+const WIDTH_MAX = 960;
+/** 有效上限再扣内容区最小可用宽（窗口窄时先于常量上限生效）。 */
+const widthCeiling = () => Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, window.innerWidth - 420));
 const WIDTH_DEFAULT = 480;
 
 interface PanelLayout {
@@ -245,7 +247,7 @@ const TermPanel = forwardRef<
     const startX = e.clientX;
     const startWidth = layout.width;
     const move = (ev: PointerEvent) => {
-      const w = Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, startWidth + (startX - ev.clientX)));
+      const w = Math.min(widthCeiling(), Math.max(WIDTH_MIN, startWidth + (startX - ev.clientX)));
       setLayout((l) => ({ ...l, width: w }));
     };
     const up = () => {
@@ -260,7 +262,7 @@ const TermPanel = forwardRef<
 
   const nudgeWidth = (delta: number) => {
     if (layout.max) return;
-    setLayout((l) => ({ ...l, width: Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, l.width + delta)) }));
+    setLayout((l) => ({ ...l, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, l.width + delta)) }));
   };
 
   /** SSH 认证闭环：重输密码。勾选更新（默认）= 写回属主设备的 SSH 通道
@@ -564,22 +566,20 @@ const TermPanel = forwardRef<
       </aside>
 
       {!layout.open && (
-        <div className="term-rail">
-          <button
-            className="term-rail__btn"
-            title="展开终端面板"
-            aria-expanded={false}
-            aria-controls="term-panel"
-            onClick={() => setLayout((l) => ({ ...l, open: true }))}
-          >
-            <IconSsh />
-            {tabs.length > 0 && (
-              <span className="term-rail__count" title={`${tabs.length} 个活跃会话`}>
-                {tabs.length}
-              </span>
-            )}
-          </button>
-        </div>
+        <button
+          className="term-rail"
+          title="展开终端面板"
+          aria-expanded={false}
+          aria-controls="term-panel"
+          onClick={() => setLayout((l) => ({ ...l, open: true }))}
+        >
+          <IconSsh />
+          {tabs.length > 0 && (
+            <span className="term-rail__count" title={`${tabs.length} 个活跃会话`}>
+              {tabs.length}
+            </span>
+          )}
+        </button>
       )}
     </>
   );

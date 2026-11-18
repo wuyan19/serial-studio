@@ -3734,9 +3734,10 @@ button {
 }
 
 .sidebar {
-  width: 176px;
+  width: 52px;
   flex-shrink: 0;
-  padding: 14px 10px;
+  padding: 14px 8px;
+  gap: 14px;
   background: var(--surface);
   border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
   border-radius: var(--workspace-shell-radius);
@@ -3751,8 +3752,9 @@ button {
   font-size: var(--fs-md);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  padding: 0 8px;
+  padding: 0;
   white-space: nowrap;
 }
 
@@ -3773,13 +3775,23 @@ button {
 .sidebar nav a {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 9px;
   color: var(--ink-dim);
   text-decoration: none;
-  padding: 6px 10px;
+  padding: 8px 0;
   border-radius: var(--r-btn);
   font-size: var(--fs-base);
   white-space: nowrap;
+}
+.sidebar nav a svg {
+  width: 17px;
+  height: 17px;
+}
+/* 图标化导航无文本兜底（JSX 已撤 nav-label，防其他调用点回归） */
+.nav-label,
+.brand-text {
+  display: none;
 }
 
 .sidebar nav a svg {
@@ -3814,15 +3826,16 @@ button {
 .tool-btn {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   background: none;
   border: 1px solid var(--hairline);
   border-radius: var(--r-btn);
   color: var(--ink-dim);
-  padding: 5px 10px;
+  padding: 7px 0;
   font-size: var(--fs-sm);
   cursor: pointer;
-  text-align: left;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -4710,10 +4723,10 @@ table tbody tr:hover td {
 /* 左缘拖拽条：hover/聚焦出细高亮线；拖拽期间 body 加 panel-resizing 锁光标 */
 .term-panel__resizer {
   position: absolute;
-  left: -4px;
+  left: 0;
   top: 0;
   bottom: 0;
-  width: 8px;
+  width: 6px;
   cursor: col-resize;
   z-index: 6;
 }
@@ -4721,7 +4734,7 @@ table tbody tr:hover td {
 .term-panel__resizer::after {
   content: "";
   position: absolute;
-  left: 3px;
+  left: 2px;
   top: 0;
   bottom: 0;
   width: 2px;
@@ -4844,47 +4857,38 @@ table tbody tr:hover td {
   border-radius: var(--r-card);
 }
 
-/* 收起态右缘 rail：顶部一枚终端钮（= 应用右上角），活跃会话数角标 */
+/* 收起态右缘 rail：整条即按钮的圆角长条卡片（与壳卡片同语言），居中一枚
+   终端图标，活跃会话数角标挂顶部 */
 .term-rail {
-  width: 40px;
+  width: 36px;
   flex-shrink: 0;
-  border-left: 1px solid var(--hairline);
+  align-self: stretch;
+  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
+  border-radius: var(--workspace-shell-radius);
   background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 10px;
-}
-
-.term-rail__btn {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: var(--r-sm);
-  background: none;
   color: var(--ink-faint);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 
-.term-rail__btn svg {
-  width: 16px;
-  height: 16px;
+.term-rail svg {
+  width: 18px;
+  height: 18px;
 }
 
-.term-rail__btn:hover {
+.term-rail:hover {
   color: var(--ink);
-  background: var(--surface-3);
+  background: var(--surface-2);
 }
 
 .term-rail__count {
   position: absolute;
-  top: -4px;
-  right: -6px;
+  top: 8px;
+  right: 4px;
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
