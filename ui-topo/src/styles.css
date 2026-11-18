@@ -268,8 +268,8 @@ button {
   background: rgba(255, 255, 255, 0.06);
 }
 .act-icon__svg {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
 }
 
 /* manage menu popover */
@@ -322,8 +322,8 @@ button {
   color: var(--accent);
 }
 .manage-menu__item svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   color: var(--ink-faint);
 }
 
@@ -566,8 +566,8 @@ button {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 .icon-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
 }
 
 .sidebar__empty {
@@ -652,8 +652,8 @@ button {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 .port-item__force svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 /* 别名编辑（铅笔）overlay：所有端口长显（默认淡色，悬停强调），不再依赖行 hover。
    与强制关闭同区——有 force 时左移让位（force 在最右，edit 在其左）。 */
@@ -685,8 +685,8 @@ button {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .port-item__edit svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 
 /* inline 别名输入（端口行铅笔 / tab 双击触发，原地替换 PortLabel）。
@@ -843,8 +843,8 @@ button {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .macro-action svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .macro-result {
   display: flex;
@@ -1091,8 +1091,8 @@ button {
   color: var(--danger);
 }
 .tab__btn svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 /* 设备断开态:tab 灰显 + 状态点转红(保留 scrollback,可点重连按钮恢复)。 */
 .tab[data-disconnected="true"] {
@@ -1122,8 +1122,8 @@ button {
   border-bottom: 1px solid transparent;
 }
 .banner svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
 }
 .banner--err {
@@ -1230,8 +1230,8 @@ button {
   background: rgba(255, 255, 255, 0.06);
 }
 .banner__close svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 
 /* channel strip — the instrument status bar (signature lives here) */
@@ -1562,8 +1562,8 @@ button {
   color: var(--ink);
 }
 .searchbar__btn svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .searchbar__close:hover {
   color: var(--danger);
@@ -1825,8 +1825,8 @@ button {
   background: var(--surface-2);
 }
 .dialog__max svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .dialog--max {
   width: min(1180px, 94vw);
@@ -2136,8 +2136,8 @@ button {
   color: var(--ink-dim); /* Linear 的 eyebrow 是灰的——彩色只留给可交互元素 */
 }
 .dialog__title svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
 }
 .dialog__sub {
   margin: 0 0 16px;
@@ -2520,8 +2520,8 @@ button {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .btn svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .btn--icon {
   display: inline-flex;
@@ -2598,7 +2598,7 @@ button {
   cursor: grabbing;
 }
 .step-grip svg {
-  width: 12px;
+  width: 14px;
   height: 16px;
 }
 .step-num {
@@ -2624,8 +2624,8 @@ button {
   color: var(--ink-dim);
 }
 .step-tag svg {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
 }
 .step-head__spacer {
   flex: 1;
@@ -2668,8 +2668,8 @@ button {
   color: var(--danger);
 }
 .mini-btn svg {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
 }
 
 .add-step-row {
@@ -2708,8 +2708,8 @@ button {
   color: var(--c-clear);
 }
 .add-step svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 
 .json-preview {
@@ -2746,8 +2746,8 @@ button {
   gap: 6px;
 }
 .editor-error svg {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
 }
 
 /* ============================================================
@@ -2769,8 +2769,8 @@ button {
   color: var(--accent); /* 跟随主题交互色 */
 }
 .about__mark svg {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
 }
 .about__name {
   margin: 0;
@@ -3454,8 +3454,8 @@ button {
   font-weight: 600;
 }
 .dlg-settings__titlebar-title svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
 }
 .dlg-settings__titlebar .dlg-settings__btn {
   color: color-mix(in srgb, var(--on-accent) 80%, transparent);
@@ -3496,8 +3496,8 @@ button {
   background: var(--surface-2);
 }
 .dlg-settings__btn svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 .dlg-settings__search {
   flex: 1;
@@ -3834,8 +3834,8 @@ button {
   white-space: nowrap;
 }
 .sidebar nav a svg {
-  width: 17px;
-  height: 17px;
+  width: 19px;
+  height: 19px;
 }
 /* 图标化导航无文本兜底（JSX 已撤 nav-label，防其他调用点回归） */
 .nav-label,
@@ -3844,8 +3844,8 @@ button {
 }
 
 .sidebar nav a svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   flex-shrink: 0;
   opacity: 0.75;
 }
@@ -3890,8 +3890,8 @@ button {
 }
 
 .tool-btn svg {
-  width: 17px;
-  height: 17px;
+  width: 19px;
+  height: 19px;
   flex-shrink: 0;
 }
 
@@ -4855,8 +4855,8 @@ table tbody tr:hover td {
 }
 
 .term-panel__btn svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 
 .term-panel__btn:hover {
@@ -4921,8 +4921,8 @@ table tbody tr:hover td {
 }
 
 .term-rail svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
 }
 
 .term-rail:hover {
@@ -5004,8 +5004,8 @@ table tbody tr:hover td {
   }
 
   .sidebar nav a svg {
-    width: 17px;
-    height: 17px;
+    width: 19px;
+    height: 19px;
   }
 
   .tool-btn {
