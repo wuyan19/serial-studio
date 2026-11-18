@@ -4,7 +4,7 @@
   "version": "0.21.0",
   "identifier": "com.topohub.app",
   "build": {
-    "frontendDist": "../../ui-topo/dist"
+    "frontendDist": "../../ui-rack/dist"
   },
   "app": {
     "windows": [],

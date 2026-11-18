@@ -2,7 +2,7 @@
 //!
 //! 通知走独立 SSE 通道（/api/events，见 events.rs），不改 ss-server 的 WS 协议——
 //! 这是设计文档 §6 的实现修正：命令面 REST、通知面 SSE，拓扑数据变更频率低，
-//! 无需把 ui-topo 绑进串口终端的 WS 词典。
+//! 无需把 ui-rack 绑进串口终端的 WS 词典。
 
 use crate::device::{self, Channel, Device, DeviceInput};
 use crate::lease;
@@ -307,8 +307,12 @@ async fn settings_get(State(state): State<TopoState>) -> Json<SettingsView> {
 /// AppState 缓存的原子开关）；监听参数写盘后重启生效；lease.json 重启生效。
 #[derive(Deserialize)]
 pub struct SettingsBody {
-    ws_host: Option<String>,
-    ws_port: Option<u16>,
+    /// 监听参数显式忽略（topo-hub 时代起监听就由启动参数决定）——保留字段
+    /// 吞掉前端/脚本误传值，不回写 settings.json（避免底座字段与本进程漂移）
+    #[serde(default)]
+    _ws_host: Option<String>,
+    #[serde(default)]
+    _ws_port: Option<u16>,
     telnet_port: Option<u16>,
     enable_scripting: Option<bool>,
     script_log_to_disk: Option<bool>,

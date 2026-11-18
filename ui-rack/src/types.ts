@@ -1,4 +1,4 @@
-/** 与 serial-studio 后端线协议对齐的类型子集（ui-topo 消费的部分）。 */
+/** 与 serial-studio 后端线协议对齐的类型子集（ui-rack 消费的部分）。 */
 
 export interface SerialConfig {
   baud_rate: number;

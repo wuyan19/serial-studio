@@ -2,7 +2,7 @@
 //!
 //! 组合形态（设计文档 §2 P0）：复用 ss-server 的共享运行时与基础路由
 //! （/ws、/api/ports、/mcp），叠加拓扑域（REST + SSE + MCP 工具集），
-//! 自嵌 ui-topo 控制台 SPA。不依赖 tauri-app。
+//! 自嵌 ui-rack 控制台 SPA。不依赖 tauri-app。
 
 pub mod api;
 pub mod audit;

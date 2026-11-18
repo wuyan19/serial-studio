@@ -1,6 +1,6 @@
 //! SSE 变更通知流（GET /api/events）。
 //!
-//! ui-topo 的推送通道：topo_changed（拓扑定义变更）/ lease_changed（租约申请、
+//! ui-rack 的推送通道：topo_changed（拓扑定义变更）/ lease_changed（租约申请、
 //! 续租、释放、过期、抢占）。事件不载荷数据——客户端收到即重拉 REST，变更频率
 //! 低，重拉语义最简单且天然幂等。Lagged（消费太慢）同样触发重拉，行为正确。
 

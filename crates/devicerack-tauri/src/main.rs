@@ -112,9 +112,10 @@ fn main() {
             // macOS 的 Overlay 标题栏层会居中渲染窗口 title（自绘标题栏管不到），
             // 清空窗口标题以隐藏；Dock/菜单栏显示的是应用名，不受影响。
             #[cfg(target_os = "macos")]
-            {
-                let _ = win.set_title("");
-            }
+            win.set_title("");
+            // Windows 编译路径下 win 仅 macOS 分支使用
+            #[cfg(not(target_os = "macos"))]
+            let _ = win;
             Ok(())
         })
         .run(tauri::generate_context!())
