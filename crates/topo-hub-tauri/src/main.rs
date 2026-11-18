@@ -14,6 +14,10 @@ struct Args {
     /// HTTP 端口（REST/WS/MCP 同端口；与 headless bin 同默认）
     #[arg(long, default_value_t = 18800)]
     port: u16,
+    /// 绑定地址：默认仅本机（GUI 程序保守默认——服务无认证，静默暴露到
+    /// 局域网不负责任）；要局域网访问显式 --host 0.0.0.0（headless 同参）
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
 }
 
 fn main() {
@@ -33,6 +37,7 @@ fn main() {
 
     let args = Args::parse();
     let port = args.port;
+    let host = args.host;
 
     tauri::Builder::default()
         // 自绘标题栏的系统菜单（仅 Windows 有实现；mac/Linux stub no-op）
@@ -57,7 +62,7 @@ fn main() {
                     });
                 }
                 let router = topo_hub::create_router(state);
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
+                let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await;
                 listener.map(|l| (l, router))
             });
             let (listener, router) = match listener {
@@ -78,7 +83,8 @@ fn main() {
                 }
             });
 
-            // 窗口加载本机服务 URL（同源直连，Web/桌面同一份前端）。
+            // 窗口加载本机服务 URL（同源直连，Web/桌面同一份前端；
+            // 窗口恒走 127.0.0.1——host 是给局域网浏览器用的，与窗口无关）。
             // Windows 去系统装饰，窗口头由前端 .titlebar 自绘；mac 壳用原生
             // Overlay 红绿灯（去窗口 title 字样）；Linux 保留系统装饰
             // （无装饰 GTK 窗口没有边缘 resize 把手，不可拖边调大小）。
