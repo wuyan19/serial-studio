@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
     let base = ss_server::create_state();
     base.devices.start();
 
-    let state = TopoState::create(base);
+    let mut state = TopoState::create(base);
+    state.listen = (args.host.clone(), args.port);
     // 租约定时清扫：读路径已惰性清扫，这里是无人访问时的兜底（崩溃客户端的
     // 租约最多多活到下一个整分钟 tick）。
     {

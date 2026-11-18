@@ -33,8 +33,8 @@ export function buildSettingsCategories(): SettingsCategoryDef[] {
       description: "平台进程的监听与脚本、租约配置，应用后生效（监听地址/端口重启进程生效）。",
       keywords: ["server", "服务", "端口", "监听", "scripting", "脚本", "lease", "租约"],
       items: [
-        { id: "srv.ws_host", label: "监听地址", description: "服务绑定的地址（重启进程生效）", control: "srv-text" },
-        { id: "srv.ws_port", label: "服务端口", description: "Web 控制台与 MCP 的 HTTP/WS 端口（重启进程生效）", keywords: ["port"], control: "srv-number" },
+        { id: "srv.ws_host", label: "监听地址", description: "实际绑定地址，由启动参数 --host 决定（默认仅本机）", control: "srv-readonly" },
+        { id: "srv.ws_port", label: "服务端口", description: "Web 控制台与 MCP 的端口，由启动参数 --port 决定（默认 18800）", keywords: ["port"], control: "srv-readonly" },
         { id: "srv.enable_scripting", label: "远程脚本", description: "允许 Agent/远程客户端执行 JS 脚本（可读写本机文件）", keywords: ["scripting", "脚本"], control: "srv-checkbox-scripting" },
         { id: "lease.ttl_minutes", label: "租约时长", description: "设备占用租约的默认有效分钟数", keywords: ["lease", "ttl", "租约"], control: "lease-number" },
         { id: "lease.max_ttl_minutes", label: "租约上限", description: "单次申请/续租允许的最大分钟数", keywords: ["lease", "max", "租约"], control: "lease-number" },

@@ -215,25 +215,19 @@ export function SettingsPage({
             ))}
           </div>
         );
-      case "srv-text":
+      case "srv-readonly":
         return (
           <input
-            value={srv?.ws_host ?? ""}
-            onChange={(e) => srv && setSrv({ ...srv, ws_host: e.target.value })}
+            readOnly
+            value={
+              item.id === "srv.ws_host"
+                ? srv?.ws_host ?? ""
+                : String(srv?.ws_port ?? "")
+            }
             className="field dlg-settings__text"
             autoCapitalize="off"
             spellCheck={false}
-          />
-        );
-      case "srv-number":
-        return (
-          <input
-            type="number"
-            value={srv?.ws_port ?? ""}
-            onChange={(e) => srv && setSrv({ ...srv, ws_port: Number(e.target.value) })}
-            className="field dlg-settings__num"
-            autoCapitalize="off"
-            spellCheck={false}
+            title="监听参数由进程启动时的 --host/--port 决定"
           />
         );
       case "srv-checkbox-scripting":
