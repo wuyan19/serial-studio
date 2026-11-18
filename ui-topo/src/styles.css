@@ -3687,6 +3687,58 @@ button {
   gap: 4px;
   padding: 4px;
 }
+/* ---------- 自绘标题栏（仅桌面壳渲染；Windows 去系统装饰后由它接管窗口头） ---------- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  flex-shrink: 0;
+  background: var(--bg);
+  user-select: none;
+}
+.titlebar__traffic,
+.titlebar__title {
+  pointer-events: none;
+}
+.titlebar__traffic {
+  width: 8px;
+}
+.titlebar[data-mac="true"] .titlebar__traffic {
+  width: 78px;
+}
+.titlebar__title {
+  flex: 1;
+}
+.titlebar__controls {
+  display: flex;
+  align-self: stretch;
+}
+.titlebar__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  border: 0;
+  background: none;
+  color: var(--ink-dim);
+  cursor: default;
+}
+.titlebar__btn:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.titlebar__btn:active {
+  background: var(--surface-2);
+}
+.titlebar__btn--close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+.titlebar__btn-icon {
+  width: 14px;
+  height: 14px;
+}
+
 /* ---------- 底部状态栏：连接胶囊 + 实例信息（main 同语言） ---------- */
 .statusbar {
   flex-shrink: 0;

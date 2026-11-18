@@ -25,3 +25,7 @@ tracing-subscriber = { workspace = true }
 dirs = "6"
 # 端口占用等启动失败的本地弹窗（无窗口可依赖时的兜底）
 rfd = "0.15"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# 自绘标题栏右键系统菜单（Win32 API：GetSystemMenu/TrackPopupMenu）
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

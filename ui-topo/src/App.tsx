@@ -5,9 +5,11 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
+import { isTauri } from "./lib";
 import { RemoteDialog } from "./components/dialogs";
 import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
+import { TitleBar } from "./components/titlebar";
 import { IconGear, IconGlobe, IconLock, IconServer, IconTopology } from "./icons";
 import type { SshHost } from "./types";
 
@@ -82,6 +84,7 @@ export default function App() {
       value={{ openDialog, sshHosts, openTerminal, toggleTermPanel }}
     >
       <div className="shell">
+        {isTauri() && <TitleBar />}
         <div className="shell-row">
         <aside className="sidebar">
           <nav>

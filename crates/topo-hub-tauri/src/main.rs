@@ -2,7 +2,7 @@
 //!
 //! 与 serial-studio 桌面壳（重 IPC 命令层：端口数据/命令/文件全走 invoke）不同，
 //! topo-hub 前端是纯 Web 架构（WS/REST/SSE 同源直连本地服务）——桌面化=窗口壳，
-//! 零 IPC：前端不加任何 isTauri 分支，Web/桌面同一份代码同一套数据面。
+//! 唯一的 IPC 是自绘标题栏的右键系统菜单（show_system_menu，仅 Windows 生效）。
 //!
 //! 端口先同步 bind 再开窗：窗口加载时服务必然已在监听，无竞态白屏。
 
@@ -35,6 +35,8 @@ fn main() {
     let port = args.port;
 
     tauri::Builder::default()
+        // 自绘标题栏的系统菜单（仅 Windows 有实现；mac/Linux stub no-op）
+        .invoke_handler(tauri::generate_handler![show_system_menu])
         .setup(move |app| {
             // 组装状态 + 租约定时清扫（与 headless bin 的 main 相同），服务
             // 跑在 tauri 自带的 tokio 运行时上；bind 同步完成——失败（端口
@@ -76,19 +78,78 @@ fn main() {
                 }
             });
 
-            // 窗口加载本机服务 URL（同源直连，Web/桌面同一份前端）
+            // 窗口加载本机服务 URL（同源直连，Web/桌面同一份前端）。
+            // Windows 去系统装饰，窗口头由前端 .titlebar 自绘；mac 壳用原生
+            // Overlay 红绿灯（去窗口 title 字样）；Linux 保留系统装饰
+            // （无装饰 GTK 窗口没有边缘 resize 把手，不可拖边调大小）。
             let url = format!("http://127.0.0.1:{port}/");
-            tauri::WebviewWindowBuilder::new(
+            let mut builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::External(url.parse().expect("本机 URL 解析失败")),
             )
             .title("topo-hub")
             .inner_size(1440.0, 900.0)
-            .min_inner_size(900.0, 600.0)
-            .build()?;
+            .min_inner_size(900.0, 600.0);
+            #[cfg(target_os = "windows")]
+            {
+                builder = builder.decorations(false);
+            }
+            let win = builder.build()?;
+            // macOS 的 Overlay 标题栏层会居中渲染窗口 title（自绘标题栏管不到），
+            // 清空窗口标题以隐藏；Dock/菜单栏显示的是应用名，不受影响。
+            #[cfg(target_os = "macos")]
+            {
+                let _ = win.set_title("");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("topo-hub 桌面壳运行失败");
 }
+
+/// 自绘标题栏右键 → 原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。
+/// 自绘窗口头后系统菜单没了，右键由此补回（VS Code 同款体验）。仅 Windows；
+/// mac/Linux 无此习惯，stub no-op（前端不浪费 IPC）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn show_system_menu(window: tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMenu, PostMessageW, SendMessageW, SetForegroundWindow,
+        TrackPopupMenu, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL, WM_SYSCOMMAND,
+    };
+    let Ok(h) = window.hwnd() else { return };
+    // tauri(windows crate) HWND → windows-sys HWND(同为 *mut c_void 包裹)
+    let hwnd = h.0 as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return;
+        }
+        let menu = GetSystemMenu(hwnd, 0);
+        if menu.is_null() {
+            return;
+        }
+        // TrackPopupMenu 经典配方(Raymond Chen)：前后配 SetForegroundWindow/WM_NULL，
+        // 否则菜单一闪而过或点外面不消失
+        SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        );
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+        if cmd != 0 {
+            SendMessageW(hwnd, WM_SYSCOMMAND, cmd as usize, 0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn show_system_menu() {}

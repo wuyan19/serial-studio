@@ -1,5 +1,17 @@
 /** 小工具（抄自 serial-studio lib.ts 的所需子集）。 */
 
+/** Tauri 桌面壳内 = true（注入的 __TAURI_INTERNALS__ 只在桌面存在）。 */
+export function isTauri(): boolean {
+  return !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+}
+
+/** Tauri command 调用（仅桌面壳内可用；TitleBar 系统菜单走这里）。 */
+export async function tauriInvoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (c: string, a?: Record<string, unknown>) => Promise<T> } }).__TAURI_INTERNALS__;
+  if (!internals) throw new Error('tauriInvoke 仅在桌面壳内可用');
+  return internals.invoke(cmd, args);
+}
+
 export const REPO_URL = "https://github.com/wuyan19/serial-studio";
 
 export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
