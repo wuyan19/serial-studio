@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/device", "crates/server", "crates/tauri-app", "crates/topo-hub"]
+members = ["crates/core", "crates/device", "crates/server", "crates/tauri-app", "crates/topo-hub", "crates/topo-hub-tauri"]
 
 [workspace.package]
 version = "0.21.0"

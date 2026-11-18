@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认权限：仅核心能力——窗口加载本机服务 URL，前端零 IPC 调用",
+  "windows": ["*"],
+  "permissions": ["core:default"]
+}

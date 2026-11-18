@@ -6333,6 +6333,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "topo-hub-desktop"
+version = "0.21.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dirs",
+ "rfd",
+ "ss-server",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "topo-hub",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
