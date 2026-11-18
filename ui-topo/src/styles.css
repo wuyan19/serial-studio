@@ -208,8 +208,8 @@ button {
   color: #fff;
 }
 .titlebar__btn-icon {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
 }
 
 /* ---------- activity bar ---------- */
@@ -3733,8 +3733,8 @@ button {
   color: #fff;
 }
 .titlebar__btn-icon {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
 }
 
 /* ---------- 底部状态栏：连接胶囊 + 实例信息（main 同语言） ---------- */
@@ -3834,8 +3834,8 @@ button {
   white-space: nowrap;
 }
 .sidebar nav a svg {
-  width: 19px;
-  height: 19px;
+  width: 21px;
+  height: 21px;
 }
 /* 图标化导航无文本兜底（JSX 已撤 nav-label，防其他调用点回归） */
 .nav-label,
@@ -3890,8 +3890,8 @@ button {
 }
 
 .tool-btn svg {
-  width: 19px;
-  height: 19px;
+  width: 21px;
+  height: 21px;
   flex-shrink: 0;
 }
 

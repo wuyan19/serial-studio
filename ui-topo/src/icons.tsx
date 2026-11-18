@@ -101,6 +101,36 @@ export function IconSsh({ className }: IconProps) {
 }
 
 /** Manage / settings (sliders). */
+/** 布局·侧栏+主区：左窄通高 + 右宽通高。 */
+export function IconLayoutMain({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="4" y="4" width="6" height="16" rx="1.5" />
+      <rect x="12.5" y="4" width="7.5" height="16" rx="1.5" />
+    </Svg>
+  );
+}
+
+/** 布局·上下两行：两块通宽横排。 */
+export function IconLayoutRows({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="4" y="4" width="16" height="7" rx="1.5" />
+      <rect x="4" y="13" width="16" height="7" rx="1.5" />
+    </Svg>
+  );
+}
+
+/** 布局·双列：两块等宽竖排。 */
+export function IconLayoutColumns({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect x="4" y="4" width="7" height="16" rx="1.5" />
+      <rect x="13" y="4" width="7" height="16" rx="1.5" />
+    </Svg>
+  );
+}
+
 /** 自定义布局：左通高面板 + 右侧上下两块（无外框，纯面板矩形）。 */
 export function IconLayout({ className }: IconProps) {
   return (
