@@ -7,10 +7,12 @@ import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
 import { isTauri } from "./lib";
 import { RemoteDialog } from "./components/dialogs";
+import { LayoutMenuButton } from "./components/layout-menu";
 import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
 import { TitleBar } from "./components/titlebar";
 import { IconGear, IconGlobe, IconLock, IconServer, IconTopology } from "./icons";
+import { loadLayoutMode, saveLayoutMode, type LayoutMode } from "./layout";
 import type { SshHost } from "./types";
 
 type DialogKind = null | "settings" | "remote";
@@ -39,6 +41,7 @@ const nav = [
 
 export default function App() {
   const [dialog, setDialog] = useState<DialogKind>(null);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(loadLayoutMode);
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [version, setVersion] = useState("");
@@ -78,14 +81,18 @@ export default function App() {
   const toggleTermPanel = useCallback(() => {
     termPanel.current?.togglePanel();
   }, []);
+  const changeLayout = useCallback((m: LayoutMode) => {
+    setLayoutMode(m);
+    saveLayoutMode(m);
+  }, []);
 
   return (
     <ShellContext.Provider
       value={{ openDialog, sshHosts, openTerminal, toggleTermPanel }}
     >
       <div className="shell">
-        {isTauri() && <TitleBar />}
-        <div className="shell-row">
+        {isTauri() && <TitleBar layoutMode={layoutMode} onLayoutChange={changeLayout} />}
+        <div className="shell-row" data-layout={layoutMode}>
         <aside className="sidebar">
           <nav>
             {nav.map((n) => (
@@ -103,10 +110,12 @@ export default function App() {
             </button>
           </div>
         </aside>
-          <main className="content">
-            <Outlet />
-          </main>
-          <TermPanel ref={termPanel} sshHosts={sshHosts} />
+          <div className="work-area">
+            <main className="content">
+              <Outlet />
+            </main>
+            <TermPanel ref={termPanel} sshHosts={sshHosts} mode={layoutMode} />
+          </div>
         </div>
         <footer className="statusbar">
           <span className={`statusbar__conn${connUp ? "" : " statusbar__conn--off"}`}>
@@ -116,6 +125,12 @@ export default function App() {
           <span className="statusbar__msg">
             devicerack{version ? ` · ${version}` : ""}
           </span>
+          {/* Web 模式无标题栏，布局菜单挂状态栏右缘（桌面壳在标题栏） */}
+          {!isTauri() && (
+            <span className="statusbar__layout">
+              <LayoutMenuButton layoutMode={layoutMode} onLayoutChange={changeLayout} />
+            </span>
+          )}
         </footer>
       </div>
 

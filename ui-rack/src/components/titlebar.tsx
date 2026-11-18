@@ -8,19 +8,30 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauri, tauriInvoke } from "../lib";
-import { IconClose, IconLayout, IconWinMax, IconWinMin, IconWinRestore } from "../icons";
+import type { LayoutMode } from "../layout";
+import { LayoutMenuButton } from "./layout-menu";
+import { IconClose, IconWinMax, IconWinMin, IconWinRestore } from "../icons";
 
 /** mac 判定：desktop 壳内 navigator.platform 足够（无需 plugin-os 精确平台）。 */
 function isMacPlatform(): boolean {
   return typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 }
 
-export function TitleBar() {
+export function TitleBar(props: {
+  layoutMode: LayoutMode;
+  onLayoutChange: (m: LayoutMode) => void;
+}) {
   if (!isTauri()) return null;
-  return <TitleBarInner />;
+  return <TitleBarInner {...props} />;
 }
 
-function TitleBarInner() {
+function TitleBarInner({
+  layoutMode,
+  onLayoutChange,
+}: {
+  layoutMode: LayoutMode;
+  onLayoutChange: (m: LayoutMode) => void;
+}) {
   // 组件内取窗口引用（非模块顶层！）：getCurrentWindow() 在纯浏览器会因缺
   // __TAURI_INTERNALS__ 直接抛错——静态 import 链会把 Web 模式整站带崩。
   const win = useMemo(() => getCurrentWindow(), []);
@@ -62,15 +73,8 @@ function TitleBarInner() {
       <div className="titlebar__title" />
       {!mac && (
         <div className="titlebar__controls">
-          {/* 自定义布局（占位）：后续在此挂布局编辑入口 */}
-          <button
-            className="titlebar__btn"
-            title="自定义布局"
-            aria-label="自定义布局"
-            onMouseDown={(e) => e.preventDefault()}
-          >
-            <IconLayout className="titlebar__btn-icon" />
-          </button>
+          {/* 自定义布局：四预设菜单（IconLayout 四变体，切换即时生效） */}
+          <LayoutMenuButton layoutMode={layoutMode} onLayoutChange={onLayoutChange} />
           {/* mousedown 不抢焦点：点了最小化/最大化后焦点保持原地 */}
           <button
             className="titlebar__btn"

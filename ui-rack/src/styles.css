@@ -5287,3 +5287,138 @@ table tbody tr:hover td {
   visibility: hidden;
   pointer-events: none;
 }
+
+/* ============================================================
+   自定义布局（标题栏「自定义布局」菜单，四预设 devicerack-layout）
+   .shell-row 两子 = 侧栏 + .work-area（主区+终端）；预设只切
+   .work-area 主轴方向与侧栏在场——DOM 恒定，纯 CSS 分叉：
+   - standard     侧栏 + 行排（主区 + 终端右栏）
+   - term-bottom  侧栏 + 列排（主区上 + 终端下）
+   - rows         隐藏侧栏 + 列排（全宽上下分栏）
+   - columns      隐藏侧栏 + 行排（主区/终端双列等宽）
+   类名已 grep 全文件防撞（work-area/layout-menu 等无同名老段）。
+   ============================================================ */
+.work-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  gap: 4px;
+}
+
+.shell-row[data-layout="term-bottom"] .work-area,
+.shell-row[data-layout="rows"] .work-area {
+  flex-direction: column;
+}
+
+.shell-row[data-layout="rows"] .sidebar,
+.shell-row[data-layout="columns"] .sidebar {
+  display: none;
+}
+
+/* 双列等宽：主区与终端各占一半（不给手调，等分即该预设的意义） */
+.shell-row[data-layout="columns"] .term-panel:not(.term-panel--max) {
+  flex: 1 1 0;
+}
+
+/* 底部形态的拖拽条改在上缘（横向拖高） */
+.term-panel__resizer--row {
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: auto;
+  width: auto;
+  height: 6px;
+  cursor: row-resize;
+}
+
+.term-panel__resizer--row::after {
+  left: 0;
+  right: 0;
+  top: 2px;
+  bottom: auto;
+  width: auto;
+  height: 2px;
+}
+
+.panel-resizing-row,
+.panel-resizing-row * {
+  cursor: row-resize !important;
+}
+
+/* 布局菜单（标题栏钮下挂） */
+.titlebar__layout {
+  position: relative;
+}
+
+.layout-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 224px;
+  padding: 4px;
+  background: var(--surface);
+  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
+  border-radius: var(--workspace-shell-radius);
+  box-shadow: var(--workspace-shell-shadow);
+}
+
+.layout-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: calc(var(--workspace-shell-radius) - 4px);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+
+.layout-menu__item:hover {
+  background: var(--hover);
+}
+
+.layout-menu__item--on {
+  color: var(--accent);
+}
+
+.layout-menu__icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.layout-menu__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.layout-menu__text b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.layout-menu__text small {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Web 模式：布局菜单挂状态栏右缘（桌面壳在标题栏，两形态同一组件） */
+.statusbar__layout {
+  margin-left: auto;
+  display: inline-flex;
+}
+
+.statusbar__layout .titlebar__btn {
+  width: 26px;
+  height: 22px;
+}

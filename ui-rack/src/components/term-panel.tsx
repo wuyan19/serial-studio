@@ -28,6 +28,7 @@ import { ws } from "../ws";
 import TermView, { type TermHandle } from "./term";
 import { SerialConfigDialog, SshAuthDialog, SshTrustDialog } from "./dialogs";
 import { IconChevronsRight, IconExpand, IconSsh } from "../icons";
+import type { LayoutMode } from "../layout";
 import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenError } from "../types";
 
 const STORE_KEY = "devicerack-term-panel";
@@ -36,10 +37,17 @@ const WIDTH_MAX = 960;
 /** 有效上限再扣内容区最小可用宽（窗口窄时先于常量上限生效）。 */
 const widthCeiling = () => Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, window.innerWidth - 420));
 const WIDTH_DEFAULT = 480;
+/** 底部终端形态（term-bottom/rows）的纵向尺寸档位。 */
+const HEIGHT_MIN = 140;
+const HEIGHT_MAX = 560;
+const heightCeiling = () => Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, window.innerHeight - 260));
+const HEIGHT_DEFAULT = 280;
 
 interface PanelLayout {
   open: boolean;
   width: number;
+  /** 底部形态高度（右栏形态用不到，跨模式切换各自记忆）。 */
+  height: number;
   max: boolean;
 }
 
@@ -51,13 +59,14 @@ function loadLayout(): PanelLayout {
       return {
         open: !!v.open,
         width: Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, Number(v.width) || WIDTH_DEFAULT)),
+        height: Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, Number(v.height) || HEIGHT_DEFAULT)),
         max: !!v.max,
       };
     }
   } catch {
     /* 损坏回退默认 */
   }
-  return { open: false, width: WIDTH_DEFAULT, max: false };
+  return { open: false, width: WIDTH_DEFAULT, height: HEIGHT_DEFAULT, max: false };
 }
 
 export interface TermPanelHandle {
@@ -73,10 +82,14 @@ interface Tab {
 
 const TermPanel = forwardRef<
   TermPanelHandle,
-  { sshHosts: SshHost[] }
->(function TermPanel({ sshHosts }, ref) {
+  { sshHosts: SshHost[]; mode: LayoutMode }
+>(function TermPanel({ sshHosts, mode }, ref) {
   const navigate = useNavigate();
   const [layout, setLayout] = useState<PanelLayout>(loadLayout);
+  /** 终端条形态（底部）vs 右栏形态：拖拽轴/尺寸属性随布局模式切换；
+   *  columns 双列等宽 = 固定五五开，不给手调。 */
+  const horizontal = mode === "term-bottom" || mode === "rows";
+  const fixedSize = mode === "columns";
   const [devices, setDevices] = useState<Device[]>([]);
   const ports = useLivePorts();
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -241,9 +254,29 @@ const TermPanel = forwardRef<
     h.focus();
   }, []);
 
-  /** 左缘拖拽调宽（最大化态不拖）。键盘等价：← 加宽 / → 收窄。 */
+  /** 内缘拖拽调尺寸（最大化态不拖）：右栏形态拖左缘调宽，底部形态拖上缘调高。
+   *  键盘等价：收窄方向 ←/↑、加宽方向 →/↓（随轴）。 */
   const beginResize = (e: React.PointerEvent) => {
-    if (e.button !== 0 || layout.max) return;
+    if (e.button !== 0 || layout.max || fixedSize) return;
+    if (horizontal) {
+      const startY = e.clientY;
+      const startHeight = layout.height;
+      const move = (ev: PointerEvent) => {
+        const h = Math.min(heightCeiling(), Math.max(HEIGHT_MIN, startHeight + (startY - ev.clientY)));
+        setLayout((l) => ({ ...l, height: h }));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.classList.remove("panel-resizing");
+        document.body.classList.remove("panel-resizing-row");
+      };
+      document.body.classList.add("panel-resizing");
+      document.body.classList.add("panel-resizing-row");
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      return;
+    }
     const startX = e.clientX;
     const startWidth = layout.width;
     const move = (ev: PointerEvent) => {
@@ -260,9 +293,13 @@ const TermPanel = forwardRef<
     window.addEventListener("pointerup", up);
   };
 
-  const nudgeWidth = (delta: number) => {
-    if (layout.max) return;
-    setLayout((l) => ({ ...l, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, l.width + delta)) }));
+  const nudgeSize = (delta: number) => {
+    if (layout.max || fixedSize) return;
+    setLayout((l) =>
+      horizontal
+        ? { ...l, height: Math.min(heightCeiling(), Math.max(HEIGHT_MIN, l.height + delta)) }
+        : { ...l, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, l.width + delta)) },
+    );
   };
 
   /** SSH 认证闭环：重输密码。勾选更新（默认）= 写回属主设备的 SSH 通道
@@ -327,24 +364,38 @@ const TermPanel = forwardRef<
             ? `term-panel${layout.max ? " term-panel--max" : ""}`
             : "term-panel term-panel--hidden"
         }
-        style={layout.max ? undefined : { width: layout.width }}
+        style={
+          layout.max || fixedSize
+            ? undefined
+            : horizontal
+              ? { height: layout.height }
+              : { width: layout.width }
+        }
         aria-label="终端"
       >
-        {layout.open && !layout.max && (
+        {layout.open && !layout.max && !fixedSize && (
           <div
-            className="term-panel__resizer"
+            className={`term-panel__resizer${horizontal ? " term-panel__resizer--row" : ""}`}
             role="separator"
-            aria-orientation="vertical"
-            aria-label="调整终端面板宽度"
+            aria-orientation={horizontal ? "horizontal" : "vertical"}
+            aria-label={horizontal ? "调整终端面板高度" : "调整终端面板宽度"}
             tabIndex={0}
             onPointerDown={beginResize}
             onKeyDown={(e) => {
-              if (e.key === "ArrowLeft") {
+              if (horizontal) {
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  nudgeSize(24);
+                } else if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  nudgeSize(-24);
+                }
+              } else if (e.key === "ArrowLeft") {
                 e.preventDefault();
-                nudgeWidth(24);
+                nudgeSize(24);
               } else if (e.key === "ArrowRight") {
                 e.preventDefault();
-                nudgeWidth(-24);
+                nudgeSize(-24);
               }
             }}
           />
