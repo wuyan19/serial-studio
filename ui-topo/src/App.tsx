@@ -8,7 +8,7 @@ import { ws } from "./ws";
 import { RemoteDialog } from "./components/dialogs";
 import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
-import { IconGear, IconGlobe, IconLock, IconPlug, IconTopology } from "./icons";
+import { IconGear, IconGlobe, IconLock, IconServer, IconTopology } from "./icons";
 import type { SshHost } from "./types";
 
 type DialogKind = null | "settings" | "remote";
@@ -31,7 +31,7 @@ export const useShell = () => useContext(ShellContext);
 
 const nav = [
   { to: "/", label: "拓扑", icon: <IconTopology /> },
-  { to: "/devices", label: "设备", icon: <IconPlug /> },
+  { to: "/devices", label: "设备", icon: <IconServer /> },
   { to: "/leases", label: "占用", icon: <IconLock /> },
 ];
 

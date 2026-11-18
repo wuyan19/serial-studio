@@ -3823,35 +3823,31 @@ button {
 }
 
 .tool-btn {
+  /* 与导航项同语言：无边框透明底，hover 同款浮起（对齐 .sidebar nav a） */
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   background: none;
-  border: 1px solid var(--hairline);
+  border: none;
   border-radius: var(--r-btn);
   color: var(--ink-dim);
-  padding: 7px 0;
-  font-size: var(--fs-sm);
+  padding: 8px 0;
+  font-size: var(--fs-base);
   cursor: pointer;
   text-align: center;
   white-space: nowrap;
 }
 
 .tool-btn svg {
-  width: 14px;
-  height: 14px;
+  width: 17px;
+  height: 17px;
   flex-shrink: 0;
-  opacity: 0.75;
 }
 
 .tool-btn:hover {
   color: var(--ink);
   background: var(--surface-2);
-}
-
-.tool-btn:hover svg {
-  opacity: 1;
 }
 
 .theme-select {
