@@ -1,87 +1,202 @@
-# devicerack
+# Serial Studio
 
 [English](README.md) · **简体中文**
 
-面向 AI 真实设备调试阶段的**网络设备管理平台**：以设备为中心组织调试资源——设备注册、拓扑管理、占用租约、Agent 工具面；串口/SSH/远端级联等连接能力整体复用同一 Rust 底座。
+<p><img src="crates/tauri-app/icons/icon.png" width="84" alt="Serial Studio 图标"></p>
 
-与 Serial Studio 同底座、不同视角：Serial Studio 站在连接一侧（串口终端工具），devicerack 站在设备一侧（连接只是设备的访问通道）。
+![release](https://img.shields.io/github/v/release/wuyan19/serial-studio)
+![Tauri](https://img.shields.io/badge/Tauri-2.x-blue)
+![Rust](https://img.shields.io/badge/Rust-2021-orange)
+![React](https://img.shields.io/badge/React-18-61dafb)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-<p><img src="docs/screenshot-rack.png" width="720" alt="devicerack 拓扑总览"></p>
+**设备调试工作台 —— 串口 / SSH 终端、宏与脚本、MCP 供 AI 接入。本地桌面 / Web 浏览器 / 远程设备。基于 Tauri + Rust + React。**
+
+Serial Studio 让你从桌面应用、局域网内任意浏览器，或由 LLM 经 MCP 驱动来调试设备——串口直连、
+SSH 登录远端 Linux、或把开发板经远程设备协议级联进来，后端都是同一套 Rust 核心。多个客户端可
+共享同一端口，重复交互能写成宏，端口还能标注设备别名。
+
+<p align="center"><img src="docs/screenshot.png" width="720" alt="Serial Studio 界面截图"></p>
+
+---
+
+> **姊妹项目 —— [devicerack](crates/devicerack/README.zh-CN.md)。** 本仓库在一套 Rust 底座上
+> 承载两个产品：Serial Studio（本 README，连接侧的串口/SSH 调试工作台）与 devicerack——
+> 设备侧的网络设备管理平台（设备注册表、拓扑、独占租约、设备本体论 MCP 工具面；独立 UI
+> 与桌面壳见 `ui-rack/`、`crates/devicerack-tauri/`）。
+
+---
 
 ## ✨ 功能特性
 
-- **设备注册表**——被测设备是一等实体（名称/型号/位置），串口控制台与 SSH 登录作为设备的接入通道内联管理；未注册端口仍可直接访问（现场兜底）。
-- **拓扑管理**——多拓扑画布编辑（拖拽布局、设备间连线、物理端口标签如 `GE0/1`），成员引用设备、一台设备可属多个拓扑。
-- **占用租约**——设备级排他写权（all-or-nothing）：冲突整体拒绝并告知持有者，TTL 到期自动释放，支持排队等待；Web 端占用中心供人查看与强制收回。租约即写权：拿到租约即可直接下发命令。
-- **设备本体论 MCP 工具面（11 工具）**——发现（`get_topology` / `get_device` / `list_my_leases`）+ 租约（`acquire_lease` / `renew_lease` / `release_lease`）+ I/O（`exec_command` / `open_session` / `send_input` / `read_output` / `close_session`）。设备+通道寻址，Agent 不接触端口键；设备/拓扑管理等管理工具经声明从工具清单隐藏（调用不受影响）。
-- **终端面板**——设备通道即点即开，会话跨页存活；认证失败有重输密码的修复闭环。
-- **多实例级联与访问控制**——远端实例级联组网；远程访问验证（一次性验证码 + TLS）可按连接启用。
+- **多端口终端** —— 多端口并发，标签页切换或分栏并排，基于 xterm.js。
+- **端口共享** —— 多窗口 / 多客户端可 attach 到同一端口。首开者配置生效，后来者加入收发。
+  强制关闭可踢掉所有持有者。
+- **宏** —— 步骤序列（`send` / `delay` / `expect` / `clear`），可导入 / 导出 JSON，
+  跨机器分享。
+- **脚本** —— 宏不够用时用 JS 写完整控制流（重试 / 分支 / 循环 / 解析）。脚本跑在已打开的端口上，传可选 port 参数即可用一个脚本驱动多个串口；声明运行时参数后，运行时弹窗收集，换参数重跑无需改代码。运行中可暂停 / 继续。
+- **串口别名** —— 给端口标注所连设备，如 `GPS (COM7)`。
+- **SSH 终端** —— 登录远端 Linux（服务器 / 路由器 / OpenWrt），终端与串口并列同窗；文件面板
+  优先 SFTP，BusyBox / Dropbear 自动回退 SSH 兼容模式，支持浏览、预览、拖拽上传与下载。
+- **远程设备级联** —— 注册远端设备（完整 serial-studio 或板上几十 KB 的 bridge），端口以
+  `昵称::端口名` 汇入本机，Web UI / 脚本 / MCP 统一寻址，可多级级联。
+- **三种使用形态：**
+  - **本地** 桌面应用（IPC 直连，绕过网络）。
+  - **Web** —— 浏览器开 `http://host:port/`，界面内嵌在二进制里。
+  - **远程** —— 从桌面应用开一个远程窗口连到另一台机器的 Serial Studio。
+- **MCP** —— 把端口暴露给 LLM：12 个工具覆盖读写、搜索、状态与脚本，可用端口名
+  **或别名** 寻址，远程设备端口同样直达。
+- **Telnet** —— 兼容老式终端客户端。
 
 ## 🧱 架构
 
+控制面和数据面刻意分离：
+
+- **控制面**（Tauri IPC）—— 配置、服务生命周期、别名与宏的持久化。
+- **数据面**（axum）—— WebSocket、MCP、Telnet、SSH、远程设备级联；串口侧共用
+  同一套 `SerialManager` + `EventBus`。
+
+### Crate 划分
+
 | Crate | 职责 |
 |---|---|
-| `ss-core` | 串口引擎：端口生命周期、事件总线、脚本引擎（QuickJS） |
-| `ss-device` | 设备访问域：SSH 会话池、远端设备客户端、寻址解析、端口视图、SFTP 文件传输 |
-| `ss-server` | 数据面与组装根：WS/REST/MCP 基座、访问控制、宏与脚本库 |
-| `devicerack` | 拓扑域：设备注册表、拓扑、租约、审计、设备本体论工具面、平台进程 |
-| `ui-topo` | 控制台 SPA（React + React Flow） |
-
-依赖链 `devicerack → ss-server → ss-device → ss-core`：平台复用工具的全部数据面（`/ws`、`/api/ports`、`/mcp`），在其上叠加设备/拓扑/租约域。
+| `ss-core` | 串口管理器：端口占有权（acquire / release / force-close）、接收缓冲、宏执行器、QuickJS 脚本引擎（含暂停 / 继续）。纯运行时——不碰持久化、不碰 UI。 |
+| `ss-server` | axum WS / MCP / Telnet / SSH / 远程设备级联 + 内嵌 SPA（`rust-embed`）。Tauri 外壳和独立二进制共用。 |
+| `serial-studio`（`tauri-app`） | Tauri 外壳——服务监督 + 控制面命令。 |
 
 ## 🛠 技术栈
 
-Rust + axum + tokio · React 18 + Vite + React Flow · rust-embed（单二进制交付 SPA）
+Tauri 2 · Rust（edition 2021，axum、serialport、tokio）· React 18 · TypeScript · Vite · xterm.js
+
+## 📋 环境要求
+
+- Rust（stable）
+- Node.js（构建前端）
+- Windows：WebView2（Win 10/11 已预装）
+- 一个串口（真实或虚拟）
 
 ## 🚀 快速开始
 
 ```bash
 # 构建前端 + release 二进制
-npm --prefix ui-topo install && npm --prefix ui-topo run build
-cargo build --release -p devicerack
+npm install --prefix ui
+cargo tauri build
 
-# 运行（默认 0.0.0.0:18800，错开 serial-studio 的 18700；配置目录独立）
-./target/release/devicerack
+# 或开发模式（前端热重载）
+cargo tauri dev
 ```
+
+release 产物为 `serial-studio.exe`。
 
 ## 📖 用法
 
-1. **设备页**注册被测设备：添加通道（本机/级联串口键，或 SSH 主机+认证）；
-2. **拓扑页**创建拓扑、画布上添加成员与连线（可标物理端口）；
-3. 浏览器打开 `http://<host>:18800`，或让 Agent 经 MCP 接入。
+- **桌面** —— 运行 `serial-studio.exe`。
+- **Web / 浏览器** —— 应用启动一个服务（WS `18700`、Telnet `18701`）。局域网内任意机器
+  开 `http://<host>:18700/`，界面由二进制直接提供。
+- **远程窗口** —— 从桌面应用里开一个远程窗口，连接另一台 Serial Studio 主机。
+- **Headless** —— `serial-studio.exe --no-gui` 只跑后台服务（无窗口）。
 
-## 🤖 MCP
+> **首次运行（未签名构建）：** release 暂未做代码签名。
+> - **macOS** —— 会被 Gatekeeper 拦截。拖进 `/Applications` 后去掉隔离标记：
+>   ```bash
+>   xattr -dr com.apple.quarantine "/Applications/Serial Studio.app"
+>   ```
+> - **Windows** —— SmartScreen 提示，点「更多信息 → 仍要运行」。
 
-`POST /mcp`，JSON-RPC（Streamable HTTP，`initialize` 回签 `Mcp-Session-Id`）。典型调试链：
-
-```
-get_topology（选拓扑/看成员）
-  → acquire_lease（设备级排他写权）
-  → exec_command / open_session + send_input（下发命令、保持 CLI 状态）
-  → release_lease（用完即还，I/O 连接连带收回）
-```
-
-会话输出带游标（`read_output` 补读/观察 debug 输出）；租约释放/到期/人工收回均连带关闭该 Agent 的连接，全部动作落审计日志。
+> **关于更新：** Windows 与 Linux 版本支持应用内自动更新（帮助 → 关于 → 检查更新）。
+> **macOS 不支持自动更新** —— 未经 Apple 公证的 app 自更新替换后会被 Gatekeeper 再次拦截，
+> 请到 [Releases](https://github.com/wuyan19/serial-studio/releases) 页手动下载新 `.dmg`。
 
 ## ⚙️ 配置
 
-配置目录独立于 serial-studio（`%APPDATA%/devicerack` / `~/.config/devicerack`）：`devices.json`（设备与通道）、`topologies.json`（拓扑）、`lease.json`（租约参数）、`settings.json`（服务设置）。
+运行时配置放在二进制同目录：
+
+| 文件 | 内容 |
+|---|---|
+| `settings.json` | 服务监听地址 / 端口、`enable_scripting` 等开关 |
+| `ports.json` | 端口元数据（别名等） |
+| `macros.json` | 宏 |
+| `scripts.json` | 脚本库 |
+| `remotes.json` | 远程设备注册 |
+| `groups.json` | 端口分组 |
+| `ssh_hosts.json` / `ssh_known_hosts.json` | SSH 主机与指纹 |
+
+## 🤖 MCP
+
+`POST /mcp`,JSON-RPC 协议。共 12 个工具:6 个基础(`serial_list`、`serial_send`、
+`serial_read`、`serial_status`、`serial_grep`、`serial_clear`),2 个脚本执行
+(`serial_debug_script` 临时执行 JS 代码、`serial_run_script` 按名执行已保存脚本
+——均受 `enable_scripting` 开关控制),4 个脚本库管理(`serial_save_script`、
+`serial_get_script`、`serial_list_scripts`、`serial_delete_script`——纯数据管理,
+不受开关限制)。`port` 参数可用真实端口名 **或别名**。
+两个 prompt：`serial_usage_guide`（工具面工作流）与 `serial_script_guide`（脚本 API 与约束）。
+
+### 从 Claude Code 接入
+
+```bash
+claude mcp add --scope user --transport http SerialStudio http://<host>:18700/mcp
+```
+
+把 `<host>` 换成运行 Serial Studio 的机器(`127.0.0.1` 为本地桌面应用)。其他 MCP 客户端
+(Claude Desktop 等):添加指向同一 URL 的 HTTP MCP server。
+
+### 原始 JSON-RPC
+
+```jsonc
+{
+  "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+  "params": { "name": "serial_send", "arguments": { "port": "GPS", "data": "AT", "timeout_ms": 1000 } }
+}
+```
+
+## 🔌 开发板接入（自定义设备端）
+
+不跑完整 serial-studio 也能把开发板串口接进来：任意 Linux 板子上跑一个小程序实现
+「远程设备协议」的设备端子集，hub 侧 UI 注册设备地址后，端口即以 `昵称::端口名`
+出现在 Web UI / 脚本 / MCP 工具里——AI agent 经 MCP 直达板子串口。
+
+- 协议契约：[docs/device-protocol.md](docs/device-protocol.md)（握手 / 消息集 / 二进制数据帧布局）
+- 参考实现：[examples/ss-board-bridge.c](examples/ss-board-bridge.c)——单文件 C、纯 libc，
+  `musl-gcc -O2 -static` 一条命令出几十 KB 静态二进制，任何架构通用。
+- 预编译：Release 页附带 x86_64 / aarch64 / armv7 / riscv64 静态二进制（含 sha256 清单），
+  scp 到板子即可用，无需编译；mips/mipsel 请源码编译（一条 musl-gcc 命令，见文档）。
 
 ## 🔒 安全提示
 
-与 serial-studio 同一前提：面向可信内网，默认无认证。需要暴露到不完全可信网络时，启用远程访问验证（一次性验证码轮换 + TLS，受保护连接禁止经 Telnet 与 MCP 访问）。
+服务默认监听 `0.0.0.0` 且**默认无鉴权**。任何能访问到端口的人都能打开 / 发送数据到你的串口，
+并读取其输出。超出可信局域网的范围时，请在 `settings.json` 改绑 `127.0.0.1`，或置于
+防火墙 / VPN 之后。
+
+**远程访问验证**（设置 → 远程访问验证，默认关闭）可为指定连接启用保护：远端客户端须输入
+轮换一次性验证码（默认 5 分钟刷新）才能访问受保护连接；HTTPS 默认启用，明文 HTTP 需显式
+允许；受保护连接禁止经 Telnet 与 MCP 访问，脚本库 / 共享库在保护模式下仅限本机编辑。
+
+远程 JS 脚本执行（WS `run_script` / MCP `serial_debug_script`、`serial_run_script`）受
+`settings.json` 的 `enable_scripting` 开关控制，**默认关闭**。开启后任何可达客户端都能对
+串口执行 JS。沙箱暴露串口原语（`send`/`expect`/`clear`/`sleep`）与**宿主机文件读写**
+（`read_file`/`write_file`/`append_file` 等），无网络、进程访问。不可信网络请保持关闭。
+
+脚本库四工具（`serial_save_script` / `serial_get_script` / `serial_list_scripts` /
+`serial_delete_script`）属数据管理，**不受 `enable_scripting` 限制、始终可访问**：任何
+可达客户端都能读取已保存脚本的 code 全文（可能含宿主机路径、内网地址、账号等注释）、
+覆盖或删除它。同样遵循可信局域网原则。
 
 ## 📁 项目结构
 
 ```
-crates/core        ss-core 串口引擎
-crates/device      ss-device 设备访问域
-crates/server      ss-server 数据面与组装根
-crates/devicerack    拓扑域 + 平台进程（端口 18800）
-ui-topo/           控制台 SPA
-docs/              设计文档（devicerack-design.md / mcp-tools-design.md 等）
+serial-studio/
+├─ crates/
+│  ├─ core/        # ss-core: 串口管理器 + 端口占有权 + 宏 + 脚本引擎
+│  ├─ server/      # ss-server: axum WS/MCP/Telnet/SSH/设备级联 + 内嵌 SPA
+│  └─ tauri-app/   # serial-studio: Tauri 外壳（控制面）
+├─ ui/             # React + TS + Vite 前端
+└─ Cargo.toml      # workspace
 ```
+
+## 🤝 参与贡献
+
+欢迎提 Issue 和 PR。项目较小——改动请控制范围，并尽量贴合现有代码风格。
 
 ## 📄 许可证
 
-[MIT](LICENSE)
+MIT —— 见 [LICENSE](LICENSE)。
