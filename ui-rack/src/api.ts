@@ -11,6 +11,8 @@ export interface SshChannel {
   username: string;
   nickname?: string;
   auth: { type: "key"; keyPath: string } | { type: "agent" } | { type: "password"; password: string };
+  /** 允许旧版 MAC（hmac-sha1）——只支持旧算法的老交换机才开。 */
+  allow_legacy_mac?: boolean;
 }
 
 export interface SerialChannel {

@@ -28,6 +28,10 @@ pub struct SshChannelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     pub auth: ss_server::ssh::SshAuthRecord,
+    /// 允许旧版 MAC（hmac-sha1）——只支持旧算法的老交换机才开（同
+    /// serial-studio 的按主机开关，投影透传给凭据库/会话建立）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_legacy_mac: bool,
 }
 
 fn default_ssh_port() -> u16 {
@@ -48,6 +52,7 @@ impl SshChannelConfig {
             username: "root".into(),
             nickname: None,
             auth: ss_server::ssh::SshAuthRecord::Agent,
+            allow_legacy_mac: false,
         }
     }
 
@@ -61,12 +66,10 @@ impl SshChannelConfig {
     }
 
     /// 投影为凭据库条目（端点固定默认 shell——v1 不做端点管理）。
-    /// allow_legacy_mac 恒 false：devicerack 通道配置尚未暴露该开关
-    /// （serial-studio v0.22 的按主机 legacy MAC），设备通道需要时再上——
-    /// 届时 SshChannelConfig 加字段透传即可。
+    /// allow_legacy_mac 透传（老交换机兼容开关，与 serial-studio 同语义）。
     pub fn to_host_record(&self) -> ss_server::ssh::SshHostRecord {
         ss_server::ssh::SshHostRecord {
-            allow_legacy_mac: false,
+            allow_legacy_mac: self.allow_legacy_mac,
             id: self.id.clone(),
             host: self.host.trim().into(),
             port: self.port,
@@ -217,6 +220,7 @@ pub fn load() -> Vec<Device> {
                             username: rec.username.clone(),
                             nickname: rec.nickname.clone(),
                             auth: rec.auth.clone(),
+                            allow_legacy_mac: false,
                         }))
                     }
                     _ => None,
@@ -478,6 +482,15 @@ mod tests {
     };
     use ss_server::ssh::SshAuthRecord;
 
+    /// allow_legacy_mac 投影透传（老交换机 hmac-sha1 兼容开关）。
+    #[test]
+    fn legacy_mac_passthrough_to_host_record() {
+        let mut s = SshChannelConfig::ssh_fixture("ssh-lm");
+        assert!(!s.to_host_record().allow_legacy_mac, "默认关");
+        s.allow_legacy_mac = true;
+        assert!(s.to_host_record().allow_legacy_mac, "开则透传到凭据库条目");
+    }
+
     fn serial(port: &str, baud: u32) -> Channel {
         Channel::Serial {
             port: port.into(),
@@ -497,6 +510,7 @@ mod tests {
             auth: SshAuthRecord::Password {
                 password: "pw".into(),
             },
+            allow_legacy_mac: false,
         })
     }
     fn input(name: &str, channels: Vec<Channel>) -> DeviceInput {
@@ -529,6 +543,7 @@ mod tests {
             username: "root".into(),
             nickname: Some("车间网关".into()),
             auth: SshAuthRecord::Agent,
+            allow_legacy_mac: false,
         });
         assert!(c.covers(&format!("{sid}::shell")), "SSH 通道覆盖端点");
         assert!(c.covers(&format!("{sid}::shell@3")), "含实例行");
@@ -586,6 +601,7 @@ mod tests {
                 auth: SshAuthRecord::Password {
                     password: String::new(),
                 },
+                allow_legacy_mac: false,
             })],
         );
         let err = create(&bad, &state).unwrap_err();

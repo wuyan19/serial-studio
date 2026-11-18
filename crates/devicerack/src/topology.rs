@@ -189,6 +189,7 @@ fn migrate_legacy(raw: &str) -> (Vec<Topology>, Vec<crate::device::Device>, bool
                 username: h.username.clone(),
                 nickname: h.nickname.clone(),
                 auth: h.auth.clone(),
+                allow_legacy_mac: false,
             })]
         } else {
             // 本机串口裸名或级联端口键 → 串口通道（port 存原键，默认参数）
@@ -482,6 +483,7 @@ mod tests {
                     username: "root".into(),
                     nickname: None,
                     auth: ss_server::ssh::SshAuthRecord::Agent,
+                    allow_legacy_mac: false,
                 })],
             },
             state,

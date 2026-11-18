@@ -163,6 +163,14 @@ function SshCard({
             <p className="dialog__hint">密码以明文保存，请确保存储位置受控。</p>
           </>
         )}
+        <label className="dlg-settings__check chan-card__legacy-mac">
+          <input
+            type="checkbox"
+            checked={ch.allow_legacy_mac ?? false}
+            onChange={(e) => onChange({ ...ch, allow_legacy_mac: e.target.checked })}
+          />
+          允许旧版 MAC（hmac-sha1）
+        </label>
       </div>
     </div>
   );

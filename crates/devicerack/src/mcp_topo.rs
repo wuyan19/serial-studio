@@ -994,7 +994,8 @@ impl McpExtension for TopoTools {
                                     "auth": {
                                         "type": "object",
                                         "description": "type=ssh 时的认证：{type:agent} / {type:password,password} / {type:key,key_path}"
-                                    }
+                                    },
+                                    "allow_legacy_mac": { "type": "boolean", "description": "type=ssh 时允许旧版 MAC hmac-sha1（只支持旧算法的老交换机才开，默认 false）" }
                                 },
                                 "required": ["type"]
                             }
