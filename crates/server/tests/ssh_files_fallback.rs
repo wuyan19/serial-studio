@@ -246,9 +246,15 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
     for mode in [Mode::Reject, Mode::NoReply, Mode::BrokenInit, Mode::Sftp] {
         let (record, execs, task) = spawn(&work, mode).await;
         state.ssh.update_registry(vec![record.clone()]);
-        let unknown = execute(&state, "test", &record.id, FileOperation::Open)
-            .await
-            .unwrap_err();
+        let unknown = execute(
+            &state.ssh,
+            &state.devices,
+            "test",
+            &record.id,
+            FileOperation::Open,
+        )
+        .await
+        .unwrap_err();
         assert!(!unknown.is_empty());
         assert_eq!(execs.load(Ordering::SeqCst), 0);
         let rec = record.clone();
@@ -261,15 +267,27 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
             password: "wrong".into(),
         };
         state.ssh.update_registry(vec![bad]);
-        assert!(execute(&state, "test", &record.id, FileOperation::Open)
-            .await
-            .is_err());
+        assert!(execute(
+            &state.ssh,
+            &state.devices,
+            "test",
+            &record.id,
+            FileOperation::Open
+        )
+        .await
+        .is_err());
         assert_eq!(execs.load(Ordering::SeqCst), 0);
         state.ssh.update_registry(vec![record.clone()]);
         let (token, path) = session(
             tokio::time::timeout(
                 Duration::from_secs(12),
-                execute(&state, "test", &record.id, FileOperation::Open),
+                execute(
+                    &state.ssh,
+                    &state.devices,
+                    "test",
+                    &record.id,
+                    FileOperation::Open,
+                ),
             )
             .await
             .unwrap()
@@ -279,7 +297,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
             Mode::Sftp => {
                 assert_eq!(path, "/sftp-only");
                 let listed = execute(
-                    &state,
+                    &state.ssh,
+                    &state.devices,
                     "test",
                     &record.id,
                     FileOperation::List {
@@ -303,7 +322,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
             _ => {
                 assert_eq!(std::path::Path::new(&path), work.canonicalize().unwrap());
                 let listed = execute(
-                    &state,
+                    &state.ssh,
+                    &state.devices,
                     "test",
                     &record.id,
                     FileOperation::List {
@@ -325,7 +345,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
                     _ => panic!("expected listing"),
                 }
                 let data = execute(
-                    &state,
+                    &state.ssh,
+                    &state.devices,
                     "test",
                     &record.id,
                     FileOperation::Read {
@@ -352,7 +373,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
                         [(0, first.clone(), true), (65536, vec![255, 0, 17], false)]
                     {
                         execute(
-                            &state,
+                            &state.ssh,
+                            &state.devices,
                             "test",
                             &record.id,
                             FileOperation::Write {
@@ -367,7 +389,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
                         .unwrap();
                     }
                     execute(
-                        &state,
+                        &state.ssh,
+                        &state.devices,
                         "test",
                         &record.id,
                         FileOperation::Rename {
@@ -383,7 +406,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
                     assert_eq!(std::fs::read(&uploaded).unwrap(), expected);
                     assert!(!work.join("PWN").exists());
                     let read = execute(
-                        &state,
+                        &state.ssh,
+                        &state.devices,
                         "test",
                         &record.id,
                         FileOperation::Read {
@@ -402,7 +426,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
                         _ => panic!("expected binary read"),
                     }
                     execute(
-                        &state,
+                        &state.ssh,
+                        &state.devices,
                         "test",
                         &record.id,
                         FileOperation::Remove {
@@ -417,7 +442,8 @@ async fn ssh_file_negotiation_preserves_auth_and_supports_shell_only_hosts() {
             }
         }
         execute(
-            &state,
+            &state.ssh,
+            &state.devices,
             "test",
             &record.id,
             FileOperation::Close { session: token },
