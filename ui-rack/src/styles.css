@@ -4958,9 +4958,12 @@ table tbody tr:hover td {
   overflow-x: auto;
 }
 
-/* ---- 档① ≤1100px：终端面板覆盖式 ---- */
+/* ---- 档① ≤1100px：终端面板覆盖式——仅右栏形态（standard）。
+   底部形态（term-bottom/rows）纵向堆叠天然适配竖屏/窄窗，columns 等宽
+   分栏自洽，都不吃覆盖式：无差别 fixed 会把底部横条钉成右上竖块
+   （竖屏最大化必 ≤1100px，用户报）。 ---- */
 @media (max-width: 1100px) {
-  .term-panel {
+  .shell-row[data-layout="standard"] .term-panel {
     position: fixed;
     top: 0;
     right: 0;
@@ -4972,7 +4975,7 @@ table tbody tr:hover td {
   }
 
   /* 固定定位下 flex-basis 失效——最大化直接近全宽 */
-  .term-panel--max {
+  .shell-row[data-layout="standard"] .term-panel--max {
     flex: none;
     width: 92vw;
   }
