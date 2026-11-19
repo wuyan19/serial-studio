@@ -1,10 +1,11 @@
-/** 终端面板（壳层右栏，常驻）：终端的唯一宿主。
+/** 终端面板（壳层右栏/底部条，常驻）：终端的唯一宿主。
  *  从旧 /terminal 页整体迁移——面板随壳挂载、切页不卸载，tab 列表与 xterm
- *  回滚缓冲跨页存活（此前切页即丢）。收起 = display:none 保活，展开时
- *  TermView 内置 ResizeObserver 自动重 fit。
+ *  回滚缓冲跨页存活（此前切页即丢）。收起 = display:none 保活（分隔条常驻
+ *  承载拖出/双击展开），展开时 TermView 内置 ResizeObserver 自动重 fit。
  *  外部入口（设备页按钮 / 旧链接 ?open=）经 ShellContext.openTerminal(key)
  *  走 openByKey：设备通道即点即开（串口用通道存储配置），裸串口仍弹参数框。
- *  宽度/开合/最大化持久化 localStorage（首启收起）。 */
+ *  分隔条手势照 serial-studio 侧栏 Splitter（VS Code 模型，见 beginResize）。
+ *  宽度/高度/开合/最大化持久化 localStorage（首启收起）。 */
 import {
   forwardRef,
   useCallback,
@@ -42,6 +43,14 @@ const HEIGHT_MIN = 140;
 const HEIGHT_MAX = 560;
 const heightCeiling = () => Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, window.innerHeight - 260));
 const HEIGHT_DEFAULT = 280;
+/** 分隔条手势参数（照抄 serial-studio 侧栏 Splitter 的 VS Code 模型）：
+ *  收起阈值（鼠标越过面板最小尺寸继续外推的距离线）与展开阈值（收起后
+ *  自「武装点」反拖 SPLITTER_EXPAND_DX）分居两侧恒不重叠——慢速拖动
+ *  不会收起↔展开来回震荡（收起瞬间武装点必已越过收起线，展开阈值
+ *  = 武装点−80 又恒在收起线内侧）。 */
+const SPLITTER_EXPAND_DX = 80;
+const COLLAPSE_W = 200; // 右栏：鼠标离 work-area 右缘 < 200px（< WIDTH_MIN 260）
+const COLLAPSE_H = 120; // 底部：鼠标离 work-area 底缘 < 120px（< HEIGHT_MIN 140）
 
 interface PanelLayout {
   open: boolean;
@@ -254,45 +263,92 @@ const TermPanel = forwardRef<
     h.focus();
   }, []);
 
-  /** 内缘拖拽调尺寸（最大化态不拖）：右栏形态拖左缘调宽，底部形态拖上缘调高。
-   *  键盘等价：收窄方向 ←/↑、加宽方向 →/↓（随轴）。 */
+  /** 分隔条拖拽（照 serial-studio 侧栏 Splitter）：
+   *  线贴鼠标——尺寸 = 鼠标到 work-area 内缘的距离（clamp 上下限），跟手不越界；
+   *  展开态外推越过收起线 → 收起（面板 display:none 保活，只剩分隔条）；
+   *  收起后自武装点反拖 80px → 展开（展开瞬间线停在 clamp 值，鼠标追上后继续跟手）；
+   *  尺寸更新 rAF 合帧（高刷鼠标事件每帧最多渲染一次）。columns 等宽形态
+   *  拖拽只做收起/展开（尺寸由 CSS 各半，不写 width/height）。 */
   const beginResize = (e: React.PointerEvent) => {
-    if (e.button !== 0 || layout.max || fixedSize) return;
-    if (horizontal) {
-      const startY = e.clientY;
-      const startHeight = layout.height;
-      const move = (ev: PointerEvent) => {
-        const h = Math.min(heightCeiling(), Math.max(HEIGHT_MIN, startHeight + (startY - ev.clientY)));
-        setLayout((l) => ({ ...l, height: h }));
-      };
-      const up = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
-        document.body.classList.remove("panel-resizing");
-        document.body.classList.remove("panel-resizing-row");
-      };
-      document.body.classList.add("panel-resizing");
-      document.body.classList.add("panel-resizing-row");
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
-      return;
-    }
-    const startX = e.clientX;
-    const startWidth = layout.width;
+    if (e.button !== 0 || layout.max) return;
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect();
+    if (!rect) return;
+    // 轴上距离：右栏 = 鼠标到右缘，底部 = 鼠标到底缘（外推 = 距离增大）
+    const dist = (cx: number, cy: number) =>
+      horizontal ? rect.bottom - cy : rect.right - cx;
+    const COLLAPSE = horizontal ? COLLAPSE_H : COLLAPSE_W;
+    const applySize = (d: number) => {
+      setLayout((l) => {
+        if (fixedSize) return { ...l, open: true };
+        return horizontal
+          ? { ...l, open: true, height: Math.min(heightCeiling(), Math.max(HEIGHT_MIN, d)) }
+          : { ...l, open: true, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, d)) };
+      });
+    };
+    let collapsedNow = !layout.open; // 闭包本地跟踪（setState 后读不到新值）
+    let arm = dist(e.clientX, e.clientY); // 展开「武装点」：收起瞬间/按下时
+    document.body.classList.add("panel-resizing");
+    if (horizontal) document.body.classList.add("panel-resizing-row");
+    let raf = 0;
+    let pending: number | null = null;
+    const flush = () => {
+      raf = 0;
+      if (pending === null) return;
+      applySize(pending);
+      pending = null;
+    };
     const move = (ev: PointerEvent) => {
-      const w = Math.min(widthCeiling(), Math.max(WIDTH_MIN, startWidth + (startX - ev.clientX)));
-      setLayout((l) => ({ ...l, width: w }));
+      const d = dist(ev.clientX, ev.clientY);
+      if (collapsedNow) {
+        // 展开 = 向内拖（d 增大）。阈值取 max(武装点, 收起线)+80：收起态
+        // 分隔条贴边（武装点≈0），裸 arm+80 会落回收起区 → 展开瞬间又被
+        // 收起（震荡）；抬高到收起线+80 保证展开后必在收起区外侧。
+        const expandAt = Math.max(arm, COLLAPSE) + SPLITTER_EXPAND_DX;
+        if (d > expandAt) {
+          collapsedNow = false;
+          applySize(d);
+        }
+        return;
+      }
+      if (d < COLLAPSE) {
+        collapsedNow = true;
+        arm = d;
+        // 丢弃合帧中的残留尺寸：pointerup 的 flush 会把它重新 open:true
+        if (raf) {
+          cancelAnimationFrame(raf);
+          raf = 0;
+        }
+        pending = null;
+        setLayout((l) => ({ ...l, open: false }));
+        return;
+      }
+      pending = d;
+      if (!raf) raf = requestAnimationFrame(flush);
     };
     const up = () => {
+      if (raf) cancelAnimationFrame(raf);
+      flush(); // 补上合帧中最后一帧
+      document.body.classList.remove("panel-resizing");
+      document.body.classList.remove("panel-resizing-row");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      document.body.classList.remove("panel-resizing");
     };
-    document.body.classList.add("panel-resizing");
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
 
+  /** 双击：收起 → 展开并回默认尺寸；展开 → 重置默认尺寸（同 main 语义）。 */
+  const doubleClickReset = () => {
+    if (layout.max) return;
+    setLayout((l) => ({
+      ...l,
+      open: true,
+      ...(horizontal ? { height: HEIGHT_DEFAULT } : { width: WIDTH_DEFAULT }),
+    }));
+  };
+
+  /** 键盘微调（收窄方向 ←/↑、加宽方向 →/↓，随轴）；到下限停（不联动收起）。 */
   const nudgeSize = (delta: number) => {
     if (layout.max || fixedSize) return;
     setLayout((l) =>
@@ -357,6 +413,37 @@ const TermPanel = forwardRef<
 
   return (
     <>
+      {/* 分隔条：面板内缘常驻（work-area 直接子级——面板收起后整个终端区
+          只剩这条，拖出/双击即展开；VS Code 手势模型见 beginResize） */}
+      {!layout.max && (
+        <div
+          className={`term-resizer${horizontal ? " term-resizer--row" : ""}`}
+          role="separator"
+          aria-orientation={horizontal ? "horizontal" : "vertical"}
+          aria-label={horizontal ? "调整终端面板高度" : "调整终端面板宽度"}
+          tabIndex={0}
+          title="拖动调整大小（双击展开/重置；拖到最小自动收起，反方向拖出展开）"
+          onPointerDown={beginResize}
+          onDoubleClick={doubleClickReset}
+          onKeyDown={(e) => {
+            if (horizontal) {
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                nudgeSize(24);
+              } else if (e.key === "ArrowDown") {
+                e.preventDefault();
+                nudgeSize(-24);
+              }
+            } else if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              nudgeSize(24);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              nudgeSize(-24);
+            }
+          }}
+        />
+      )}
       <aside
         id="term-panel"
         className={
@@ -373,33 +460,6 @@ const TermPanel = forwardRef<
         }
         aria-label="终端"
       >
-        {layout.open && !layout.max && !fixedSize && (
-          <div
-            className={`term-panel__resizer${horizontal ? " term-panel__resizer--row" : ""}`}
-            role="separator"
-            aria-orientation={horizontal ? "horizontal" : "vertical"}
-            aria-label={horizontal ? "调整终端面板高度" : "调整终端面板宽度"}
-            tabIndex={0}
-            onPointerDown={beginResize}
-            onKeyDown={(e) => {
-              if (horizontal) {
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  nudgeSize(24);
-                } else if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  nudgeSize(-24);
-                }
-              } else if (e.key === "ArrowLeft") {
-                e.preventDefault();
-                nudgeSize(24);
-              } else if (e.key === "ArrowRight") {
-                e.preventDefault();
-                nudgeSize(-24);
-              }
-            }}
-          />
-        )}
         <header className="term-panel__head">
           {connLost && (
             <span className="term-panel__conn" title="连接断开，重连中…" role="status" />
@@ -615,23 +675,6 @@ const TermPanel = forwardRef<
             />
           )}
       </aside>
-
-      {!layout.open && (
-        <button
-          className="term-rail"
-          title="展开终端面板"
-          aria-expanded={false}
-          aria-controls="term-panel"
-          onClick={() => setLayout((l) => ({ ...l, open: true }))}
-        >
-          <IconSsh />
-          {tabs.length > 0 && (
-            <span className="term-rail__count" title={`${tabs.length} 个活跃会话`}>
-              {tabs.length}
-            </span>
-          )}
-        </button>
-      )}
     </>
   );
 });

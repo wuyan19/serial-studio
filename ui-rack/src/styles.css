@@ -4739,10 +4739,10 @@ table tbody tr:hover td {
 }
 
 /* ============================================================
-   终端面板（壳层右栏）——终端的唯一宿主，切页不卸载。
+   终端面板（壳层右栏/底部条，常驻）——终端的唯一宿主，切页不卸载。
    收起 = term-panel--hidden(display:none 保活，xterm 缓冲留存)，
-   收起态右缘渲染 term-rail(36px) 承载展开钮 = 应用右上角。
-   类名已 grep 全文件防撞（term-panel/term-rail 无同名老段）。
+   收起后终端区只剩 term-resizer 分隔条（拖出/双击展开）。
+   类名已 grep 全文件防撞（term-panel/term-resizer 无同名老段）。
    ============================================================ */
 .term-panel {
   position: relative;
@@ -4765,31 +4765,44 @@ table tbody tr:hover td {
   flex: 0 0 70%;
 }
 
-/* 左缘拖拽条：hover/聚焦出细高亮线；拖拽期间 body 加 panel-resizing 锁光标 */
-.term-panel__resizer {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 6px;
+/* 终端分隔条（照 serial-studio .sidebar-resizer 的 VS Code 形态）：
+   8px 常驻条 = 面板内缘；正中三个小圆点(Grabber)示意可拖，hover 高亮。
+   面板收起后整条终端区只剩它（拖出/双击展开）。拖拽期间 body 加
+   panel-resizing 锁光标。 */
+.term-resizer {
+  flex-shrink: 0;
+  width: 8px;
   cursor: col-resize;
-  z-index: 6;
+  z-index: 5;
+  position: relative;
 }
 
-.term-panel__resizer::after {
+/* 三个小圆点：三层 radial-gradient 各画一点，错位排布（竖向） */
+.term-resizer::before {
   content: "";
   position: absolute;
-  left: 2px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: transparent;
-  transition: background var(--t-fast) var(--ease);
+  inset: 0;
+  background-image: radial-gradient(circle, var(--ink-faint) 1px, transparent 1.4px),
+    radial-gradient(circle, var(--ink-faint) 1px, transparent 1.4px),
+    radial-gradient(circle, var(--ink-faint) 1px, transparent 1.4px);
+  background-position: center calc(50% - 5px), center 50%, center calc(50% + 5px);
+  background-size: 2px 2px;
+  background-repeat: no-repeat;
+  transition: filter var(--t-fast) var(--ease);
 }
 
-.term-panel__resizer:hover::after,
-.term-panel__resizer:focus-visible::after {
-  background: var(--accent);
+/* 悬停高亮：条身亮交互色淡 wash，圆点同步变交互色 */
+.term-resizer:hover,
+.term-resizer:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: none;
+}
+
+.term-resizer:hover::before,
+.term-resizer:focus-visible::before {
+  background-image: radial-gradient(circle, var(--accent) 1px, transparent 1.4px),
+    radial-gradient(circle, var(--accent) 1px, transparent 1.4px),
+    radial-gradient(circle, var(--accent) 1px, transparent 1.4px);
 }
 
 .panel-resizing {
@@ -4900,50 +4913,6 @@ table tbody tr:hover td {
 .term-panel__body .term-blank {
   border: 1px dashed var(--hairline);
   border-radius: var(--r-card);
-}
-
-/* 收起态右缘 rail：整条即按钮的圆角长条卡片（与壳卡片同语言），居中一枚
-   终端图标，活跃会话数角标挂顶部 */
-.term-rail {
-  width: 36px;
-  flex-shrink: 0;
-  align-self: stretch;
-  border: var(--workspace-shell-border-width) solid var(--workspace-shell-border);
-  border-radius: var(--workspace-shell-radius);
-  background: var(--surface);
-  color: var(--ink-faint);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
-}
-
-.term-rail svg {
-  width: 20px;
-  height: 20px;
-}
-
-.term-rail:hover {
-  color: var(--ink);
-  background: var(--surface-2);
-}
-
-.term-rail__count {
-  position: absolute;
-  top: 8px;
-  right: 4px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  border-radius: var(--r-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 9px;
-  line-height: 14px;
-  text-align: center;
-  font-weight: 600;
 }
 
 /* ============================================================
@@ -5324,24 +5293,15 @@ table tbody tr:hover td {
   flex: 1 1 0;
 }
 
-/* 底部形态的拖拽条改在上缘（横向拖高） */
-.term-panel__resizer--row {
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: auto;
+/* 底部形态：分隔条转横向（8px 高），三点改横向排布 */
+.term-resizer--row {
   width: auto;
-  height: 6px;
+  height: 8px;
   cursor: row-resize;
 }
 
-.term-panel__resizer--row::after {
-  left: 0;
-  right: 0;
-  top: 2px;
-  bottom: auto;
-  width: auto;
-  height: 2px;
+.term-resizer--row::before {
+  background-position: calc(50% - 5px) center, 50% center, calc(50% + 5px) center;
 }
 
 .panel-resizing-row,
