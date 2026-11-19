@@ -1,3 +1,10 @@
+// release 模式 Windows 用 GUI 子系统：双击不弹 cmd 黑窗（main 同款）。
+// debug 保留 console，方便看 tracing/panic。
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
 //! devicerack 桌面壳：进程内起 devicerack 服务（axum），Tauri 窗口加载本机 URL。
 //!
 //! 与 serial-studio 桌面壳（重 IPC 命令层：端口数据/命令/文件全走 invoke）不同，
@@ -5,6 +12,8 @@
 //! 唯一的 IPC 是自绘标题栏的右键系统菜单（show_system_menu，仅 Windows 生效）。
 //!
 //! 端口先同步 bind 再开窗：窗口加载时服务必然已在监听，无竞态白屏。
+//! （可移植性注意：debug 版 rust-embed 从编译机的绝对路径运行时读 dist，
+//! 换机器必须用 release——dist 打进二进制。）
 
 use clap::Parser;
 use tauri::Manager;
