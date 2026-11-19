@@ -17,7 +17,7 @@ export const LAYOUT_PRESETS: LayoutPreset[] = [
   { mode: "standard", label: "标准", hint: "侧栏 + 主区 + 终端右栏" },
   { mode: "term-bottom", label: "底部终端", hint: "侧栏通高 + 主区上 + 终端下" },
   { mode: "rows", label: "上下分栏", hint: "主区上 + 终端下（隐藏侧栏）" },
-  { mode: "columns", label: "双列等宽", hint: "主区 + 终端各半（隐藏侧栏）" },
+  { mode: "columns", label: "左右分栏", hint: "主区与终端左右分栏，拖动调比例（隐藏侧栏）" },
 ];
 
 const ALL: LayoutMode[] = ["standard", "term-bottom", "rows", "columns"];

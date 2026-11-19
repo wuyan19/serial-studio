@@ -95,10 +95,9 @@ const TermPanel = forwardRef<
 >(function TermPanel({ sshHosts, mode }, ref) {
   const navigate = useNavigate();
   const [layout, setLayout] = useState<PanelLayout>(loadLayout);
-  /** 终端条形态（底部）vs 右栏形态：拖拽轴/尺寸属性随布局模式切换；
-   *  columns 双列等宽 = 固定五五开，不给手调。 */
+  /** 终端条形态（底部）vs 右栏形态：拖拽轴/尺寸属性随布局模式切换
+   *  （columns 左右分栏同 standard 的宽度拖拽，仅无侧栏）。 */
   const horizontal = mode === "term-bottom" || mode === "rows";
-  const fixedSize = mode === "columns";
   const [devices, setDevices] = useState<Device[]>([]);
   const ports = useLivePorts();
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -267,8 +266,7 @@ const TermPanel = forwardRef<
    *  线贴鼠标——尺寸 = 鼠标到 work-area 内缘的距离（clamp 上下限），跟手不越界；
    *  展开态外推越过收起线 → 收起（面板 display:none 保活，只剩分隔条）；
    *  收起后自武装点反拖 80px → 展开（展开瞬间线停在 clamp 值，鼠标追上后继续跟手）；
-   *  尺寸更新 rAF 合帧（高刷鼠标事件每帧最多渲染一次）。columns 等宽形态
-   *  拖拽只做收起/展开（尺寸由 CSS 各半，不写 width/height）。 */
+   *  尺寸更新 rAF 合帧（高刷鼠标事件每帧最多渲染一次）。 */
   const beginResize = (e: React.PointerEvent) => {
     if (e.button !== 0 || layout.max) return;
     e.preventDefault();
@@ -279,12 +277,11 @@ const TermPanel = forwardRef<
       horizontal ? rect.bottom - cy : rect.right - cx;
     const COLLAPSE = horizontal ? COLLAPSE_H : COLLAPSE_W;
     const applySize = (d: number) => {
-      setLayout((l) => {
-        if (fixedSize) return { ...l, open: true };
-        return horizontal
+      setLayout((l) =>
+        horizontal
           ? { ...l, open: true, height: Math.min(heightCeiling(), Math.max(HEIGHT_MIN, d)) }
-          : { ...l, open: true, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, d)) };
-      });
+          : { ...l, open: true, width: Math.min(widthCeiling(), Math.max(WIDTH_MIN, d)) },
+      );
     };
     let collapsedNow = !layout.open; // 闭包本地跟踪（setState 后读不到新值）
     let arm = dist(e.clientX, e.clientY); // 展开「武装点」：收起瞬间/按下时
@@ -350,7 +347,7 @@ const TermPanel = forwardRef<
 
   /** 键盘微调（收窄方向 ←/↑、加宽方向 →/↓，随轴）；到下限停（不联动收起）。 */
   const nudgeSize = (delta: number) => {
-    if (layout.max || fixedSize) return;
+    if (layout.max) return;
     setLayout((l) =>
       horizontal
         ? { ...l, height: Math.min(heightCeiling(), Math.max(HEIGHT_MIN, l.height + delta)) }
@@ -452,7 +449,7 @@ const TermPanel = forwardRef<
             : "term-panel term-panel--hidden"
         }
         style={
-          layout.max || fixedSize
+          layout.max
             ? undefined
             : horizontal
               ? { height: layout.height }

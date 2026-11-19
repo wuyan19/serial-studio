@@ -5327,11 +5327,6 @@ table tbody tr:hover td {
   display: none;
 }
 
-/* 双列等宽：主区与终端各占一半（不给手调，等分即该预设的意义） */
-.shell-row[data-layout="columns"] .term-panel:not(.term-panel--max) {
-  flex: 1 1 0;
-}
-
 /* 底部形态：分隔条转横向（4px 高贴缝），三点改横向排布 */
 .term-resizer--row {
   width: auto;
