@@ -35,6 +35,9 @@
   --ink: #f7f8f8;
   --ink-dim: #b7bdc9;
   --ink-faint: #62666d;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.34);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.68);
+  --scrollbar-thumb-active: rgba(255, 255, 255, 0.82);
 
   /* Signal pair — content-true (RX in, TX out) */
   --rx: #4fd6c2;
@@ -116,24 +119,39 @@ button {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
-/* scrollbars — slim, graphite */
+/* scrollbars — 照 main 逐属性：标准属性声明 + Chromium 走 ::-webkit 悬浮胶囊
+   （@supports 重置标准属性，否则 scrollbar-width:thin 会压掉 webkit 样式出粗条） */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--surface-3) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+  /* Non-auto standard properties override WebKit thumb hover styling in Chromium. */
+  * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--surface-3);
+  background-color: var(--scrollbar-thumb);
+  min-height: 24px;
   border-radius: var(--r-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: var(--hairline);
-  background-clip: padding-box;
+  background-color: var(--scrollbar-thumb-hover);
+}
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 :focus-visible {
@@ -2967,6 +2985,9 @@ button {
    都挂在这一组上——新增浅色主题不再需要改任何选择器。
    信号对/步骤色:白底加深(语义不随家族变)。 */
 :root[data-lum="light"] {
+  --scrollbar-thumb: rgba(0, 0, 0, 0.26);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.44);
+  --scrollbar-thumb-active: rgba(0, 0, 0, 0.58);
   --rx: #0c7f73;
   --tx: #b06a16;
   --link: #187a43;
@@ -3273,13 +3294,7 @@ button {
 :root[data-lum="light"] .banner__close:hover {
   background: rgba(0, 0, 0, 0.06);
 }
-/* 滚动条 thumb:浅色 surface-3 在白底上近不可见,加深一档 */
-:root[data-lum="light"] * {
-  scrollbar-color: #d4d6da transparent;
-}
-:root[data-lum="light"] *::-webkit-scrollbar-thumb {
-  background: #d4d6da;
-}
+/* 滚动条 thumb:浅色 token 覆写已随 main（--scrollbar-* 亮色值），无需再补 */
 /* 活动栏激活:浅色底的微光用叠黑(暗色默认是叠白) */
 :root[data-lum="light"] .act-icon[data-active="true"] {
   background: rgba(0, 0, 0, 0.05);
@@ -4643,7 +4658,7 @@ button.link {
 
 /* 终端页「正在打开…」进行中提示：中性色（此前误用 .error 红色=错误语义） */
 .open-note {
-  margin: 0 0 8px;
+  margin: 8px 8px 8px;
   color: var(--ink-dim);
   font-size: var(--fs-sm);
 }
@@ -4924,16 +4939,16 @@ table tbody tr:hover td {
   animation: conn-pulse 1.2s var(--ease) infinite;
 }
 
+/* 终端区全出血：无内边距无卡底，终端涂色直抵面板内缘（面板自己的圆角
+   收整个终端；此前 body 8px 内边距 + 块状 term 区在暗色下读作卡中卡） */
 .term-panel__body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px;
 }
 
-/* 终端区照 main：纯填充（无框无卡底——面板已是卡片，区域再套一圈就是
-   卡中卡）；兜底裁剪防 fit 失准画过容器 */
+/* 兜底裁剪防 fit 失准画过容器 */
 .term-panel__body .term-area {
   flex: 1;
   position: relative;
@@ -4941,13 +4956,15 @@ table tbody tr:hover td {
   overflow: hidden;
 }
 
-/* 每个终端的包裹层：同色 6px 小圆角（main .termview-term 的做法——读作
-   屏幕自身的角而非卡片；同色底让行高余量沉底读作屏幕一部分） */
+/* 终端包裹层：同色底让行高余量沉底读作屏幕一部分（无边框无圆角——
+   全出血），空态/错误条自行留边 */
 .term-pane {
   height: 100%;
   background: var(--term-bg);
-  border-radius: 6px;
-  overflow: hidden;
+}
+
+.term-panel__body .term-blank {
+  margin: 8px;
 }
 
 .term-panel__body .term-blank {

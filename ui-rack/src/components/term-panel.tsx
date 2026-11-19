@@ -34,14 +34,13 @@ import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenErr
 
 const STORE_KEY = "devicerack-term-panel";
 const WIDTH_MIN = 260;
-const WIDTH_MAX = 960;
-/** 有效上限再扣内容区最小可用宽（窗口窄时先于常量上限生效）。 */
-const widthCeiling = () => Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, window.innerWidth - 420));
+/** 上限=窗口宽扣内容区最小可用宽（侧栏+缝隙+最小内容 ~380），无硬帽——
+ *  面板想拖多宽拖多宽（用户定案：撤 960 硬帽）。 */
+const widthCeiling = () => Math.max(WIDTH_MIN, window.innerWidth - 380);
 const WIDTH_DEFAULT = 480;
-/** 底部终端形态（term-bottom/rows）的纵向尺寸档位。 */
+/** 底部终端形态（term-bottom/rows）的纵向尺寸档位：同撤硬帽，扣内容最小高。 */
 const HEIGHT_MIN = 140;
-const HEIGHT_MAX = 560;
-const heightCeiling = () => Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, window.innerHeight - 260));
+const heightCeiling = () => Math.max(HEIGHT_MIN, window.innerHeight - 250);
 const HEIGHT_DEFAULT = 280;
 /** 分隔条手势参数（照抄 serial-studio 侧栏 Splitter 的 VS Code 模型）：
  *  收起阈值（鼠标越过面板最小尺寸继续外推的距离线）与展开阈值（收起后
@@ -66,8 +65,8 @@ function loadLayout(): PanelLayout {
       const v = JSON.parse(raw) as Partial<PanelLayout>;
       return {
         open: !!v.open,
-        width: Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, Number(v.width) || WIDTH_DEFAULT)),
-        height: Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, Number(v.height) || HEIGHT_DEFAULT)),
+        width: Math.max(WIDTH_MIN, Number(v.width) || WIDTH_DEFAULT),
+        height: Math.max(HEIGHT_MIN, Number(v.height) || HEIGHT_DEFAULT),
       };
     }
   } catch {
