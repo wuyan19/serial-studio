@@ -5,9 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { NavLink, Outlet } from "react-router-dom";
 import { api, type ServerSettings } from "./api";
 import { ws } from "./ws";
-import { isTauri } from "./lib";
 import { RemoteDialog } from "./components/dialogs";
-import { LayoutMenuButton } from "./components/layout-menu";
 import { SettingsPage } from "./components/settings-page";
 import TermPanel, { type TermPanelHandle } from "./components/term-panel";
 import { TitleBar } from "./components/titlebar";
@@ -91,7 +89,7 @@ export default function App() {
       value={{ openDialog, sshHosts, openTerminal, toggleTermPanel }}
     >
       <div className="shell">
-        {isTauri() && <TitleBar layoutMode={layoutMode} onLayoutChange={changeLayout} />}
+        <TitleBar layoutMode={layoutMode} onLayoutChange={changeLayout} />
         <div className="shell-row" data-layout={layoutMode}>
         <aside className="sidebar">
           <nav>
@@ -122,15 +120,6 @@ export default function App() {
             <span className={`dot${connUp ? " on" : ""}`} />
             {connUp ? "已连接" : "重连中…"}
           </span>
-          <span className="statusbar__msg">
-            devicerack{version ? ` · ${version}` : ""}
-          </span>
-          {/* Web 模式无标题栏，布局菜单挂状态栏右缘（桌面壳在标题栏） */}
-          {!isTauri() && (
-            <span className="statusbar__layout">
-              <LayoutMenuButton layoutMode={layoutMode} onLayoutChange={changeLayout} />
-            </span>
-          )}
         </footer>
       </div>
 

@@ -182,6 +182,49 @@ button {
 .titlebar__title {
   flex: 1; /* 纯占位:把窗口控制钮推到右缘 */
 }
+/* 左侧菜单（VS Code 菜单栏）：导航三项 + 远程/设置动作——侧栏被布局预设
+   隐藏（rows/columns）时仍是完整导航面；Web/桌面同渲染 */
+.titlebar__menu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 10px;
+  min-width: 0;
+}
+
+.titlebar__menu-item {
+  border: 0;
+  background: none;
+  padding: 4px 9px;
+  border-radius: calc(var(--workspace-shell-radius) - 6px);
+  color: var(--ink-dim);
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.titlebar__menu-item:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.titlebar__menu-item--on {
+  color: var(--accent);
+}
+
+.titlebar__menu-item--on:hover {
+  color: var(--accent);
+}
+
+.titlebar__menu-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--hairline-soft);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
 .titlebar__controls {
   display: flex;
   align-self: stretch;
@@ -3774,13 +3817,6 @@ button {
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--hairline);
 }
-.statusbar__msg {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.92;
-}
 
 .sidebar {
   width: 52px;
@@ -5380,15 +5416,4 @@ table tbody tr:hover td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* Web 模式：布局菜单挂状态栏右缘（桌面壳在标题栏，两形态同一组件） */
-.statusbar__layout {
-  margin-left: auto;
-  display: inline-flex;
-}
-
-.statusbar__layout .titlebar__btn {
-  width: 26px;
-  height: 22px;
 }
