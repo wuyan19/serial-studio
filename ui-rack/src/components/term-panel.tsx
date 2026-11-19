@@ -28,7 +28,7 @@ import {
 import { ws } from "../ws";
 import TermView, { type TermHandle } from "./term";
 import { SerialConfigDialog, SshAuthDialog, SshTrustDialog } from "./dialogs";
-import { IconChevronsRight, IconExpand, IconSsh } from "../icons";
+import { IconChevronsRight, IconSsh } from "../icons";
 import type { LayoutMode } from "../layout";
 import { DEFAULT_SERIAL_CONFIG, type SerialConfig, type SshHost, type SshOpenError } from "../types";
 
@@ -57,7 +57,6 @@ interface PanelLayout {
   width: number;
   /** 底部形态高度（右栏形态用不到，跨模式切换各自记忆）。 */
   height: number;
-  max: boolean;
 }
 
 function loadLayout(): PanelLayout {
@@ -69,13 +68,12 @@ function loadLayout(): PanelLayout {
         open: !!v.open,
         width: Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, Number(v.width) || WIDTH_DEFAULT)),
         height: Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, Number(v.height) || HEIGHT_DEFAULT)),
-        max: !!v.max,
       };
     }
   } catch {
     /* 损坏回退默认 */
   }
-  return { open: false, width: WIDTH_DEFAULT, height: HEIGHT_DEFAULT, max: false };
+  return { open: false, width: WIDTH_DEFAULT, height: HEIGHT_DEFAULT };
 }
 
 export interface TermPanelHandle {
@@ -268,7 +266,7 @@ const TermPanel = forwardRef<
    *  收起后自武装点反拖 80px → 展开（展开瞬间线停在 clamp 值，鼠标追上后继续跟手）；
    *  尺寸更新 rAF 合帧（高刷鼠标事件每帧最多渲染一次）。 */
   const beginResize = (e: React.PointerEvent) => {
-    if (e.button !== 0 || layout.max) return;
+    if (e.button !== 0) return;
     e.preventDefault();
     const rect = (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect();
     if (!rect) return;
@@ -337,7 +335,6 @@ const TermPanel = forwardRef<
 
   /** 双击：收起 → 展开并回默认尺寸；展开 → 重置默认尺寸（同 main 语义）。 */
   const doubleClickReset = () => {
-    if (layout.max) return;
     setLayout((l) => ({
       ...l,
       open: true,
@@ -347,7 +344,6 @@ const TermPanel = forwardRef<
 
   /** 键盘微调（收窄方向 ←/↑、加宽方向 →/↓，随轴）；到下限停（不联动收起）。 */
   const nudgeSize = (delta: number) => {
-    if (layout.max) return;
     setLayout((l) =>
       horizontal
         ? { ...l, height: Math.min(heightCeiling(), Math.max(HEIGHT_MIN, l.height + delta)) }
@@ -412,8 +408,7 @@ const TermPanel = forwardRef<
     <>
       {/* 分隔条：面板内缘常驻（work-area 直接子级——面板收起后整个终端区
           只剩这条，拖出/双击即展开；VS Code 手势模型见 beginResize） */}
-      {!layout.max && (
-        <div
+      <div
           className={`term-resizer${horizontal ? " term-resizer--row" : ""}`}
           role="separator"
           aria-orientation={horizontal ? "horizontal" : "vertical"}
@@ -440,21 +435,10 @@ const TermPanel = forwardRef<
             }
           }}
         />
-      )}
       <aside
         id="term-panel"
-        className={
-          layout.open
-            ? `term-panel${layout.max ? " term-panel--max" : ""}`
-            : "term-panel term-panel--hidden"
-        }
-        style={
-          layout.max
-            ? undefined
-            : horizontal
-              ? { height: layout.height }
-              : { width: layout.width }
-        }
+        className={layout.open ? "term-panel" : "term-panel term-panel--hidden"}
+        style={horizontal ? { height: layout.height } : { width: layout.width }}
         aria-label="终端"
       >
         <header className="term-panel__head">
@@ -504,13 +488,6 @@ const TermPanel = forwardRef<
             onClick={() => setPicker(true)}
           >
             ＋
-          </button>
-          <button
-            className={`term-panel__btn${layout.max ? " term-panel__btn--on" : ""}`}
-            title={layout.max ? "还原宽度" : "放大面板"}
-            onClick={() => setLayout((l) => ({ ...l, max: !l.max }))}
-          >
-            <IconExpand />
           </button>
           <button
             className="term-panel__btn"

@@ -4360,10 +4360,6 @@ button.link {
   min-height: 0;
 }
 
-.term-pane {
-  height: 100%;
-}
-
 .term-single {
   height: 100%;
 }
@@ -4797,10 +4793,6 @@ table tbody tr:hover td {
   display: none;
 }
 
-.term-panel--max {
-  flex: 0 0 70%;
-}
-
 /* 终端分隔条（照 serial-studio .sidebar-resizer 的 VS Code 形态）：
    8px 常驻条 = 面板内缘；正中三个小圆点(Grabber)示意可拖，hover 高亮。
    面板收起后整条终端区只剩它（拖出/双击展开）。拖拽期间 body 加
@@ -4940,12 +4932,21 @@ table tbody tr:hover td {
   padding: 8px;
 }
 
+/* 终端区照 main：纯填充（无框无卡底——面板已是卡片，区域再套一圈就是
+   卡中卡）；兜底裁剪防 fit 失准画过容器 */
 .term-panel__body .term-area {
   flex: 1;
+  position: relative;
   min-height: 0;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+/* 每个终端的包裹层：同色 6px 小圆角（main .termview-term 的做法——读作
+   屏幕自身的角而非卡片；同色底让行高余量沉底读作屏幕一部分） */
+.term-pane {
+  height: 100%;
   background: var(--term-bg);
+  border-radius: 6px;
   overflow: hidden;
 }
 
@@ -4980,12 +4981,6 @@ table tbody tr:hover td {
     max-width: 100vw;
     box-shadow: -14px 0 36px color-mix(in srgb, #000 40%, transparent);
     border-left: 1px solid var(--hairline);
-  }
-
-  /* 固定定位下 flex-basis 失效——最大化直接近全宽 */
-  .shell-row[data-layout="standard"] .term-panel--max {
-    flex: none;
-    width: 92vw;
   }
 
   /* 拖拽条在覆盖态仍贴左缘（相对面板定位不受影响） */
