@@ -9,15 +9,14 @@ const LAYOUT_KEY = "devicerack-layout";
 export interface LayoutPreset {
   mode: LayoutMode;
   label: string;
-  hint: string;
 }
 
 /** 菜单呈现序（IconLayoutMain/IconLayout/IconLayoutRows/IconLayoutColumns 同序）。 */
 export const LAYOUT_PRESETS: LayoutPreset[] = [
-  { mode: "standard", label: "标准", hint: "侧栏 + 主区 + 终端右栏" },
-  { mode: "term-bottom", label: "底部终端", hint: "侧栏通高 + 主区上 + 终端下" },
-  { mode: "rows", label: "上下分栏", hint: "主区上 + 终端下（隐藏侧栏）" },
-  { mode: "columns", label: "左右分栏", hint: "主区与终端左右分栏，拖动调比例（隐藏侧栏）" },
+  { mode: "standard", label: "标准" },
+  { mode: "term-bottom", label: "底部终端" },
+  { mode: "rows", label: "上下分栏" },
+  { mode: "columns", label: "左右分栏" },
 ];
 
 const ALL: LayoutMode[] = ["standard", "term-bottom", "rows", "columns"];

@@ -73,10 +73,7 @@ export function LayoutMenuButton({
                 }}
               >
                 <Icon className="layout-menu__icon" />
-                <span className="layout-menu__text">
-                  <b>{p.label}</b>
-                  <small>{p.hint}</small>
-                </span>
+                <span className="layout-menu__text">{p.label}</span>
               </button>
             );
           })}
