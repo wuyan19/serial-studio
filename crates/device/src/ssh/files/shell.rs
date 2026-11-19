@@ -236,12 +236,13 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
+        // The script may exit before consuming stdin (e.g. symlink guards fail
+        // fast); a broken pipe here is fine — the exit status below reports it.
+        let _ = child
             .stdin
             .take()
             .unwrap()
-            .write_all(&command.input)
-            .unwrap();
+            .write_all(&command.input);
         let output = child.wait_with_output().unwrap();
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into());
