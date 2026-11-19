@@ -102,6 +102,49 @@ it("shows an SSH timeout on its own tab, retries in place, and releases a dismis
   expect(socket.sent.filter((msg) => msg.action === "close")).toEqual([{ action: "close", port: ssh.name }]);
 });
 
+it("refocuses and selects the existing search query on every search shortcut", async () => {
+  await act(async () => container.querySelector<HTMLElement>(".port-item-row--ssh .port-item")!.click());
+  await act(async () => {
+    socket.receive({ type: "acquired", port: ssh.name, config: DEFAULT_CONFIG, opened: true, holders: 1 });
+    vi.advanceTimersByTime(100);
+  });
+  const terminalInput = container.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")!;
+  expect(terminalInput).not.toBeNull();
+  const searchShortcut = (target: HTMLElement) => {
+    const event = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  };
+  await act(async () => { expect(searchShortcut(terminalInput).defaultPrevented).toBe(true); });
+  const input = container.querySelector<HTMLInputElement>(".searchbar__input")!;
+  expect(document.activeElement).toBe(input);
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, "connection failed");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const caseToggle = container.querySelector<HTMLButtonElement>('[aria-label="区分大小写"]')!;
+  await act(async () => caseToggle.click());
+  await act(async () => terminalInput.focus());
+  expect(document.activeElement).toBe(terminalInput);
+  await act(async () => { searchShortcut(terminalInput); });
+  expect(container.querySelector(".searchbar__input")).toBe(input);
+  expect(document.activeElement).toBe(input);
+  expect(input.value).toBe("connection failed");
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+  expect(caseToggle.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => {
+    input.setSelectionRange(3, 3);
+    expect(searchShortcut(input).defaultPrevented).toBe(true);
+  });
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+  expect(socket.sent.filter((message) => message.action === "write")).toEqual([]);
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="关闭搜索"]')!.click());
+  expect(container.querySelector(".searchbar")).toBeNull();
+  await act(async () => { searchShortcut(terminalInput); });
+  expect(document.activeElement).toBe(container.querySelector(".searchbar__input"));
+});
+
 it("keeps a background serial error off the active SSH tab", async () => {
   const portRow = [...container.querySelectorAll<HTMLElement>(".port-item")]
     .find((row) => row.textContent?.includes("COM5"))!;

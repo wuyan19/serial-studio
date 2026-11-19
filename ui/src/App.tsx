@@ -403,6 +403,7 @@ export default function App() {
   /** 待收集参数的脚本名(非 null=弹参数收集框);null=关闭。 */
   const [pendingRun, setPendingRun] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const [macroPaletteOpen, setMacroPaletteOpen] = useState(false);
   const [scriptPaletteOpen, setScriptPaletteOpen] = useState(false);
   const [portPaletteOpen, setPortPaletteOpen] = useState(false);
@@ -1551,6 +1552,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               else terminalsRef.current.delete(p);
             }}
             searchOpen={searchOpen}
+            searchFocusRequest={searchFocusRequest}
             activeTerm={isFocused ? activeTerm : undefined}
             onCloseSearch={() => {
               setSearchOpen(false);
@@ -2109,7 +2111,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   // 快捷键处理器表（每 render 刷新最新闭包；dispatchAction 经 handlersRef 读，不陈旧）。
   handlersRef.current = {
     "search.open": () => {
-      if (activePort && terminalsRef.current.has(activePort)) setSearchOpen(true);
+      if (activePort && terminalsRef.current.has(activePort)) {
+        setSearchOpen(true);
+        setSearchFocusRequest((request) => request + 1);
+      }
     },
     "theme.toggle": toggleTheme,
     "port.refresh": refreshPorts,
@@ -2176,6 +2181,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
     if (modalOpen || menuOpen) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
+      const combo = eventToCombo(e);
+      if (!combo) return;
+      const hit = findAction(combo, "global");
+      const searchInput = t?.matches(".searchbar__input") && hit?.id === "search.open";
       // 焦点在表单控件时跳过（不抢输入）；但 xterm 聚焦时 e.target 是隐藏的
       // .xterm-helper-textarea（终端的输入/IME 代理），那属于“终端聚焦”而非“填表”，
       // 必须放行——否则终端一聚焦，所有全局快捷键失效。
@@ -2185,12 +2194,10 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           t.tagName === "TEXTAREA" ||
           t.tagName === "SELECT" ||
           t.isContentEditable) &&
-        !t.closest(".xterm")
+        !t.closest(".xterm") && !searchInput
       ) {
         return;
       }
-      const combo = eventToCombo(e);
-      if (!combo) return;
       if (
         combo === "enter" && canRetryActivePort && !e.isComposing &&
         !e.defaultPrevented && !document.querySelector(".ctx-menu")
@@ -2203,7 +2210,6 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
           return;
         }
       }
-      const hit = findAction(combo, "global");
       if (hit) {
         e.preventDefault();
         e.stopPropagation();
