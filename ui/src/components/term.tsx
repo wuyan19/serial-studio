@@ -425,6 +425,7 @@ export function GroupView({
   onWrite,
   onReady,
   searchOpen,
+  searchFocusRequest,
   activeTerm,
   onCloseSearch,
   onDragOverHalf,
@@ -458,6 +459,7 @@ export function GroupView({
   onWrite: (port: string, data: string) => void;
   onReady: (port: string, inst: TermInstance | null) => void;
   searchOpen: boolean;
+  searchFocusRequest?: number;
   activeTerm: TermInstance | undefined;
   onCloseSearch: () => void;
   /** 拖拽悬停在 group 终端区：上报 groupId + 半区（高亮）。 */
@@ -718,7 +720,7 @@ export function GroupView({
             </div>
           )}
           {focused && searchOpen && activeTerm?.search && (
-            <SearchBar searchAddon={activeTerm.search} term={activeTerm.term} onClose={onCloseSearch} />
+            <SearchBar searchAddon={activeTerm.search} term={activeTerm.term} focusRequest={searchFocusRequest} onClose={onCloseSearch} />
           )}
           {/* 拖拽落点四半区高亮 */}
           {dropHint?.overGroupId === group.id && <div className="group__dropzone" data-half={dropHint.overHalf} />}
@@ -740,10 +742,12 @@ function searchDecorations(t: Theme) {
 export function SearchBar({
   searchAddon,
   term,
+  focusRequest,
   onClose,
 }: {
   searchAddon: SearchAddon;
   term: Terminal;
+  focusRequest?: number;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -808,10 +812,11 @@ export function SearchBar({
     return () => d.dispose();
   }, [searchAddon]);
 
-  // 打开即聚焦输入
+  // Repeated search commands refocus the existing input without losing its query.
   useEffect(() => {
     inputRef.current?.focus();
-  }, []);
+    inputRef.current?.select();
+  }, [focusRequest, term]);
 
   // 关闭/卸载时清掉高亮与选区，恢复终端原状
   useEffect(() => {
