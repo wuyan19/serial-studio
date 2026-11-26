@@ -285,7 +285,7 @@ export default function App() {
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [sshManagerOpen, setSshManagerOpen] = useState(false);
   /** 独立编辑弹窗的设备（右键「编辑设备」/认证失败弹窗直达，不经管理列表）；null = 关。 */
-  const [sshEditDirect, setSshEditDirect] = useState<SshHost | null>(null);
+  const [sshEditDirect, setSshEditDirect] = useState<{ host: SshHost; duplicate?: boolean } | null>(null);
   const [sshTests, setSshTests] = useState<Map<string, SshTestState>>(new Map());
   /** SSH open 失败的交互闭环态：弹认证重输/指纹确认弹窗(host 按渲染时 id 现查,不存快照)。 */
   const [sshIssue, setSshIssue] = useState<SshIssue | null>(null);
@@ -1912,12 +1912,12 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
   };
 
   /** 侧栏 SSH 卡菜单动作分发。 */
-  const onSshAction = (devId: string, action: "connect" | "edit" | "delete") => {
+  const onSshAction = (devId: string, action: "connect" | "edit" | "duplicate" | "delete") => {
     const host = sshHosts.find((h) => h.id === devId);
     if (!host) return;
     if (readOnlySsh && action !== "connect") return;
     if (action === "connect") void newShellSession(devId);
-    else if (action === "edit") setSshEditDirect(host);
+    else if (action === "edit" || action === "duplicate") setSshEditDirect({ host, duplicate: action === "duplicate" });
     else deleteSshHost(host);
   };
 
@@ -2984,7 +2984,8 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
       {/* 独立编辑弹窗：右键/认证失败直达，不经管理列表 */}
       {sshEditDirect && (
         <SshEditDialog
-          host={sshEditDirect}
+          host={sshEditDirect.host}
+          duplicate={sshEditDirect.duplicate}
           existing={sshHosts}
           onCommit={commitSshHost}
           onClose={() => setSshEditDirect(null)}
@@ -3038,7 +3039,7 @@ function waitInflight(inflight: Set<PortId>, pid: PortId): Promise<void> {
               onRetryPassword={(pw, save) => void retrySshAuth(sshIssue, pw, save)}
               onEdit={() => {
                 setSshIssue(null);
-                setSshEditDirect(host);
+                setSshEditDirect({ host });
               }}
               onCancel={() => setSshIssue(null)}
             />

@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { DEFAULT_CONFIG } from "./lib";
-import type { PortInfo } from "./types";
+import type { PortInfo, SshHost } from "./types";
 
 class Socket {
   static OPEN = 1;
@@ -14,7 +14,7 @@ class Socket {
   readyState = Socket.CONNECTING;
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
-  sent: { action: string; port?: string; config?: unknown }[] = [];
+  sent: { action: string; port?: string; config?: unknown; hosts?: SshHost[] }[] = [];
   constructor(url: string) { Socket.current = this; Socket.urls.push(url); }
   close() { this.readyState = 3; }
   open() { this.readyState = Socket.OPEN; this.onopen?.(); }
@@ -100,6 +100,61 @@ it("shows an SSH timeout on its own tab, retries in place, and releases a dismis
   await act(async () => socket.receive({ type: "acquired", port: ssh.name, config: DEFAULT_CONFIG, opened: true, holders: 1 }));
   expect(container.querySelector(".tab")).toBeNull();
   expect(socket.sent.filter((msg) => msg.action === "close")).toEqual([{ action: "close", port: ssh.name }]);
+});
+
+it("duplicates an SSH device as a new entry while leaving its saved password out of the form", async () => {
+  const original: SshHost = {
+    id: ssh.device!.id,
+    host: "192.0.2.20",
+    port: 2222,
+    username: "test",
+    nickname: "Lab",
+    auth: { type: "password", password: "fixture-password" },
+    allowLegacyMac: true,
+    endpoints: [{ name: "shell", type: "shell", alias: "Console" }],
+  };
+  await act(async () => socket.receive({ type: "ssh_hosts", hosts: [original] }));
+  const row = container.querySelector<HTMLElement>(".port-item-row--ssh")!;
+  const duplicate = async () => {
+    await act(async () => row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })));
+    const action = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.textContent === "复制设备")!;
+    await act(async () => action.click());
+    return container.querySelector<HTMLElement>('[aria-label="复制 SSH 设备"]')!;
+  };
+  let dialog = await duplicate();
+  const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "取消")!;
+  await act(async () => cancel.click());
+  expect(socket.sent.some((message) => message.action === "ssh_save")).toBe(false);
+
+  dialog = await duplicate();
+  const host = dialog.querySelector<HTMLInputElement>('[aria-label="主机"]')!;
+  const nickname = dialog.querySelector<HTMLInputElement>('[aria-label="昵称"]')!;
+  const password = dialog.querySelector<HTMLInputElement>('input[type="password"]')!;
+  const save = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "保存")!;
+  expect(host.value).toBe(original.host);
+  expect(document.activeElement).toBe(host);
+  expect([host.selectionStart, host.selectionEnd]).toEqual([0, original.host.length]);
+  expect(nickname.value).toBe("Lab 副本");
+  expect(password.value).toBe("");
+  expect(password.placeholder).toBe("留空沿用原设备密码");
+  expect(save.disabled).toBe(true);
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setValue.call(host, "192.0.2.21");
+    host.dispatchEvent(new Event("input", { bubbles: true }));
+    setValue.call(nickname, "Lab 2");
+    nickname.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(save.disabled).toBe(false);
+  await act(async () => save.click());
+  const saves = socket.sent.filter((message) => message.action === "ssh_save");
+  expect(saves).toHaveLength(1);
+  const [retained, copy] = saves[0].hosts!;
+  expect(retained).toEqual(original);
+  expect(copy.id).not.toBe(original.id);
+  expect(copy.id).not.toBe("");
+  expect(copy).toEqual({ ...original, id: copy.id, host: "192.0.2.21", nickname: "Lab 2" });
 });
 
 it("refocuses and selects the existing search query on every search shortcut", async () => {

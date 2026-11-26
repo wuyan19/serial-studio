@@ -782,16 +782,15 @@ export function SshManagerDialog({
   );
 }
 
-/** 独立 SSH 设备编辑弹窗：右键「编辑设备」/认证失败弹窗的「编辑设备」直达入口。
- *  表单被两处复用（管理列表内部切换 + 此处的独立打开），故从管理弹窗拆出——
- *  这里无列表可返，取消 = 关闭，保存 = 提交并关闭；用户意图是改这一台，不是浏览。 */
 export function SshEditDialog({
   host,
+  duplicate = false,
   existing,
   onCommit,
   onClose,
 }: {
   host: SshHost;
+  duplicate?: boolean;
   existing: SshHost[];
   onCommit: (host: SshHost, isNew: boolean) => void;
   onClose: () => void;
@@ -799,11 +798,12 @@ export function SshEditDialog({
   return (
     <SshHostForm
       initial={host}
+      duplicate={duplicate}
       existing={existing}
       onBack={onClose}
-      backLabel="关闭"
+      backLabel={duplicate ? "取消" : "关闭"}
       onSave={(h) => {
-        onCommit(h, false);
+        onCommit(h, duplicate);
         onClose();
       }}
     />
@@ -814,13 +814,14 @@ export function SshEditDialog({
  *  地址重复内联拦截（Enter 是 window 级监听，主操作必须自带校验防键盘路径绕过）。 */
 function SshHostForm({
   initial,
+  duplicate = false,
   existing,
   onBack,
   backLabel,
   onSave,
 }: {
-  /** 编辑时的原设备；添加为 null。 */
   initial: SshHost | null;
+  duplicate?: boolean;
   /** 既有设备（重复校验 user@host:port；编辑时排除自身）。 */
   existing: SshHost[];
   onBack: () => void;
@@ -828,20 +829,24 @@ function SshHostForm({
   backLabel: string;
   onSave: (host: SshHost) => void;
 }) {
-  const isEdit = initial !== null;
+  const isEdit = initial !== null && !duplicate;
+  const title = duplicate ? "复制 SSH 设备" : isEdit ? "编辑 SSH 设备" : "添加 SSH 设备";
   const [host, setHost] = useState(initial?.host ?? "");
   const [port, setPort] = useState(initial?.port ?? 22);
   const [username, setUsername] = useState(initial?.username ?? "root");
-  const [nickname, setNickname] = useState(initial?.nickname ?? "");
+  const originalNickname = initial?.nickname ?? "";
+  const [nickname, setNickname] = useState(
+    duplicate && originalNickname.trim() ? `${originalNickname.trim()} 副本` : originalNickname,
+  );
   const [authType, setAuthType] = useState<SshAuth["type"]>(initial?.auth.type ?? "key");
   const [keyPath, setKeyPath] = useState(
     initial?.auth.type === "key" ? initial.auth.keyPath : "~/.ssh/id_ed25519",
   );
   const [password, setPassword] = useState("");
   const [allowLegacyMac, setAllowLegacyMac] = useState(initial?.allowLegacyMac ?? false);
-  // 编辑且原认证为密码时才有已存密码；切到密码方式且无存货则必须输入
   const savedPassword = initial?.auth.type === "password" ? initial.auth.password : "";
-  const others = existing.filter((h) => h.id !== initial?.id);
+  const savedPasswordHint = duplicate ? "留空沿用原设备密码" : "已保存，留空不变";
+  const others = isEdit ? existing.filter((h) => h.id !== initial.id) : existing;
   const dup = host.trim() !== "" && others.some((h) => h.host === host.trim() && h.port === port && h.username === username.trim());
   const missingPassword = authType === "password" && password === "" && savedPassword === "";
   const invalid =
@@ -859,37 +864,39 @@ function SshHostForm({
           ? { type: "agent" }
           : { type: "password", password: password !== "" ? password : savedPassword };
     onSave({
-      id: initial?.id ?? "",
+      id: isEdit ? initial.id : "",
       host: host.trim(),
       port,
       username: username.trim(),
       nickname: nickname.trim() || undefined,
       auth,
       allowLegacyMac: allowLegacyMac || undefined,
-      // 端点不随设备表单编辑（v1 只读）；编辑保留原值，新建给默认
       endpoints: initial?.endpoints ?? [{ name: "shell", type: "shell" }],
     });
   };
   useDialogKeys({ onClose: onBack, onEnter: save });
   const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogA11y(dialogRef);
+  const hostInputRef = useRef<HTMLInputElement>(null);
+  useDialogA11y(dialogRef, hostInputRef);
   return (
     <div className="dialog-overlay">
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={isEdit ? "编辑 SSH 设备" : "添加 SSH 设备"}
+        aria-label={title}
         className="dialog dialog--narrow"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="dialog__title">
-          <IconSsh /> {isEdit ? "编辑 SSH 设备" : "添加 SSH 设备"}
+          <IconSsh /> {title}
         </h3>
         <div className="dialog__sub">远程主机的 SSH 终端</div>
         <ConfigRow label="主机">
           <input
-            autoFocus
+            ref={hostInputRef}
+            aria-label="主机"
+            onFocus={duplicate ? (event) => event.currentTarget.select() : undefined}
             value={host}
             onChange={(e) => setHost(e.target.value)}
             placeholder="192.168.1.100"
@@ -923,6 +930,7 @@ function SshHostForm({
         </ConfigRow>
         <ConfigRow label="昵称">
           <input
+            aria-label="昵称"
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
             placeholder="可选，如「车间网关」"
@@ -965,7 +973,7 @@ function SshHostForm({
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={savedPassword ? "已保存，留空不变" : "输入密码"}
+                placeholder={savedPassword ? savedPasswordHint : "输入密码"}
                 className="field"
                 autoComplete="new-password"
               />
@@ -979,7 +987,7 @@ function SshHostForm({
         </label>
         {dup && (
           <p className="dialog__hint" style={{ color: "var(--danger)" }}>
-            已存在相同设备 {username.trim()}@{host.trim()}:{port}，无需重复添加。
+            {duplicate ? "请修改主机、端口或用户名后保存。" : `已存在相同设备 ${username.trim()}@${host.trim()}:${port}，无需重复添加。`}
           </p>
         )}
         <div className="btn-row">
