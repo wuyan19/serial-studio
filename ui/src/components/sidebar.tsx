@@ -120,7 +120,7 @@ export function PortsPanel({
   /** 右键菜单「设备详情」:打开该设备的只读详情弹窗(远程/SSH/本机三类卡)。 */
   onShowDeviceDetail: (target: DeviceDetailTarget) => void;
   /** SSH 设备卡菜单动作（connect=新建终端 / edit=打开管理弹窗编辑 / delete=删除）。 */
-  onSshAction: (devId: string, action: "connect" | "edit" | "delete") => void;
+  onSshAction: (devId: string, action: "connect" | "edit" | "duplicate" | "delete") => void;
   readOnlySsh?: boolean;
   onNewSshTerminal: (pid: PortId) => void;
   /** SSH 实例行 ✕:关闭该终端(本地 release;多人共享时他人不受影响)。 */
@@ -229,6 +229,7 @@ export function PortsPanel({
       { label: "设备详情", onSelect: () => onShowDeviceDetail(group.external && group.meta ? { kind: "meta", device: group.meta } : { kind: "ssh", devId: group.devId }) },
       ...(!group.external && !readOnlySsh ? [
         { label: "编辑设备", onSelect: () => onSshAction(group.devId, "edit") },
+        { label: "复制设备", onSelect: () => onSshAction(group.devId, "duplicate") },
         { label: "删除设备", onSelect: () => onSshAction(group.devId, "delete") },
       ] : []),
       ...(selected ? portMenuItems(selected) : []),

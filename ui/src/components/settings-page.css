@@ -18,7 +18,10 @@
 .dlg-settings .dlg-settings__titlebar .dlg-settings__btn:hover { color: var(--ink); background: var(--surface-2); }
 .dlg-settings .dlg-settings__toolbar { padding: 12px 20px; }
 .dlg-settings .dlg-settings__toc {
-  flex-basis: 166px;
+  flex-basis: auto;
+  inline-size: max-content;
+  min-inline-size: min(166px, 50%);
+  max-inline-size: 50%;
   padding: 16px 10px;
   gap: 5px;
   background: color-mix(in srgb, var(--term-bg) 25%, var(--surface));
@@ -26,7 +29,8 @@
 .dlg-settings .dlg-settings__toc-item { min-height: 38px; padding: 8px 12px; justify-content: flex-start; border-radius: 6px; }
 .dlg-settings .dlg-settings__toc-item svg { width: 17px; height: 17px; flex-shrink: 0; }
 .dlg-settings .dlg-settings__toc-item[data-active="true"] { background: var(--surface-2); }
-.dlg-settings .dlg-settings__toc-count { margin-left: auto; }
+.dlg-settings .dlg-settings__toc-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg-settings .dlg-settings__toc-count { margin-left: auto; flex-shrink: 0; }
 .dlg-settings .dlg-settings__list { padding: 24px 28px 32px; }
 .dlg-settings .dlg-settings__cat-title { font-size: var(--fs-lg); }
 .dlg-settings .dlg-settings__cat-desc { border-bottom: 0; margin: 8px 0 20px; padding-bottom: 0; line-height: 1.65; }
@@ -85,7 +89,7 @@
 .dlg-settings .settings-about { margin-top: 0; }
 @media (max-width: 680px) {
   .dlg-settings.dlg-settings--compact { width: calc(100vw - 24px); max-width: calc(100vw - 24px); height: calc(100dvh - 40px); max-height: calc(100dvh - 40px); }
-  .dlg-settings .dlg-settings__toc { flex-basis: 118px; padding: 12px 6px; }
+  .dlg-settings .dlg-settings__toc { min-inline-size: min(118px, 50%); padding: 12px 6px; }
   .dlg-settings .dlg-settings__toc-item { padding: 8px; gap: 6px; }
   .dlg-settings .dlg-settings__list { padding: 20px 16px 28px; }
   .dlg-settings .settings-row { display: block; }

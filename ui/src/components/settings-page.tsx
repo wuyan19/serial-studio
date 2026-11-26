@@ -229,7 +229,7 @@ export function SettingsPage({
                 data-active={!queryActive && c.id === active ? "true" : undefined}
                 onClick={() => { setQuery(""); setActive(c.id); }}
               >
-                {CATEGORY_ICONS[c.id]}<span>{c.label}</span>
+                {CATEGORY_ICONS[c.id]}<span className="dlg-settings__toc-label" title={c.label}>{c.label}</span>
                 {queryActive && <span className="dlg-settings__toc-count">{hitCount(c)}</span>}
               </button>
             ))}
